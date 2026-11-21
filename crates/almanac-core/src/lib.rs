@@ -13,6 +13,12 @@
 //! time and the live surface probed at check time, and classifies
 //! every divergence by the severity defined here.
 
+pub mod baseline;
+pub mod catalog;
+pub mod drift;
+pub mod hash;
+pub mod snapshot;
+
 use serde::{Deserialize, Serialize};
 
 /// How serious a drift finding is.
@@ -21,9 +27,7 @@ use serde::{Deserialize, Serialize};
 /// publisher's configured fail severity, which defaults to
 /// [`Severity::Major`]. `Critical` findings always fail and cannot
 /// be lowered by configuration.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Severity {
     /// Report only. The publisher hears about it and nothing fails.

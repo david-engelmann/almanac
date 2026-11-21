@@ -6,10 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Core library for almanac, the drift gate for agent discovery catalogs. Catalog model, generation rules, baseline format and drift logic, free of network and filesystem code."
 repository = "https://github.com/david-engelmann/almanac"
-homepage = "https://github.com/david-engelmann/almanac"
 readme = "../../README.md"
 keywords = ["ard", "agent-discovery", "mcp", "drift", "ci"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"

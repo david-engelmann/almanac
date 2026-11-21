@@ -59,3 +59,14 @@ Key registration returned 403 on that day because the repo is not
 yet in the token's repository access list, so registration holds
 until David's credential scope act lands, in the same pattern as
 the other seats.
+
+## Dependencies beyond the starting set (2026-11-21)
+
+The design record allows serde, serde_json and a small HTTP
+client, and asks for a written reason for anything else. Two
+additions carry theirs. sha2, in the core crate, because digest
+binding is a requirement of the ARD draft itself and the hashes
+are the baseline's evidence; a hand rolled SHA-256 would be the
+riskiest code in the repo. ureq with rustls, in the CLI crate,
+is the small HTTP client the design names, blocking and free of
+an async runtime.

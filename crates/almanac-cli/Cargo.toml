@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 description = "Command line interface for almanac, the drift gate for agent discovery catalogs."
 repository = "https://github.com/david-engelmann/almanac"
-homepage = "https://github.com/david-engelmann/almanac"
 readme = "../../README.md"
 keywords = ["ard", "agent-discovery", "mcp", "drift", "ci"]
 categories = ["command-line-utilities"]
@@ -17,3 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 almanac-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "3", features = ["rustls", "json"] }

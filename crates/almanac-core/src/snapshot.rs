@@ -1,0 +1,161 @@
+//! The surface snapshot, the one value every probe produces.
+//!
+//! A probe, stdio or Streamable HTTP, walks a live MCP surface and
+//! returns this value. The drift engine compares snapshots against
+//! the baseline and the published catalog without knowing which
+//! transport produced them, and every comparison stays in this
+//! crate, testable without a network.
+//!
+//! The authenticated path from docs/HTTP-TRANSPORT.md lands here as
+//! data. A protected surface classifies as [`AuthSurface::Protected`]
+//! and carries the OAuth metadata documents it published, reduced
+//! to the fields the drift model compares plus a hash over each
+//! document's canonical bytes.
+
+use serde::{Deserialize, Serialize};
+
+/// One probed MCP surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceSnapshot {
+    /// "stdio" or "streamable-http".
+    pub transport: String,
+    pub server_name: String,
+    pub server_version: String,
+    /// The negotiated MCP protocol version, recorded because a
+    /// server that renegotiates its protocol has changed its
+    /// surface.
+    pub protocol_version: String,
+    pub tools: Vec<ToolSurface>,
+    /// Resource URIs, sorted by the probe.
+    pub resources: Vec<String>,
+    /// Prompt names, sorted by the probe.
+    pub prompts: Vec<String>,
+    pub auth: AuthSurface,
+    /// Set when the probe could not complete. The step names where
+    /// it stopped. A snapshot with a failure still carries whatever
+    /// the probe learned before it, and the drift engine decides
+    /// what the failure means.
+    pub failure: Option<ProbeFailure>,
+}
+
+/// One tool as served.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolSurface {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// Where a probe stopped and how.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeFailure {
+    /// The probe step, for example "initialize" or "tools/list".
+    pub step: String,
+    /// What happened, an HTTP status, a JSON-RPC error, a timeout.
+    pub detail: String,
+}
+
+/// The authentication posture of a probed surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AuthSurface {
+    /// The handshake completed without a credential.
+    Open,
+    /// The handshake was answered 401. The metadata is what the
+    /// surface published about its authorization, fetched by the
+    /// probe's metadata ladder, and boxed because a protected
+    /// surface is the cold path of a probe.
+    Protected(Box<ProtectedMetadata>),
+}
+
+/// The OAuth metadata behind a protected surface. Either document
+/// may be absent, and that absence is itself recorded, because a
+/// server that gains or loses its metadata has changed its auth
+/// surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtectedMetadata {
+    pub resource_metadata: Option<MetadataRecord>,
+    pub authorization_servers: Vec<MetadataRecord>,
+}
+
+/// One OAuth metadata document, reduced to the compared fields.
+/// The hash runs over the document's canonical bytes, so a key
+/// reordering is not drift and any real change is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetadataRecord {
+    /// The URL the document was fetched from.
+    pub url: String,
+    pub sha256: String,
+    pub issuer: Option<String>,
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub jwks_uri: Option<String>,
+    /// Sorted. Empty when the document names no scopes.
+    pub scopes_supported: Vec<String>,
+    /// The protected resource value, on resource metadata.
+    pub resource: Option<String>,
+}
+
+impl MetadataRecord {
+    /// Reduce a fetched metadata document to a record. The CLI
+    /// fetches the document, this crate owns the reduction, so the
+    /// field choices live with the drift model that reads them.
+    pub fn from_document(url: &str, document: &serde_json::Value) -> Self {
+        let text = |key: &str| {
+            document
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let mut scopes: Vec<String> = document
+            .get("scopes_supported")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        scopes.sort();
+        MetadataRecord {
+            url: url.to_string(),
+            sha256: crate::hash::sha256_json(document),
+            issuer: text("issuer"),
+            authorization_endpoint: text("authorization_endpoint"),
+            token_endpoint: text("token_endpoint"),
+            jwks_uri: text("jwks_uri"),
+            scopes_supported: scopes,
+            resource: text("resource"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_reduction_extracts_and_hashes() {
+        let doc = serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "jwks_uri": "https://auth.example.com/jwks",
+            "scopes_supported": ["write", "read"],
+            "resource": "https://api.example.com/mcp"
+        });
+        let record = MetadataRecord::from_document("https://auth.example.com/meta", &doc);
+        assert_eq!(record.issuer.as_deref(), Some("https://auth.example.com"));
+        assert_eq!(record.scopes_supported, vec!["read", "write"]);
+        assert_eq!(record.sha256.len(), 64);
+    }
+
+    #[test]
+    fn metadata_key_order_is_not_drift() {
+        let a = serde_json::json!({"issuer": "https://a.example", "resource": "https://r.example"});
+        let b = serde_json::json!({"resource": "https://r.example", "issuer": "https://a.example"});
+        let ra = MetadataRecord::from_document("https://a.example/m", &a);
+        let rb = MetadataRecord::from_document("https://a.example/m", &b);
+        assert_eq!(ra.sha256, rb.sha256);
+    }
+}
