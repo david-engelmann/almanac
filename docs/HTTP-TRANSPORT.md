@@ -71,7 +71,12 @@ One probe run against one MCP entry proceeds in this order.
    protocol version the probe supports. Record the HTTP status,
    the response media type, the session id header if present and
    the negotiated protocolVersion and serverInfo from the result.
-3. POST notifications/initialized, expecting 202 with no body.
+3. POST notifications/initialized, expecting 202 with no body. As
+   built in milestone one, a 401 answer to the notification routes
+   the run to the metadata ladder below, because the surface is
+   protected after all. Every other answer is ignored, because a
+   refused notification on a working surface is the server's quirk,
+   not drift.
 4. POST tools/list. Follow pagination cursors until the set is
    complete. A partial tool set is a wrong tool set, and a checker
    that compares against half a surface manufactures drift.
@@ -97,6 +102,17 @@ records which step failed and how, an HTTP status, a JSON-RPC
 error, a timeout, a malformed body. The core decides what that
 means. An announced server that cannot complete initialize is the
 critical handshake failure DESIGN.md section 6 already defines.
+
+Resolution, as built in milestone one (2026-11-21). Step 1 has a
+tension inside the design record, because the catalog entry for an
+MCP server names its server card rather than the endpoint itself.
+The resolution is a chain of the catalog's own references. The
+card the generator writes carries the endpoint it probed, and a
+check with no target named reads the card the entry names and
+takes the endpoint from it. A card without an endpoint, or one
+the checker cannot read on the site, resolves nothing, and the
+run falls back to repo mode rather than guessing. A target the
+operator names always wins over the resolved one.
 
 ## The authenticated path
 
@@ -154,6 +170,10 @@ in the snapshot with its target, and the probe does not silently
 follow a cross origin redirect of the endpoint, because an
 announced endpoint that forwards agents elsewhere is a surface
 change the publisher should see named, not a detail to absorb.
+Metadata fetches are the opposite case. They follow up to three
+redirects, because a metadata document behind a redirect would
+otherwise read as absent, and absence is a fact the drift model
+acts on.
 
 What the probe never does in this milestone. It holds no
 credential, runs no authorization flow and presents no token. The

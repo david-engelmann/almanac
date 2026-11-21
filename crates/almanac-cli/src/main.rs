@@ -61,9 +61,14 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             break;
         }
         let value = |i: usize| -> Result<String, String> {
-            args.get(i + 1)
+            let v = args
+                .get(i + 1)
                 .cloned()
-                .ok_or_else(|| format!("{arg} needs a value"))
+                .ok_or_else(|| format!("{arg} needs a value"))?;
+            if v.starts_with("--") {
+                return Err(format!("{arg} expects a value, got {v}"));
+            }
+            Ok(v)
         };
         match arg {
             "--site" => flags.site = Some(value(i)?),
@@ -82,12 +87,15 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
     Ok(flags)
 }
 
-fn target(flags: &Flags) -> Result<ProbeTarget, String> {
+/// The target the operator named, when they named one. Check
+/// runs without one, resolving the endpoint from the catalog or
+/// falling back to repo mode. Generate requires one.
+fn target(flags: &Flags) -> Result<Option<ProbeTarget>, String> {
     match (&flags.url, flags.command.is_empty()) {
-        (Some(url), true) => Ok(ProbeTarget::Http(url.clone())),
-        (None, false) => Ok(ProbeTarget::Stdio(flags.command.clone())),
+        (Some(url), true) => Ok(Some(ProbeTarget::Http(url.clone()))),
+        (None, false) => Ok(Some(ProbeTarget::Stdio(flags.command.clone()))),
         (Some(_), false) => Err("give either --url or --command, not both".into()),
-        (None, true) => Err("a surface target is required, --url or --command".into()),
+        (None, true) => Ok(None),
     }
 }
 
@@ -119,7 +127,8 @@ fn run() -> Result<i32, String> {
                 .as_deref()
                 .ok_or("--domain is required for generate")?;
             let name = flags.name.as_deref().unwrap_or(domain);
-            let target = target(&flags)?;
+            let target =
+                target(&flags)?.ok_or("generate needs a surface target, --url or --command")?;
             let skill = flags.skill.as_deref().map(PathBuf::from);
             site::generate(
                 &site,
@@ -136,7 +145,7 @@ fn run() -> Result<i32, String> {
             let flags = parse_flags(&args[1..])?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let target = target(&flags)?;
-            site::check(&site, &target, fail_at(&flags)?)
+            site::check(&site, target.as_ref(), fail_at(&flags)?)
         }
         "validate" | "migrate" => Err(format!(
             "almanac {command} is not yet implemented. Generate and check land first, \

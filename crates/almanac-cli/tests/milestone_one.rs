@@ -85,6 +85,26 @@ fn check_stdio(site: &Path, fixture: &Path) -> (i32, String, String) {
     ])
 }
 
+fn generate_stdio_with_skill(
+    site: &Path,
+    fixture: &Path,
+    skill_file: &Path,
+) -> (i32, String, String) {
+    run(&[
+        "generate",
+        "--site",
+        &site_arg(site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--skill",
+        &skill_file.to_string_lossy(),
+        "--command",
+        &fixture.to_string_lossy(),
+    ])
+}
+
 #[test]
 fn stdio_clean_then_source_level_rename() {
     let site = temp_site("stdio");
@@ -123,19 +143,7 @@ fn skill_digest_and_path_breaks() {
     )
     .expect("skill file");
     let clean = fixture_binary("fixture_server");
-    let (code, _, stderr) = run(&[
-        "generate",
-        "--site",
-        &site_arg(&site),
-        "--domain",
-        "example.com",
-        "--name",
-        "Example",
-        "--skill",
-        &skill_file.to_string_lossy(),
-        "--command",
-        &clean.to_string_lossy(),
-    ]);
+    let (code, _, stderr) = generate_stdio_with_skill(&site, &clean, &skill_file);
     assert_eq!(code, 0, "generate failed with {stderr}");
     let (code, _, _) = check_stdio(&site, &clean);
     assert_eq!(code, 0);
@@ -153,20 +161,7 @@ fn skill_digest_and_path_breaks() {
     );
     let (code, _, _) = generate_stdio(&site, &clean);
     assert_eq!(code, 0);
-    let skill_arg = skill_file.to_string_lossy().to_string();
-    let (code, _, _) = run(&[
-        "generate",
-        "--site",
-        &site_arg(&site),
-        "--domain",
-        "example.com",
-        "--name",
-        "Example",
-        "--skill",
-        &skill_arg,
-        "--command",
-        &clean.to_string_lossy(),
-    ]);
+    let (code, _, _) = generate_stdio_with_skill(&site, &clean, &skill_file);
     assert_eq!(code, 0);
 
     // A served artifact that no longer matches its entry digest is
@@ -182,19 +177,7 @@ fn skill_digest_and_path_breaks() {
     // A missing legacy path is a broken pair.
     let (code, _, _) = generate_stdio(&site, &clean);
     assert_eq!(code, 0);
-    let (code, _, _) = run(&[
-        "generate",
-        "--site",
-        &site_arg(&site),
-        "--domain",
-        "example.com",
-        "--name",
-        "Example",
-        "--skill",
-        &skill_arg,
-        "--command",
-        &clean.to_string_lossy(),
-    ]);
+    let (code, _, _) = generate_stdio_with_skill(&site, &clean, &skill_file);
     assert_eq!(code, 0);
     std::fs::remove_file(site.join(".well-known/ai-catalog.json")).expect("remove legacy");
     let (code, stdout, _) = check_stdio(&site, &clean);
@@ -263,14 +246,14 @@ fn start_http_fixture() -> (String, Mode) {
     (format!("http://127.0.0.1:{port}/mcp"), mode)
 }
 
-fn read_request(stream: &mut std::net::TcpStream) -> (String, String, String) {
+fn read_request(stream: &mut std::net::TcpStream) -> (String, String, String, String) {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end;
     loop {
         let n = stream.read(&mut chunk).unwrap_or(0);
         if n == 0 {
-            return (String::new(), String::new(), String::new());
+            return (String::new(), String::new(), String::new(), String::new());
         }
         buffer.extend_from_slice(&chunk[..n]);
         if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -302,7 +285,12 @@ fn read_request(stream: &mut std::net::TcpStream) -> (String, String, String) {
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
-    (method, path, String::from_utf8_lossy(&body).to_string())
+    (
+        method,
+        path,
+        headers.to_lowercase(),
+        String::from_utf8_lossy(&body).to_string(),
+    )
 }
 
 fn respond(
@@ -321,7 +309,7 @@ fn respond(
 }
 
 fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
-    let (method, path, body) = read_request(stream);
+    let (method, path, headers, body) = read_request(stream);
     let mode = mode.lock().expect("mode lock").clone();
     let origin = format!("http://127.0.0.1:{port}");
     match (method.as_str(), path.as_str()) {
@@ -342,8 +330,13 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
             } else {
                 serde_json::json!(["read", "write"])
             };
+            let issuer = if mode == "auth-issuer-changed" {
+                "https://issuer.example/other".to_string()
+            } else {
+                origin.clone()
+            };
             let doc = serde_json::json!({
-                "issuer": origin,
+                "issuer": issuer,
                 "authorization_endpoint": format!("{origin}/authorize"),
                 "token_endpoint": format!("{origin}/token"),
                 "jwks_uri": format!("{origin}/jwks"),
@@ -362,23 +355,86 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
             let request: serde_json::Value =
                 serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
             let method_name = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            // Session strict. The fixture issues a session id at
+            // initialize and refuses later calls that do not echo
+            // it, so the suite catches a probe that stops echoing.
+            if method_name != "initialize" && !headers.contains("mcp-session-id: fixture-session") {
+                respond(
+                    stream,
+                    400,
+                    "application/json",
+                    "",
+                    "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"missing session id\"}}",
+                );
+                return;
+            }
             let id = request.get("id").cloned();
             let Some(id) = id else {
                 respond(stream, 202, "text/plain", "", "");
                 return;
             };
+            let cursor = request
+                .get("params")
+                .and_then(|p| p.get("cursor"))
+                .and_then(|c| c.as_str())
+                .map(String::from);
             let payload = match method_name {
-                "initialize" => serde_json::json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "serverInfo": {"name": "telorama", "version": "0.1.0"}
+                "initialize" => {
+                    let version = if mode == "open-version" {
+                        "0.2.0"
+                    } else {
+                        "0.1.0"
+                    };
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "serverInfo": {"name": "telorama", "version": version}
+                        }
+                    })
+                }
+                "tools/list" if mode == "open-paged" => {
+                    let all = fixture_tools("open-clean");
+                    let items = all.as_array().expect("tools array");
+                    match cursor.as_deref() {
+                        None => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {"tools": items[..4].to_vec(), "nextCursor": "page2"}
+                        }),
+                        Some("page2") => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {"tools": items[4..].to_vec()}
+                        }),
+                        _ => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "error": {"code": -32602, "message": "bad cursor"}
+                        }),
                     }
-                }),
+                }
+                "tools/list" if mode == "open-loop" => {
+                    let page: usize = cursor
+                        .as_deref()
+                        .and_then(|c| c.strip_prefix('p'))
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    let all = fixture_tools("open-clean");
+                    let items = all.as_array().expect("tools array");
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "tools": [items[0].clone()],
+                            "nextCursor": format!("p{}", page + 1)
+                        }
+                    })
+                }
                 "tools/list" => serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {"tools": fixture_tools(&mode)}
+                }),
+                "resources/list" if mode == "open-resources" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {"resources": []}
                 }),
                 "resources/list" => serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
@@ -389,6 +445,19 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
                     "error": {"code": -32601, "message": "method not found"}
                 }),
             };
+            if method_name == "tools/list" && mode == "open-sse" {
+                // The event stream framing, with the format's
+                // canonical CRLF line endings.
+                let frame = format!("event: message\r\ndata: {payload}\r\n\r\n");
+                respond(
+                    stream,
+                    200,
+                    "text/event-stream",
+                    "Mcp-Session-Id: fixture-session\r\n",
+                    &frame,
+                );
+                return;
+            }
             respond(
                 stream,
                 200,
@@ -453,19 +522,10 @@ fn http_clean_then_planted_breaks() {
     );
 }
 
-#[test]
-fn auth_ladder_and_metadata_breaks() {
-    let (url, mode) = start_http_fixture();
-    let origin = url.strip_suffix("/mcp").expect("origin").to_string();
-    let site = temp_site("auth");
-
-    // Baseline from the open surface first.
-    let (code, _, stderr) = generate_http(&site, &url);
-    assert_eq!(code, 0, "generate failed with {stderr}");
-
-    // Patch the baseline's auth record from the fixture's real
-    // metadata documents, through the core reduction.
-    *mode.lock().expect("mode") = "auth-clean".to_string();
+/// Patch a generated baseline's auth record from the fixture's
+/// real metadata documents, through the core reduction, the way
+/// protected generation will do it in a later milestone.
+fn patch_auth_baseline(site: &Path, origin: &str) {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .build()
@@ -500,6 +560,29 @@ fn auth_ladder_and_metadata_breaks() {
         serde_json::to_string_pretty(&baseline).expect("serialize"),
     )
     .expect("write baseline");
+}
+
+#[test]
+fn auth_ladder_and_metadata_breaks() {
+    let (url, mode) = start_http_fixture();
+    let origin = url.strip_suffix("/mcp").expect("origin").to_string();
+    let site = temp_site("auth");
+
+    // Baseline from the open surface first.
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // The open baseline against the now protected surface is a
+    // posture flip, major authentication drift.
+    *mode.lock().expect("mode") = "auth-clean".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "posture flip must fail, report was {stdout}");
+    assert!(
+        stdout.contains("authentication-changed"),
+        "report was {stdout}"
+    );
+
+    patch_auth_baseline(&site, &origin);
 
     // Clean protected run, declared evidence only, exit 0.
     let (code, stdout, stderr) = check_http(&site, &url);
@@ -531,4 +614,255 @@ fn auth_ladder_and_metadata_breaks() {
         stdout.contains("authentication-changed"),
         "report was {stdout}"
     );
+
+    // A changed issuer in the metadata is major drift, named by
+    // field.
+    *mode.lock().expect("mode") = "auth-issuer-changed".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "issuer change must fail, report was {stdout}");
+    assert!(
+        stdout.contains("authentication-changed"),
+        "report was {stdout}"
+    );
+    assert!(stdout.contains("issuer"), "report was {stdout}");
+}
+
+// ----------------------------------------------------------------
+// The checkpoint fix pass. Each test below answers one review
+// finding, and each can fail for the reason its finding named.
+
+#[test]
+fn http_sse_pagination_version_and_resource_breaks() {
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("http2");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // The event stream framing, CRLF and all, reads clean.
+    *mode.lock().expect("mode") = "open-sse".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "SSE framed check failed with {stdout}");
+
+    // The same surface over two pages reads clean.
+    *mode.lock().expect("mode") = "open-paged".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "paged check failed with {stdout}");
+
+    // A server that pages forever fails the step, never hangs.
+    *mode.lock().expect("mode") = "open-loop".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "endless paging must fail, report was {stdout}");
+    assert!(
+        stdout.contains("pagination did not terminate"),
+        "report was {stdout}"
+    );
+
+    // A version change is major drift.
+    *mode.lock().expect("mode") = "open-version".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "version change must fail, report was {stdout}");
+    assert!(
+        stdout.contains("server-version-changed"),
+        "report was {stdout}"
+    );
+
+    // A resource set change is major drift.
+    *mode.lock().expect("mode") = "open-resources".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "resource change must fail, report was {stdout}");
+    assert!(
+        stdout.contains("resource-set-changed"),
+        "report was {stdout}"
+    );
+}
+
+#[test]
+fn unreachable_is_exit_1_and_unparseable_is_exit_2() {
+    let site = temp_site("exits");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // An announced server that does not answer is drift at
+    // critical severity, exit 1, never a could-not-run.
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--url",
+        "http://127.0.0.1:1/mcp",
+    ]);
+    assert_eq!(code, 1, "unreachable must exit 1, report was {stdout}");
+    assert!(stdout.contains("server-unreachable"), "report was {stdout}");
+
+    // A catalog that does not parse is a check that could not
+    // run, exit 2.
+    std::fs::write(site.join(".well-known/ard.json"), "not json").expect("corrupt catalog");
+    let (code, _, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 2, "unparseable catalog must exit 2");
+}
+
+#[test]
+fn repo_mode_phantom_tool_and_legacy_only() {
+    let site = temp_site("repomode");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // Repo mode, no target named, runs the offline comparisons
+    // and passes a coherent site.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "repo mode check failed with {stdout}");
+    assert!(stdout.contains("\"mode\": \"repo\""), "report was {stdout}");
+
+    // A phantom tool announced by the catalog pair, in repo mode
+    // and in live mode alike, is critical divergence. This is
+    // the red team's lying catalog, and it must not pass.
+    for path in [".well-known/ard.json", ".well-known/ai-catalog.json"] {
+        let full = site.join(path);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&full).expect("catalog")).expect("parses");
+        catalog["entries"][0]["capabilities"]
+            .as_array_mut()
+            .expect("capabilities")
+            .push(serde_json::json!("evil_tool"));
+        std::fs::write(
+            &full,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&catalog).expect("serialize")
+            ),
+        )
+        .expect("write catalog");
+    }
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 1, "phantom must fail repo mode, report was {stdout}");
+    assert!(
+        stdout.contains("catalog-baseline-divergence"),
+        "report was {stdout}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "phantom must fail live mode, report was {stdout}");
+    assert!(
+        stdout.contains("catalog-baseline-divergence"),
+        "report was {stdout}"
+    );
+
+    // A site on the legacy path alone gets the major class the
+    // design record defines for it, exit 1, not a silent exit 2.
+    let (code, _, _) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0);
+    std::fs::remove_file(site.join(".well-known/ard.json")).expect("remove current path");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "legacy only must exit 1, report was {stdout}");
+    assert!(
+        stdout.contains("legacy-only-catalog"),
+        "report was {stdout}"
+    );
+}
+
+#[test]
+fn suppression_holds_then_expires() {
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("suppress");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    *mode.lock().expect("mode") = "open-schema".to_string();
+    let (code, _, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "schema change fails before any suppression");
+
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[suppress]]\nkind = \"tool-schema-changed\"\nreason = \"known and accepted for this test\"\nexpires = \"2999-01-01\"\n",
+    )
+    .expect("write config");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "suppressed check must pass, report was {stdout}");
+
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[suppress]]\nkind = \"tool-schema-changed\"\nreason = \"known and accepted for this test\"\nexpires = \"2000-01-01\"\n",
+    )
+    .expect("write expired config");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(
+        code, 1,
+        "expired suppression must fail, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("suppression-expired"),
+        "report was {stdout}"
+    );
+    assert!(
+        stdout.contains("tool-schema-changed"),
+        "report was {stdout}"
+    );
+
+    // A suppression without a reason is a configuration error,
+    // and the check does not run.
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[suppress]]\nkind = \"tool-schema-changed\"\nreason = \"\"\nexpires = \"2999-01-01\"\n",
+    )
+    .expect("write reasonless config");
+    let (code, _, _) = check_http(&site, &url);
+    assert_eq!(code, 2, "a reasonless suppression must exit 2");
+}
+
+#[test]
+fn unannounced_skill_file_is_critical() {
+    let site = temp_site("sneaky");
+    let skill_dir = temp_site("sneaky-src");
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: demo-skill\ndescription: A demo skill.\n---\n\nDo the demo thing.\n",
+    )
+    .expect("skill file");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio_with_skill(&site, &clean, &skill_file);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let (code, _, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0);
+
+    let sneaky = site.join("skills/sneaky-skill");
+    std::fs::create_dir_all(&sneaky).expect("sneaky dir");
+    std::fs::write(sneaky.join("SKILL.md"), "Do something unannounced.\n").expect("sneaky skill");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "unannounced skill must fail, report was {stdout}");
+    assert!(
+        stdout.contains("unannounced-skill-served"),
+        "report was {stdout}"
+    );
+}
+
+#[test]
+fn card_divergence_in_declared_mode() {
+    let (url, mode) = start_http_fixture();
+    let origin = url.strip_suffix("/mcp").expect("origin").to_string();
+    let site = temp_site("card");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    *mode.lock().expect("mode") = "auth-clean".to_string();
+    patch_auth_baseline(&site, &origin);
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean declared check failed with {stdout}");
+
+    // A card that stops naming one of the baseline's tools is
+    // critical divergence in declared evidence mode.
+    let card_path = site.join(".well-known/mcp/server-card.json");
+    let mut card: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&card_path).expect("card")).expect("card parses");
+    card["tools"].as_array_mut().expect("tools").pop();
+    std::fs::write(
+        &card_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&card).expect("serialize")
+        ),
+    )
+    .expect("write card");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "card divergence must fail, report was {stdout}");
+    assert!(stdout.contains("card-divergence"), "report was {stdout}");
 }

@@ -25,6 +25,25 @@ pub struct Baseline {
     /// the catalog entry carries, for digest drift checks that run
     /// from the catalog alone.
     pub artifacts: Vec<ArtifactBaseline>,
+    /// Per entry provenance. Which input produced the entry, and
+    /// which inputs it overruled on the way.
+    pub provenance: Vec<EntryProvenance>,
+}
+
+/// Which input produced one entry, and which inputs were
+/// overruled. The design record's precedence rules make some
+/// inputs win over others, and the baseline remembers the result
+/// of each contest, so a later reader can see why an entry says
+/// what it says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntryProvenance {
+    pub entry_id: String,
+    /// The producing input, for example "live-probe" or
+    /// "skill-file".
+    pub produced_by: String,
+    /// Inputs whose values for this entry lost to the winner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overruled: Vec<String>,
 }
 
 /// What generation recorded about one MCP server.
@@ -39,8 +58,6 @@ pub struct McpBaseline {
     pub tools: BTreeMap<String, ToolBaseline>,
     pub resources: Vec<String>,
     pub prompts: Vec<String>,
-    /// Hash of the server card as generated or served.
-    pub card_sha256: Option<String>,
     /// The auth posture at generation time, with metadata records.
     pub auth: AuthBaseline,
 }
@@ -109,7 +126,6 @@ impl McpBaseline {
             tools,
             resources: snapshot.resources.clone(),
             prompts: snapshot.prompts.clone(),
-            card_sha256: None,
             auth: AuthBaseline::from(&snapshot.auth),
         }
     }
@@ -127,6 +143,7 @@ mod tests {
             server_name: "demo".into(),
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
             tools: vec![ToolSurface {
                 name: "ping".into(),
                 description: "Ping the server.".into(),
@@ -139,7 +156,14 @@ mod tests {
         };
         let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
         let tool = baseline.tools.get("ping").expect("tool recorded");
-        assert_eq!(tool.description_sha256.len(), 64);
+        assert_eq!(
+            tool.description_sha256,
+            crate::hash::sha256_str("Ping the server.")
+        );
+        assert_eq!(
+            tool.schema_sha256,
+            crate::hash::sha256_json(&serde_json::json!({"type": "object"}))
+        );
         assert_eq!(baseline.server_name, "demo");
     }
 }

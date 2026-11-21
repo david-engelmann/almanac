@@ -8,12 +8,14 @@
 //!
 //! The engine is a pure function. The CLI gathers the inputs, file
 //! bytes for the catalog pair and the baseline, current hashes for
-//! the artifacts and skill files the site serves, and one snapshot
-//! from a probe, and this module decides.
+//! the artifacts and skill files the site serves, one snapshot from
+//! a probe when the run has a live target, and this module decides.
+//! With no snapshot the run is repo mode, and every comparison that
+//! needs no network still runs.
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Severity;
 use crate::baseline::{AuthBaseline, Baseline};
@@ -25,26 +27,60 @@ use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
 pub struct Finding {
     pub severity: Severity,
     pub kind: String,
+    /// The catalog entry the finding belongs to, when it belongs
+    /// to one entry rather than to the catalog as a whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
     pub detail: String,
 }
 
-fn finding(severity: Severity, kind: &str, detail: String) -> Finding {
+fn finding(severity: Severity, kind: &str, entry: Option<&str>, detail: String) -> Finding {
     Finding {
         severity,
         kind: kind.to_string(),
+        entry: entry.map(|e| e.to_string()),
         detail,
     }
 }
 
+/// One suppression from the publisher's configuration. A finding
+/// whose kind matches, and whose entry matches when the
+/// suppression names one, is held back from the report. Every
+/// suppression carries a reason and an expiry date, and an expired
+/// suppression stops working and reports itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Suppression {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    pub reason: String,
+    /// ISO date, YYYY-MM-DD. String order is date order.
+    pub expires: String,
+}
+
+/// The server card reduced to what declared evidence mode
+/// compares, the card's own statement of the server's identity
+/// and tools.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardView {
+    pub server_name: String,
+    pub server_version: String,
+    pub tools: Vec<String>,
+}
+
 /// Everything a check run compares, gathered by the CLI.
 pub struct CheckInputs<'a> {
-    /// The published catalog from the current path, ard.json.
+    /// The published catalog from the current path, ard.json. In a
+    /// legacy only site this is the legacy catalog itself.
     pub published: &'a Catalog,
     /// The published catalog from the legacy path, when present.
     pub legacy: Option<&'a Catalog>,
+    /// True when the site serves only the legacy path.
+    pub legacy_only: bool,
     pub baseline: &'a Baseline,
-    /// The live probe of the MCP surface the catalog announces.
-    pub snapshot: &'a SurfaceSnapshot,
+    /// The live probe of the MCP surface, when the run has a live
+    /// target. Absent in repo mode.
+    pub snapshot: Option<&'a SurfaceSnapshot>,
     /// Current SKILL.md hashes by entry identifier, as served.
     pub skill_hashes: &'a [(String, String)],
     /// Current artifact digests by entry identifier for artifacts
@@ -53,33 +89,53 @@ pub struct CheckInputs<'a> {
     /// a place the checker reads and is not there. Artifacts with
     /// no entry in this list are not checked.
     pub artifact_digests: &'a [(String, Option<String>)],
+    /// Entry identifiers of skill files present on the site now,
+    /// whether or not the baseline knows them.
+    pub present_skill_ids: &'a [String],
+    /// The server card as read now, for declared evidence runs.
+    pub card: Option<&'a CardView>,
+    pub suppressions: &'a [Suppression],
+    /// Today's date, YYYY-MM-DD, for suppression expiry.
+    pub today: &'a str,
 }
 
 /// Run every drift class over the inputs. Findings come back
-/// sorted by severity, then kind, then detail, so the same three
-/// sides always produce the same report.
+/// sorted by severity, then kind, then entry, then detail, so the
+/// same inputs always produce the same report.
 pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     let mut findings = Vec::new();
     let published = inputs.published;
     let baseline = inputs.baseline;
-    let snapshot = inputs.snapshot;
 
-    // The dual path pair must agree, entry for entry.
-    match inputs.legacy {
-        Some(legacy) => {
-            if legacy.entries != published.entries {
-                findings.push(finding(
-                    Severity::Critical,
-                    "path-divergence",
-                    "ard.json and ai-catalog.json entries differ".into(),
-                ));
+    // The dual path pair must agree, entry for entry, and a site
+    // on the legacy path alone is its own major class, the one
+    // that makes check useful before migration.
+    if inputs.legacy_only {
+        findings.push(finding(
+            Severity::Major,
+            "legacy-only-catalog",
+            None,
+            "the catalog is served only on the legacy path, ai-catalog.json, with no ard.json beside it".into(),
+        ));
+    } else {
+        match inputs.legacy {
+            Some(legacy) => {
+                if legacy.entries != published.entries {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "path-divergence",
+                        None,
+                        "ard.json and ai-catalog.json entries differ".into(),
+                    ));
+                }
             }
+            None => findings.push(finding(
+                Severity::Major,
+                "path-divergence",
+                None,
+                "ai-catalog.json is missing beside ard.json".into(),
+            )),
         }
-        None => findings.push(finding(
-            Severity::Critical,
-            "path-divergence",
-            "ai-catalog.json is missing beside ard.json".into(),
-        )),
     }
 
     // Entry shape and anchoring, from the catalog alone.
@@ -88,27 +144,27 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
             findings.push(finding(
                 Severity::Critical,
                 "entry-shape",
-                format!(
-                    "entry {} carries both url and data, or neither",
-                    entry.identifier
-                ),
+                Some(&entry.identifier),
+                "entry carries both url and data, or neither".into(),
             ));
         }
         if !entry.anchored_to(&published.host.domain) {
             findings.push(finding(
                 Severity::Critical,
                 "urn-not-anchored",
+                Some(&entry.identifier),
                 format!(
-                    "entry {} is not anchored to publisher domain {}",
-                    entry.identifier, published.host.domain
+                    "entry is not anchored to publisher domain {}",
+                    published.host.domain
                 ),
             ));
         }
     }
 
-    // Digest binding. A referenced artifact whose served bytes no
-    // longer match the digest in its entry is detectable from the
-    // catalog alone.
+    // Digest binding, three sided. The served bytes must match
+    // both the digest in the published entry and the hash the
+    // baseline recorded at generation, so a catalog edited to
+    // match a tampered artifact still fires.
     for artifact in &baseline.artifacts {
         let Some(entry) = published
             .entries
@@ -132,26 +188,43 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
                 None => findings.push(finding(
                     Severity::Critical,
                     "digest-mismatch",
+                    Some(&artifact.entry_id),
                     format!(
                         "artifact at {} is missing where its catalog entry points",
                         artifact.url
                     ),
                 )),
-                Some(current) if current != published_hex => findings.push(finding(
-                    Severity::Critical,
-                    "digest-mismatch",
-                    format!(
-                        "artifact at {} no longer matches the digest in its catalog entry",
-                        artifact.url
-                    ),
-                )),
-                _ => {}
+                Some(current) => {
+                    if current != published_hex {
+                        findings.push(finding(
+                            Severity::Critical,
+                            "digest-mismatch",
+                            Some(&artifact.entry_id),
+                            format!(
+                                "artifact at {} no longer matches the digest in its catalog entry",
+                                artifact.url
+                            ),
+                        ));
+                    }
+                    if current != &artifact.sha256 {
+                        findings.push(finding(
+                            Severity::Critical,
+                            "digest-mismatch",
+                            Some(&artifact.entry_id),
+                            format!(
+                                "artifact at {} no longer matches the hash recorded in the baseline at generation",
+                                artifact.url
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }
 
     // Skill files are file truth. A changed hash without
-    // regeneration is major drift.
+    // regeneration is major drift, and a skill file the baseline
+    // never recorded is an unannounced capability.
     for skill in &baseline.skills {
         match inputs
             .skill_hashes
@@ -162,57 +235,199 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
             Some(_) => findings.push(finding(
                 Severity::Major,
                 "skill-content-changed",
+                Some(&skill.entry_id),
                 "SKILL.md content changed since the catalog was generated".into(),
             )),
             None => findings.push(finding(
                 Severity::Major,
                 "skill-content-changed",
+                Some(&skill.entry_id),
                 "SKILL.md announced in the baseline is missing".into(),
             )),
         }
     }
-
-    if let Some(mcp) = &baseline.mcp {
-        check_auth(&mcp.auth, &snapshot.auth, &mut findings);
-        match &snapshot.failure {
-            Some(failure) => {
-                let kind = if failure.step == "initialize" {
-                    "server-unreachable"
-                } else {
-                    "probe-failure"
-                };
-                findings.push(finding(
-                    Severity::Critical,
-                    kind,
-                    format!(
-                        "probe of the announced server failed at {} with {}",
-                        failure.step, failure.detail
-                    ),
-                ));
-            }
-            None => match &snapshot.auth {
-                AuthSurface::Protected(_) => {
-                    check_declared_only(published, baseline, &mut findings);
-                }
-                AuthSurface::Open => {
-                    check_live_surface(published, baseline, snapshot, &mut findings);
-                }
-            },
+    for present in inputs.present_skill_ids {
+        if !baseline.skills.iter().any(|s| &s.entry_id == present) {
+            findings.push(finding(
+                Severity::Critical,
+                "unannounced-skill-served",
+                Some(present),
+                "a skill file is present that the catalog never announced".into(),
+            ));
         }
     }
+
+    if let Some(mcp) = &baseline.mcp {
+        // The published catalog against the baseline runs in every
+        // mode. The catalog is a claim, and a claim that disagrees
+        // with the generation record is drift even when the live
+        // surface agrees with one of them.
+        check_catalog_against_baseline(published, baseline, &mut findings);
+
+        if let Some(snapshot) = inputs.snapshot {
+            match &snapshot.failure {
+                Some(failure) => {
+                    let kind = if failure.step == "initialize" {
+                        "server-unreachable"
+                    } else {
+                        "probe-failure"
+                    };
+                    findings.push(finding(
+                        Severity::Critical,
+                        kind,
+                        Some(&mcp.entry_id),
+                        format!(
+                            "probe of the announced server failed at {} with {}",
+                            failure.step, failure.detail
+                        ),
+                    ));
+                }
+                None => {
+                    // The auth comparison runs only on a completed
+                    // probe. A failed probe says nothing about the
+                    // surface's posture, and guessing at it would
+                    // report a phantom change beside the real one.
+                    check_auth(&mcp.auth, &snapshot.auth, &mut findings);
+                    match &snapshot.auth {
+                        AuthSurface::Protected(_) => {
+                            if let Some(card) = inputs.card {
+                                check_card(card, published, baseline, &mut findings);
+                            }
+                        }
+                        AuthSurface::Open => {
+                            check_live_surface(baseline, snapshot, &mut findings);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
     findings.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
             .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.entry.cmp(&b.entry))
             .then_with(|| a.detail.cmp(&b.detail))
     });
     findings
 }
 
+/// Suppressions hold findings back, and expired suppressions
+/// report themselves at major severity.
+fn apply_suppressions(findings: &mut Vec<Finding>, suppressions: &[Suppression], today: &str) {
+    let mut expired: Vec<Finding> = Vec::new();
+    let mut active: Vec<&Suppression> = Vec::new();
+    for suppression in suppressions {
+        if suppression.expires.as_str() < today {
+            expired.push(finding(
+                Severity::Major,
+                "suppression-expired",
+                suppression.entry.as_deref(),
+                format!(
+                    "the suppression of {} expired on {} and no longer holds findings back",
+                    suppression.kind, suppression.expires
+                ),
+            ));
+        } else {
+            active.push(suppression);
+        }
+    }
+    findings.retain(|f| {
+        !active.iter().any(|s| {
+            s.kind == f.kind
+                && match (&s.entry, &f.entry) {
+                    (None, _) => true,
+                    (Some(want), Some(have)) => want == have,
+                    (Some(_), None) => false,
+                }
+        })
+    });
+    findings.extend(expired);
+}
+
+/// The catalog's announced tools against the baseline's recorded
+/// tools. Runs in every mode, because it needs no live surface.
+fn check_catalog_against_baseline(
+    published: &Catalog,
+    baseline: &Baseline,
+    findings: &mut Vec<Finding>,
+) {
+    let mcp = baseline.mcp.as_ref().expect("checked by caller");
+    if let Some(entry) = published
+        .entries
+        .iter()
+        .find(|e| e.identifier == mcp.entry_id)
+    {
+        let announced: std::collections::BTreeSet<&str> =
+            entry.capabilities.iter().map(|c| c.as_str()).collect();
+        let recorded: std::collections::BTreeSet<&str> =
+            mcp.tools.keys().map(|k| k.as_str()).collect();
+        if announced != recorded {
+            findings.push(finding(
+                Severity::Critical,
+                "catalog-baseline-divergence",
+                Some(&mcp.entry_id),
+                "the catalog's announced tools differ from the baseline recorded at generation"
+                    .into(),
+            ));
+        }
+    }
+}
+
+/// The card against the catalog and the baseline, the declared
+/// evidence comparison for a protected surface.
+fn check_card(
+    card: &CardView,
+    published: &Catalog,
+    baseline: &Baseline,
+    findings: &mut Vec<Finding>,
+) {
+    let mcp = baseline.mcp.as_ref().expect("checked by caller");
+    let card_tools: std::collections::BTreeSet<&str> =
+        card.tools.iter().map(|t| t.as_str()).collect();
+    let recorded: std::collections::BTreeSet<&str> = mcp.tools.keys().map(|k| k.as_str()).collect();
+    if card_tools != recorded {
+        findings.push(finding(
+            Severity::Critical,
+            "card-divergence",
+            Some(&mcp.entry_id),
+            "the server card's tools differ from the baseline recorded at generation".into(),
+        ));
+    }
+    if let Some(entry) = published
+        .entries
+        .iter()
+        .find(|e| e.identifier == mcp.entry_id)
+    {
+        let announced: std::collections::BTreeSet<&str> =
+            entry.capabilities.iter().map(|c| c.as_str()).collect();
+        if card_tools != announced {
+            findings.push(finding(
+                Severity::Critical,
+                "card-divergence",
+                Some(&mcp.entry_id),
+                "the server card's tools differ from the tools the catalog announces".into(),
+            ));
+        }
+    }
+    if card.server_name != mcp.server_name || card.server_version != mcp.server_version {
+        findings.push(finding(
+            Severity::Major,
+            "card-divergence",
+            Some(&mcp.entry_id),
+            format!(
+                "the server card's identity differs from the baseline, card says {} {}, baseline recorded {} {}",
+                card.server_name, card.server_version, mcp.server_name, mcp.server_version
+            ),
+        ));
+    }
+}
+
 /// The live comparisons, run when the probe touched the surface.
 fn check_live_surface(
-    _published: &Catalog,
     baseline: &Baseline,
     snapshot: &SurfaceSnapshot,
     findings: &mut Vec<Finding>,
@@ -229,6 +444,7 @@ fn check_live_surface(
             None => findings.push(finding(
                 Severity::Critical,
                 "announced-tool-missing",
+                Some(&mcp.entry_id),
                 format!("catalog announces tool {name}, live server does not serve it"),
             )),
             Some(tool) => {
@@ -236,6 +452,7 @@ fn check_live_surface(
                     findings.push(finding(
                         Severity::Major,
                         "tool-schema-changed",
+                        Some(&mcp.entry_id),
                         format!("tool {name} input schema changed since generation"),
                     ));
                 }
@@ -243,6 +460,7 @@ fn check_live_surface(
                     findings.push(finding(
                         Severity::Minor,
                         "tool-description-changed",
+                        Some(&mcp.entry_id),
                         format!("tool {name} description changed since generation"),
                     ));
                 }
@@ -254,6 +472,7 @@ fn check_live_surface(
             findings.push(finding(
                 Severity::Critical,
                 "unannounced-tool-served",
+                Some(&mcp.entry_id),
                 format!(
                     "live server serves tool {}, catalog never announced it",
                     tool.name
@@ -269,6 +488,7 @@ fn check_live_surface(
         findings.push(finding(
             Severity::Major,
             "server-version-changed",
+            Some(&mcp.entry_id),
             format!(
                 "server identity changed since generation, was {} {} on {}, is {} {} on {}",
                 mcp.server_name,
@@ -284,6 +504,7 @@ fn check_live_surface(
         findings.push(finding(
             Severity::Major,
             "resource-set-changed",
+            Some(&mcp.entry_id),
             "the MCP resource set changed since generation".into(),
         ));
     }
@@ -291,33 +512,9 @@ fn check_live_surface(
         findings.push(finding(
             Severity::Major,
             "prompt-set-changed",
+            Some(&mcp.entry_id),
             "the MCP prompt set changed since generation".into(),
         ));
-    }
-}
-
-/// The declared evidence comparisons, run when the surface is
-/// protected and the probe could not touch it. The catalog against
-/// the baseline is what can honestly be checked, and the report
-/// labels the run declared evidence only.
-fn check_declared_only(published: &Catalog, baseline: &Baseline, findings: &mut Vec<Finding>) {
-    let mcp = baseline.mcp.as_ref().expect("checked by caller");
-    if let Some(entry) = published
-        .entries
-        .iter()
-        .find(|e| e.identifier == mcp.entry_id)
-    {
-        let announced: std::collections::BTreeSet<&str> =
-            entry.capabilities.iter().map(|c| c.as_str()).collect();
-        let recorded: std::collections::BTreeSet<&str> =
-            mcp.tools.keys().map(|k| k.as_str()).collect();
-        if announced != recorded {
-            findings.push(finding(
-                Severity::Critical,
-                "catalog-baseline-divergence",
-                "the catalog's announced tools differ from the baseline recorded at generation, on a surface that could not be probed live".into(),
-            ));
-        }
     }
 }
 
@@ -328,6 +525,7 @@ fn check_auth(recorded: &AuthBaseline, live: &AuthSurface, findings: &mut Vec<Fi
         finding(
             Severity::Major,
             "authentication-changed",
+            None,
             format!("authentication surface changed, {field} of {what} differs since generation"),
         )
     };
@@ -337,6 +535,7 @@ fn check_auth(recorded: &AuthBaseline, live: &AuthSurface, findings: &mut Vec<Fi
         | (AuthBaseline::Protected(_), AuthSurface::Open) => findings.push(finding(
             Severity::Major,
             "authentication-changed",
+            None,
             "the surface's authentication posture changed since generation".into(),
         )),
         (AuthBaseline::Protected(recorded), AuthSurface::Protected(live)) => {
@@ -462,22 +661,27 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{McpBaseline, ToolBaseline};
+    use crate::baseline::McpBaseline;
     use crate::catalog::{Catalog, Entry, Host};
     use crate::snapshot::ToolSurface;
 
     fn inputs<'a>(
         published: &'a Catalog,
         baseline: &'a Baseline,
-        snapshot: &'a SurfaceSnapshot,
+        snapshot: Option<&'a SurfaceSnapshot>,
     ) -> CheckInputs<'a> {
         CheckInputs {
             published,
             legacy: Some(published),
+            legacy_only: false,
             baseline,
             snapshot,
             skill_hashes: &[],
             artifact_digests: &[],
+            present_skill_ids: &[],
+            card: None,
+            suppressions: &[],
+            today: "2026-11-21",
         }
     }
 
@@ -510,6 +714,7 @@ mod tests {
             server_name: "demo".into(),
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
             tools,
             resources: vec![],
             prompts: vec![],
@@ -535,6 +740,7 @@ mod tests {
             )),
             skills: vec![],
             artifacts: vec![],
+            provenance: vec![],
         }
     }
 
@@ -543,7 +749,27 @@ mod tests {
         let snap = snapshot(vec![ping()]);
         let base = baseline_for(&snap);
         let cat = catalog();
-        assert!(check(&inputs(&cat, &base, &snap)).is_empty());
+        assert!(check(&inputs(&cat, &base, Some(&snap))).is_empty());
+    }
+
+    #[test]
+    fn repo_mode_clean_produces_no_findings() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let cat = catalog();
+        assert!(check(&inputs(&cat, &base, None)).is_empty());
+    }
+
+    #[test]
+    fn phantom_tool_in_the_catalog_fires_in_live_mode() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let mut cat = catalog();
+        cat.entries[0].capabilities.push("evil_tool".into());
+        let findings = check(&inputs(&cat, &base, Some(&snap)));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "catalog-baseline-divergence");
+        assert_eq!(findings[0].severity, Severity::Critical);
     }
 
     #[test]
@@ -553,7 +779,7 @@ mod tests {
         renamed.name = "pings".into();
         let snap = snapshot(vec![renamed]);
         let cat = catalog();
-        let findings = check(&inputs(&cat, &base, &snap));
+        let findings = check(&inputs(&cat, &base, Some(&snap)));
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().all(|f| f.severity == Severity::Critical));
         assert!(findings.iter().any(|f| f.kind == "announced-tool-missing"));
@@ -567,7 +793,7 @@ mod tests {
         changed.input_schema = serde_json::json!({"type": "object", "properties": {"x": {}}});
         let snap = snapshot(vec![changed]);
         let cat = catalog();
-        let findings = check(&inputs(&cat, &base, &snap));
+        let findings = check(&inputs(&cat, &base, Some(&snap)));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "tool-schema-changed");
         assert_eq!(findings[0].severity, Severity::Major);
@@ -575,15 +801,47 @@ mod tests {
         let mut redescribed = ping();
         redescribed.description = "Ping, but louder.".into();
         let snap = snapshot(vec![redescribed]);
-        let findings = check(&inputs(&cat, &base, &snap));
+        let findings = check(&inputs(&cat, &base, Some(&snap)));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Minor);
     }
 
     #[test]
-    fn baseline_tool_hashes_are_real() {
+    fn entry_shape_and_urn_classes_fire() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let mut cat = catalog();
+        cat.entries[0].data = Some(serde_json::json!({}));
+        cat.entries[0].identifier = "urn:air:other.example:mcp:demo".into();
+        let findings = check(&inputs(&cat, &base, Some(&snap)));
+        assert!(findings.iter().any(|f| f.kind == "entry-shape"));
+        assert!(findings.iter().any(|f| f.kind == "urn-not-anchored"));
+    }
+
+    #[test]
+    fn suppression_holds_a_finding_and_expiry_fires() {
         let base = baseline_for(&snapshot(vec![ping()]));
-        let tool: &ToolBaseline = base.mcp.as_ref().unwrap().tools.get("ping").unwrap();
-        assert_ne!(tool.schema_sha256, tool.description_sha256);
+        let mut changed = ping();
+        changed.input_schema = serde_json::json!({"type": "object", "properties": {"x": {}}});
+        let snap = snapshot(vec![changed]);
+        let cat = catalog();
+        let suppression = Suppression {
+            kind: "tool-schema-changed".into(),
+            entry: None,
+            reason: "known and accepted".into(),
+            expires: "2027-01-01".into(),
+        };
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.suppressions = std::slice::from_ref(&suppression);
+        assert!(check(&with).is_empty());
+
+        let mut expired = suppression.clone();
+        expired.expires = "2026-01-01".into();
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.suppressions = std::slice::from_ref(&expired);
+        let findings = check(&with);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|f| f.kind == "suppression-expired"));
+        assert!(findings.iter().any(|f| f.kind == "tool-schema-changed"));
     }
 }

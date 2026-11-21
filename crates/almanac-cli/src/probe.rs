@@ -10,13 +10,49 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use almanac_core::snapshot::{AuthSurface, ProbeFailure, SurfaceSnapshot, ToolSurface};
 use serde_json::{Value, json};
 
 pub const OFFERED_PROTOCOL_VERSION: &str = "2025-06-18";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most pages one list call may span before the probe
+/// records a failure. A server that always answers with another
+/// cursor would otherwise hold the gate open forever.
+pub(crate) const MAX_PAGES: usize = 100;
+
+/// The three list calls every MCP surface answers, and how a
+/// page of each lands in the snapshot. Both transports walk the
+/// same three lists, so the walk is written once, here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ListKind {
+    Tools,
+    Resources,
+    Prompts,
+}
+
+impl ListKind {
+    pub(crate) fn method(&self) -> &'static str {
+        match self {
+            ListKind::Tools => "tools/list",
+            ListKind::Resources => "resources/list",
+            ListKind::Prompts => "prompts/list",
+        }
+    }
+
+    pub(crate) fn apply(&self, snapshot: &mut SurfaceSnapshot, page: &Value) {
+        match self {
+            ListKind::Tools => snapshot.tools.extend(tool_surfaces(page)),
+            ListKind::Resources => snapshot.resources.extend(resource_uris(page)),
+            ListKind::Prompts => snapshot.prompts.extend(prompt_names(page)),
+        }
+    }
+}
+
+pub(crate) const LIST_KINDS: [ListKind; 3] =
+    [ListKind::Tools, ListKind::Resources, ListKind::Prompts];
 
 /// A snapshot for a probe that stopped at a step.
 pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSnapshot {
@@ -25,6 +61,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         server_name: String::new(),
         server_version: String::new(),
         protocol_version: String::new(),
+        stateless_shape: false,
         tools: vec![],
         resources: vec![],
         prompts: vec![],
@@ -155,14 +192,31 @@ impl StdioClient {
             .map_err(|e| format!("write to server stdin failed with {e}"))
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    /// One JSON-RPC round trip. The timeout is a deadline for
+    /// the whole request, not per line, so a server streaming
+    /// unrelated lines cannot keep a request alive. When
+    /// `allow_not_found` is set, a method-not-found error
+    /// returns the sentinel the list calls treat as an empty
+    /// surface. The handshake passes false, because a missing
+    /// initialize is a failure, not an empty surface.
+    fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        allow_not_found: bool,
+    ) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
+        let deadline = Instant::now() + TIMEOUT;
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("timed out waiting for the {method} response"));
+            }
             let line = self
                 .lines
-                .recv_timeout(TIMEOUT)
+                .recv_timeout(remaining)
                 .map_err(|_| format!("timed out waiting for the {method} response"))?;
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
@@ -170,7 +224,7 @@ impl StdioClient {
             };
             if value.get("id").and_then(|v| v.as_i64()) == Some(id) {
                 if let Some(error) = value.get("error") {
-                    if is_method_not_found(&value) {
+                    if allow_not_found && is_method_not_found(&value) {
                         return Ok(json!({"__method_not_found": true}));
                     }
                     return Err(format!("server answered {method} with error {error}"));
@@ -184,27 +238,36 @@ impl StdioClient {
         self.send(&json!({"jsonrpc": "2.0", "method": method}))
     }
 
+    /// Read one list to completion, following cursors. The walk
+    /// is capped, and a server that repeats the cursor it was
+    /// just given fails the call, so a paging loop can never
+    /// hold the gate open.
     fn list_all(&mut self, method: &str) -> Result<Vec<Value>, String> {
         let mut pages = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        for _page in 0..MAX_PAGES {
             let params = match &cursor {
                 Some(cursor) => json!({"cursor": cursor}),
                 None => json!({}),
             };
-            let result = self.request(method, params)?;
+            let result = self.request(method, params, true)?;
             if result.get("__method_not_found").is_some() {
-                return Ok(vec![]);
+                return Ok(pages);
             }
-            cursor = result
+            let next = result
                 .get("nextCursor")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             pages.push(result);
-            if cursor.is_none() {
-                return Ok(pages);
+            match next {
+                None => return Ok(pages),
+                Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
+                Some(_) => return Err("the server repeated a pagination cursor".into()),
             }
         }
+        Err(format!(
+            "pagination did not terminate after {MAX_PAGES} pages"
+        ))
     }
 }
 
@@ -217,6 +280,7 @@ pub fn probe_stdio(command: &[String]) -> SurfaceSnapshot {
     };
     let snapshot = walk(&mut client, transport);
     let _ = client.child.kill();
+    let _ = client.child.wait();
     snapshot
 }
 
@@ -228,6 +292,7 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
             "capabilities": {},
             "clientInfo": {"name": "almanac", "version": env!("CARGO_PKG_VERSION")}
         }),
+        false,
     ) {
         Ok(result) => result,
         Err(detail) => return failed_snapshot(transport, "initialize", detail),
@@ -250,6 +315,7 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
+        stateless_shape: init.get("protocolVersion").and_then(|v| v.as_str()) == Some("2026-07-28"),
         tools: vec![],
         resources: vec![],
         prompts: vec![],
@@ -263,35 +329,23 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
         });
         return snapshot;
     }
-    for (method, apply) in [
-        ("tools/list", 0),
-        ("resources/list", 1),
-        ("prompts/list", 2),
-    ] {
-        match client.list_all(method) {
+    for kind in LIST_KINDS {
+        match client.list_all(kind.method()) {
             Ok(pages) => {
                 for page in &pages {
-                    match apply {
-                        0 => snapshot.tools.extend(tool_surfaces(page)),
-                        1 => snapshot.resources.extend(resource_uris(page)),
-                        _ => snapshot.prompts.extend(prompt_names(page)),
-                    }
-                }
-                if apply == 1 {
-                    snapshot.resources.sort();
-                }
-                if apply == 2 {
-                    snapshot.prompts.sort();
+                    kind.apply(&mut snapshot, page);
                 }
             }
             Err(detail) => {
                 snapshot.failure = Some(ProbeFailure {
-                    step: method.into(),
+                    step: kind.method().into(),
                     detail,
                 });
                 return snapshot;
             }
         }
     }
+    snapshot.resources.sort();
+    snapshot.prompts.sort();
     snapshot
 }

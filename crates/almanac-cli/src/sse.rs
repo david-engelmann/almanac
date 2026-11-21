@@ -11,8 +11,13 @@
 /// event is the server's problem to be reported by the caller when
 /// the expected response never appears.
 pub fn messages(body: &str) -> Vec<serde_json::Value> {
+    // The format's canonical line ending is CRLF, and a body
+    // framed that way separates its events with \r\n\r\n, which
+    // an LF-only split never matches. Normalise first, so both
+    // framings parse.
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
     let mut out = Vec::new();
-    for event in body.split("\n\n") {
+    for event in normalized.split("\n\n") {
         let mut data = String::new();
         for line in event.lines() {
             let line = line.strip_suffix('\r').unwrap_or(line);
@@ -49,5 +54,15 @@ mod tests {
     fn ignores_comments_and_empty_events() {
         let body = ": ping\n\ndata: {\"ok\":true}\n\n";
         assert_eq!(messages(body).len(), 1);
+    }
+
+    #[test]
+    fn parses_crlf_framed_events() {
+        let body =
+            "event: message\r\ndata: {\"id\":1}\r\n\r\nevent: message\r\ndata: {\"id\":2}\r\n\r\n";
+        let values = messages(body);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["id"], 1);
+        assert_eq!(values[1]["id"], 2);
     }
 }

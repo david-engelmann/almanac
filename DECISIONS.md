@@ -63,10 +63,79 @@ the other seats.
 ## Dependencies beyond the starting set (2026-11-21)
 
 The design record allows serde, serde_json and a small HTTP
-client, and asks for a written reason for anything else. Two
+client, and asks for a written reason for anything else. Three
 additions carry theirs. sha2, in the core crate, because digest
 binding is a requirement of the ARD draft itself and the hashes
 are the baseline's evidence; a hand rolled SHA-256 would be the
 riskiest code in the repo. ureq with rustls, in the CLI crate,
 is the small HTTP client the design names, blocking and free of
-an async runtime.
+an async runtime. toml, in the CLI crate, added at the milestone
+one checkpoint, because suppressions live in almanac.toml by the
+design record's own ruling, and a hand rolled parser for a file
+publishers write would be a quiet source of misread
+suppressions, which are exactly the findings a gate must never
+hold back by accident.
+
+## Milestone one checkpoint (2026-11-21)
+
+Milestone one passed through the checkpoint rule's three reviews
+on the day it landed. An independent red team re-audit, a spec
+fidelity axis and a standards axis read the finished state
+against docs/DESIGN.md, docs/HTTP-TRANSPORT.md and this file.
+Between them they returned one critical, seventeen major and
+thirty minor findings, with overlaps where two axes caught the
+same defect. The critical finding was real. In
+live mode the published catalog's announced tools were never
+compared, so a catalog announcing a tool that does not exist
+passed the gate. Every finding was either fixed in the fix pass
+that followed or is recorded below as a named deferral. Nothing
+was silently dropped, which was itself one of the findings.
+
+Fixed in the fix pass. The catalog against baseline comparison
+now runs in every mode. A legacy only site gets its major class
+instead of a could not run exit. The card is compared in
+declared evidence mode. The digest check is three sided, served
+bytes against the entry digest and against the baseline hash.
+Suppressions work, with reasons required and expiry enforced.
+Repo mode exists. A new skill file is an unannounced capability.
+Provenance is recorded per entry. The probe resolves its
+endpoint from the catalog entry's card when no target is named.
+Pagination is capped on both transports, the SSE reader takes
+CRLF framing, the stdio request timeout is a deadline, the
+handshake no longer swallows method not found, a failed probe no
+longer reports a phantom authentication change, metadata fetches
+follow redirects, redirect answers are recorded with their
+target, and catalog controlled paths can no longer escape the
+site directory or match a look-alike host. Grading decision
+recorded here. A missing ai-catalog.json beside ard.json is
+major path divergence, the mirror of the legacy only class. A
+missing ard.json with a legacy catalog present is that major
+class. Entries that differ between the paths stay critical.
+
+Named deferrals, each with its reason.
+
+- Generation for protected surfaces, from the server card. The
+  error message at the point of refusal has named this since
+  milestone one, and it is milestone two work, because the card
+  reader it needs is the same one the declared evidence check
+  now uses.
+- The agents.json cross check, Amendment C. An open version 1
+  item, blocked on a firsthand read of the agents.json schema,
+  the same evidence standard the ARD work used. It lands once
+  the schema has been read, not from a guess at its shape.
+- Generation inputs beyond the live probe and one skill file.
+  OpenAPI documents, A2A cards, repo metadata, publisher config
+  and the full generation report are the generation roadmap.
+  The README now says plainly what generation reads today.
+- Three minor classes. Display, tag and ordering changes inside
+  a declared artifact, the served media type of the catalog, and
+  trust manifest expiry. The first needs field level card
+  comparison beyond the digest. The second needs the checker to
+  observe a served catalog, which local mode never does. The
+  third lands with the validate command, where Amendment D puts
+  trust manifest handling.
+- The HTTP source level rename. The stdio rename is a source
+  level rebuild, as owed. The HTTP rename remains a fixture mode
+  toggle, because the HTTP fixture is test harness code rather
+  than a shipped server binary, and the stronger form is still
+  owed if the fixture ever becomes a binary.

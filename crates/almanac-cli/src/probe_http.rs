@@ -20,8 +20,7 @@ use serde_json::{Value, json};
 use ureq::Agent;
 
 use crate::probe::{
-    OFFERED_PROTOCOL_VERSION, failed_snapshot, is_method_not_found, prompt_names, resource_uris,
-    tool_surfaces,
+    LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, failed_snapshot, is_method_not_found,
 };
 use crate::sse;
 
@@ -40,6 +39,11 @@ struct RpcOutcome {
     status: u16,
     session_id: Option<String>,
     www_authenticate: Option<String>,
+    /// The redirect target, when the answer was a redirect. The
+    /// transport note asks for the target to be recorded, not
+    /// absorbed, so the failure record can name where the
+    /// endpoint tried to send the probe.
+    location: Option<String>,
     /// The JSON-RPC message answering this request, when one came.
     message: Option<Value>,
 }
@@ -80,6 +84,10 @@ fn rpc(
         .get("www-authenticate")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    let location = headers
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -110,16 +118,68 @@ fn rpc(
         status,
         session_id,
         www_authenticate,
+        location,
         message,
     })
 }
 
+/// Fetch a JSON document, following a short redirect chain by
+/// hand. Metadata documents sit behind redirects often enough
+/// that a document the agent would not follow reads as absent,
+/// and absence is a fact the drift engine acts on, so the ladder
+/// follows up to three.
 fn get_json(agent: &Agent, url: &str) -> Option<Value> {
-    let mut response = agent.get(url).call().ok()?;
-    if response.status().as_u16() != 200 {
+    let mut current = url.to_string();
+    for _ in 0..4 {
+        let mut response = agent.get(&current).call().ok()?;
+        let status = response.status().as_u16();
+        if status == 200 {
+            return response.body_mut().read_json().ok();
+        }
+        if (300..400).contains(&status) {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)?;
+            current = resolve_location(&current, &location)?;
+            continue;
+        }
         return None;
     }
-    response.body_mut().read_json().ok()
+    None
+}
+
+/// Resolve a redirect target against the URL that produced it.
+/// Absolute targets pass through, root-relative targets resolve
+/// against the origin, anything else is not followed.
+fn resolve_location(base: &str, location: &str) -> Option<String> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Some(location.to_string());
+    }
+    let (origin, _) = origin_and_path(base)?;
+    if location.starts_with('/') {
+        Some(format!("{origin}{location}"))
+    } else {
+        None
+    }
+}
+
+/// Extract one parameter from a WWW-Authenticate header. The
+/// value may be quoted, and parameters may follow it, so the
+/// parse reads the quoted string to its closing quote instead
+/// of trimming the rest of the header away.
+fn header_param(header: &str, name: &str) -> Option<String> {
+    let idx = header.find(name)?;
+    let rest = header[idx + name.len()..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        let end = rest.find(',').unwrap_or(rest.len());
+        Some(rest[..end].trim().to_string())
+    }
 }
 
 fn origin_and_path(url: &str) -> Option<(String, String)> {
@@ -142,12 +202,7 @@ fn origin_and_path(url: &str) -> Option<(String, String)> {
 /// resource metadata and each authorization server's metadata, and
 /// returns the protected snapshot the drift engine compares.
 fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) -> SurfaceSnapshot {
-    let mut prm_url = www_authenticate.and_then(|header| {
-        header
-            .split("resource_metadata=")
-            .nth(1)
-            .map(|rest| rest.trim().trim_matches(',').trim_matches('"').to_string())
-    });
+    let mut prm_url = www_authenticate.and_then(|header| header_param(header, "resource_metadata"));
     if prm_url.is_none()
         && let Some((origin, path)) = origin_and_path(url)
     {
@@ -197,6 +252,7 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
         server_name: String::new(),
         server_version: String::new(),
         protocol_version: String::new(),
+        stateless_shape: false,
         tools: vec![],
         resources: vec![],
         prompts: vec![],
@@ -231,11 +287,13 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
         return protected_snapshot(&agent, url, init.www_authenticate.as_deref());
     }
     if init.status != 200 {
-        return failed_snapshot(
-            TRANSPORT,
-            "initialize",
-            format!("endpoint answered HTTP {}", init.status),
-        );
+        let detail = match (&init.location, init.status) {
+            (Some(location), status) if (300..400).contains(&status) => {
+                format!("endpoint answered HTTP {status} redirect to {location}")
+            }
+            _ => format!("endpoint answered HTTP {}", init.status),
+        };
+        return failed_snapshot(TRANSPORT, "initialize", detail);
     }
     let Some(init_message) = init.message else {
         return failed_snapshot(
@@ -271,6 +329,7 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
             .unwrap_or_default()
             .to_string(),
         protocol_version: negotiated.clone(),
+        stateless_shape: negotiated == "2026-07-28",
         tools: vec![],
         resources: vec![],
         prompts: vec![],
@@ -280,7 +339,11 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
     let session = init.session_id.as_deref();
     let version = Some(negotiated.as_str());
     let mut next_id = 2_i64;
-    let _ = rpc(
+    // The notification expects a 202 with no body, and its
+    // outcome is otherwise uninteresting. A 401 there is not,
+    // because it means the surface is protected after all, so
+    // that one answer routes to the metadata ladder.
+    if let Ok(outcome) = rpc(
         &agent,
         url,
         session,
@@ -288,15 +351,16 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
         None,
         "notifications/initialized",
         json!({}),
-    );
+    ) && outcome.status == 401
+    {
+        return protected_snapshot(&agent, url, outcome.www_authenticate.as_deref());
+    }
 
-    for (method, apply) in [
-        ("tools/list", 0),
-        ("resources/list", 1),
-        ("prompts/list", 2),
-    ] {
+    for kind in LIST_KINDS {
+        let method = kind.method();
         let mut cursor: Option<String> = None;
-        loop {
+        let mut terminated = false;
+        for _page in 0..MAX_PAGES {
             let params = match &cursor {
                 Some(cursor) => json!({"cursor": cursor}),
                 None => json!({}),
@@ -324,6 +388,7 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
                 return snapshot;
             };
             if is_method_not_found(&message) {
+                terminated = true;
                 break;
             }
             if let Some(error) = message.get("error") {
@@ -334,18 +399,30 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
                 return snapshot;
             }
             let page = message.get("result").cloned().unwrap_or(Value::Null);
-            match apply {
-                0 => snapshot.tools.extend(tool_surfaces(&page)),
-                1 => snapshot.resources.extend(resource_uris(&page)),
-                _ => snapshot.prompts.extend(prompt_names(&page)),
+            kind.apply(&mut snapshot, &page);
+            match page.get("nextCursor").and_then(|v| v.as_str()) {
+                Some(next) if Some(next) != cursor.as_deref() => {
+                    cursor = Some(next.to_string());
+                }
+                Some(_) => {
+                    snapshot.failure = Some(ProbeFailure {
+                        step: method.into(),
+                        detail: "the server repeated a pagination cursor".into(),
+                    });
+                    return snapshot;
+                }
+                None => {
+                    terminated = true;
+                    break;
+                }
             }
-            cursor = page
-                .get("nextCursor")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            if cursor.is_none() {
-                break;
-            }
+        }
+        if !terminated {
+            snapshot.failure = Some(ProbeFailure {
+                step: method.into(),
+                detail: format!("pagination did not terminate after {MAX_PAGES} pages"),
+            });
+            return snapshot;
         }
     }
     snapshot.resources.sort();

@@ -25,6 +25,12 @@ pub struct SurfaceSnapshot {
     /// server that renegotiates its protocol has changed its
     /// surface.
     pub protocol_version: String,
+    /// True when the negotiated revision is the stateless shape
+    /// of the protocol, the 2026-07-28 revision. Recorded as a
+    /// fact about the surface. Full support for that revision is
+    /// a later addition, named in docs/HTTP-TRANSPORT.md so its
+    /// absence is a decision and not a surprise.
+    pub stateless_shape: bool,
     pub tools: Vec<ToolSurface>,
     /// Resource URIs, sorted by the probe.
     pub resources: Vec<String>,
@@ -146,8 +152,24 @@ mod tests {
         });
         let record = MetadataRecord::from_document("https://auth.example.com/meta", &doc);
         assert_eq!(record.issuer.as_deref(), Some("https://auth.example.com"));
+        assert_eq!(
+            record.authorization_endpoint.as_deref(),
+            Some("https://auth.example.com/authorize")
+        );
+        assert_eq!(
+            record.token_endpoint.as_deref(),
+            Some("https://auth.example.com/token")
+        );
+        assert_eq!(
+            record.jwks_uri.as_deref(),
+            Some("https://auth.example.com/jwks")
+        );
+        assert_eq!(
+            record.resource.as_deref(),
+            Some("https://api.example.com/mcp")
+        );
         assert_eq!(record.scopes_supported, vec!["read", "write"]);
-        assert_eq!(record.sha256.len(), 64);
+        assert_eq!(record.sha256, crate::hash::sha256_json(&doc));
     }
 
     #[test]

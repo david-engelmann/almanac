@@ -18,4 +18,5 @@ path = "src/main.rs"
 almanac-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
 ureq = { version = "3", features = ["rustls", "json"] }

@@ -514,6 +514,11 @@ Major, fails by default and can be lowered by config.
   now demands OAuth, or the reverse.
 - A resource set change on the MCP surface, such as the view resource
   an MCP Apps host depends on disappearing.
+- A prompt set change on the MCP surface. Added 2026-11-21 at the
+  milestone one checkpoint, recorded here because section 6 presents
+  its list as fixed. Prompts are part of the surface the probe
+  records, and the class rides the same footing as the resource set
+  change above.
 - A catalog served only on the legacy path, with no ard.json beside
   it. The publisher is invisible to conformant ARD registries, which
   is the stranded state the migrate command exists to end. This
