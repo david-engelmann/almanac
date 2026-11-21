@@ -1,0 +1,19 @@
+[package]
+name = "almanac-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Command line interface for almanac, the drift gate for agent discovery catalogs."
+repository = "https://github.com/david-engelmann/almanac"
+homepage = "https://github.com/david-engelmann/almanac"
+readme = "../../README.md"
+keywords = ["ard", "agent-discovery", "mcp", "drift", "ci"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "almanac"
+path = "src/main.rs"
+
+[dependencies]
+almanac-core = { workspace = true }
