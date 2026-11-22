@@ -139,3 +139,40 @@ Named deferrals, each with its reason.
   toggle, because the HTTP fixture is test harness code rather
   than a shipped server binary, and the stronger form is still
   owed if the fixture ever becomes a binary.
+
+## Milestone two (2026-11-21)
+
+Main accepted milestone one complete the same day and ordered
+milestone two on the standing press. Two pieces, and the first
+two deferrals above are discharged by it.
+
+Protected generation. Generate no longer refuses a protected
+surface. It reads the surface from the server card instead,
+fetched from the well known card path on the endpoint's origin,
+with a card already on the site as the fallback when the fetch
+finds nothing. The baseline records the auth metadata the
+ladder fetched, the catalog entry takes the card's own
+description when it carries one, the entry's provenance reads
+server-card, and the card written to the site is the card as
+read, with the probed endpoint recorded on it when it names
+none. A protected surface with no readable card is still an
+honest failure, exit 2 with the reason named. The milestone
+one auth tests patched a baseline by hand because this path
+did not exist; the milestone two suite generates against the
+auth fixture end to end, and the fixture now serves a card.
+
+Validate. The validate command checks a catalog beyond schema.
+Entry shape and URN anchoring at critical, empty display name
+or media type and malformed digests at major, empty
+descriptions, missing digests and representative query counts
+outside the draft's two to five at minor, the dual path pair
+compared when both files are present, and the trust manifest
+judged for shape and expiry under Amendment D. The manifest
+expiry is read where version 1 knows to look, an expiresAt
+date on the manifest or on its inner manifest document, or an
+exp claim in seconds, and the record says so rather than
+pretending a wider reading. Exit 1 at major or above, warnings
+alone pass, an unreadable catalog is exit 2. Validate reads a
+whole site or one catalog file with --file. The trust manifest
+expiry minor class deferred at the milestone one checkpoint
+lands here with it, as that record said it would.

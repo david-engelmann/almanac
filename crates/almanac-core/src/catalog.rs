@@ -59,6 +59,12 @@ pub struct Entry {
     pub digest: Option<String>,
     #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// The trust manifest, carried as the draft defines it.
+    /// Almanac validates its shape and expiry only, per
+    /// Amendment D. It never verifies the signature in version 1
+    /// and holds no key material.
+    #[serde(rename = "trustManifest", skip_serializing_if = "Option::is_none")]
+    pub trust_manifest: Option<serde_json::Value>,
 }
 
 impl Entry {
@@ -107,6 +113,7 @@ mod tests {
             version: None,
             digest: None,
             updated_at: None,
+            trust_manifest: None,
         }
     }
 

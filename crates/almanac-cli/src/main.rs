@@ -37,7 +37,8 @@ Commands
             surface and emit the dual path pair and the gate
 
 Target a surface with --url https://host/mcp or with --command and
-the server command last. Sites are directories, --site DIR.";
+the server command last. Sites are directories, --site DIR.
+Validate reads a whole site, or one catalog file with --file PATH.";
 
 #[derive(Default)]
 struct Flags {
@@ -46,6 +47,7 @@ struct Flags {
     domain: Option<String>,
     name: Option<String>,
     skill: Option<String>,
+    file: Option<String>,
     fail_at: Option<String>,
     queries: Vec<String>,
     command: Vec<String>,
@@ -76,6 +78,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--domain" => flags.domain = Some(value(i)?),
             "--name" => flags.name = Some(value(i)?),
             "--skill" => flags.skill = Some(value(i)?),
+            "--file" => flags.file = Some(value(i)?),
             "--fail-at" => flags.fail_at = Some(value(i)?),
             "--queries" => {
                 flags.queries = value(i)?.split(',').map(|q| q.trim().to_string()).collect()
@@ -147,7 +150,17 @@ fn run() -> Result<i32, String> {
             let target = target(&flags)?;
             site::check(&site, target.as_ref(), fail_at(&flags)?)
         }
-        "validate" | "migrate" => Err(format!(
+        "validate" => {
+            let flags = parse_flags(&args[1..])?;
+            match &flags.file {
+                Some(file) => site::validate_file(&PathBuf::from(file)),
+                None => {
+                    let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
+                    site::validate_site(&site)
+                }
+            }
+        }
+        "migrate" => Err(format!(
             "almanac {command} is not yet implemented. Generate and check land first, \
              in that order, because the gate is the product and generation is its onboarding"
         )),

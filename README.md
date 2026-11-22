@@ -29,10 +29,12 @@ Generation is the on-ramp. The gate is the product.
 ## Commands
 
 - generate writes the dual path catalog and the baseline from repo
-  artifacts and the live surface.
-- validate, not yet built, checks a catalog beyond schema, covering
-  URN anchoring, exactly one of url or data per entry, representative
-  query counts and dual path coherence.
+  artifacts and the live surface. A protected surface is generated
+  from its server card instead, with the authentication metadata
+  recorded alongside.
+- validate checks a catalog beyond schema, covering URN anchoring,
+  exactly one of url or data per entry, representative query
+  counts, dual path coherence and trust manifest shape and expiry.
 - check is the drift gate for CI, in an offline repo mode and a live
   mode that probes the deployed surface.
 - migrate, not yet built, takes a publisher stranded on the legacy
@@ -45,12 +47,15 @@ Generation is the on-ramp. The gate is the product.
 The design gate was confirmed on 2026-11-20 after a cheapest failure
 test against a real shipping MCP server, where the clean check
 passed with zero findings and six planted breaks were caught at
-their expected severities. The first build milestone is built, the
-stdio and Streamable HTTP probes, the authenticated surface path and
-the drift engine behind them, and it has passed through three
+their expected severities. The first two build
+milestones are built, the stdio and Streamable HTTP probes, the
+authenticated surface path, the drift engine behind them,
+generation from the server card for protected surfaces, and the
+validate command, and the first milestone has passed through three
 independent checkpoint reviews whose findings are fixed or recorded
-as named work in DECISIONS.md. The design record lives in
-docs/DESIGN.md. No release exists yet.
+as named work in DECISIONS.md. The one command still missing is
+migrate. The design record lives in docs/DESIGN.md. No release
+exists yet.
 
 ## License
 

@@ -123,18 +123,26 @@ fn rpc(
     })
 }
 
-/// Fetch a JSON document, following a short redirect chain by
-/// hand. Metadata documents sit behind redirects often enough
-/// that a document the agent would not follow reads as absent,
-/// and absence is a fact the drift engine acts on, so the ladder
-/// follows up to three.
-fn get_json(agent: &Agent, url: &str) -> Option<Value> {
+/// Fetch a document's bytes, following a short redirect chain
+/// by hand. Metadata documents sit behind redirects often
+/// enough that a document the agent would not follow reads as
+/// absent, and absence is a fact the drift engine acts on, so
+/// the ladder follows up to three.
+fn get_bytes(agent: &Agent, url: &str) -> Option<Vec<u8>> {
     let mut current = url.to_string();
     for _ in 0..4 {
         let mut response = agent.get(&current).call().ok()?;
         let status = response.status().as_u16();
         if status == 200 {
-            return response.body_mut().read_json().ok();
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            response
+                .body_mut()
+                .as_reader()
+                .take(16 * 1024 * 1024)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            return Some(bytes);
         }
         if (300..400).contains(&status) {
             let location = response
@@ -148,6 +156,25 @@ fn get_json(agent: &Agent, url: &str) -> Option<Value> {
         return None;
     }
     None
+}
+
+fn get_json(agent: &Agent, url: &str) -> Option<Value> {
+    let bytes = get_bytes(agent, url)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Fetch the server card a surface serves, from the well known
+/// card path on the endpoint's origin. Generation for a
+/// protected surface reads the surface from this card, because
+/// the card is the declared surface the publisher already
+/// serves to clients.
+pub fn fetch_server_card(endpoint_url: &str) -> Option<Vec<u8>> {
+    let (origin, _) = origin_and_path(endpoint_url)?;
+    let agent = build_agent();
+    get_bytes(
+        &agent,
+        &format!("{origin}/.well-known/mcp/server-card.json"),
+    )
 }
 
 /// Resolve a redirect target against the URL that produced it.

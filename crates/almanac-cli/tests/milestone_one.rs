@@ -344,6 +344,19 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
             });
             respond(stream, 200, "application/json", "", &doc.to_string());
         }
+        ("GET", "/.well-known/mcp/server-card.json") => {
+            let card = serde_json::json!({
+                "name": "telorama",
+                "version": "0.1.0",
+                "protocolVersion": "2025-06-18",
+                "transport": "streamable-http",
+                "description": "The telorama MCP server, from its card.",
+                "tools": fixture_tools("open-clean"),
+                "resources": [{"uri": "ui://telorama/scene"}],
+                "prompts": []
+            });
+            respond(stream, 200, "application/json", "", &card.to_string());
+        }
         ("POST", "/mcp") => {
             if mode.starts_with("auth-") {
                 let header = format!(
@@ -865,4 +878,118 @@ fn card_divergence_in_declared_mode() {
     let (code, stdout, _) = check_http(&site, &url);
     assert_eq!(code, 1, "card divergence must fail, report was {stdout}");
     assert!(stdout.contains("card-divergence"), "report was {stdout}");
+}
+
+// ----------------------------------------------------------------
+// Milestone two. Protected generation from the server card, and
+// the validate command.
+
+#[test]
+fn protected_generation_from_the_card() {
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("protgen");
+    *mode.lock().expect("mode") = "auth-clean".to_string();
+
+    // Generation against the protected surface succeeds from the
+    // card the fixture serves, no hand patched baseline anywhere.
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "protected generate failed with {stderr}");
+    let baseline: Baseline =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert!(
+        matches!(
+            baseline.mcp.as_ref().expect("mcp baseline").auth,
+            AuthBaseline::Protected(_)
+        ),
+        "the baseline must record the protected posture from the ladder"
+    );
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        catalog_text.contains("The telorama MCP server, from its card."),
+        "the entry description must come from the card, catalog was {catalog_text}"
+    );
+
+    // The declared evidence check over what generation recorded
+    // is clean.
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean declared check failed with {stdout}");
+    assert!(
+        stdout.contains("declared-evidence-only"),
+        "report was {stdout}"
+    );
+
+    // And the auth ladder still catches a removed scope against
+    // the card generated baseline.
+    *mode.lock().expect("mode") = "auth-scope-removed".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "scope removal must fail, report was {stdout}");
+    assert!(
+        stdout.contains("authentication-changed"),
+        "report was {stdout}"
+    );
+}
+
+#[test]
+fn validate_clean_then_broken() {
+    let site = temp_site("validate");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // A generated catalog validates clean.
+    let (code, stdout, _) = run(&["validate", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "validate of a generated site failed with {stdout}");
+
+    let edit_pair = |site: &Path, edit: &dyn Fn(&mut serde_json::Value)| {
+        for path in [".well-known/ard.json", ".well-known/ai-catalog.json"] {
+            let full = site.join(path);
+            let mut catalog: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&full).expect("catalog")).expect("parses");
+            edit(&mut catalog);
+            std::fs::write(
+                &full,
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&catalog).expect("serialize")
+                ),
+            )
+            .expect("write catalog");
+        }
+    };
+
+    // An entry anchored to another publisher's domain fails.
+    edit_pair(&site, &|catalog| {
+        catalog["entries"][0]["identifier"] = serde_json::json!("urn:air:other.example:mcp:demo");
+    });
+    let (code, stdout, _) = run(&["validate", "--site", &site_arg(&site)]);
+    assert_eq!(code, 1, "unanchored entry must fail, report was {stdout}");
+    assert!(stdout.contains("urn-not-anchored"), "report was {stdout}");
+
+    // A warning alone does not fail validate.
+    let (code, _, _) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0);
+    edit_pair(&site, &|catalog| {
+        catalog["entries"][0]["representativeQueries"] = serde_json::json!(["only one query"]);
+    });
+    let (code, stdout, _) = run(&["validate", "--site", &site_arg(&site)]);
+    assert_eq!(
+        code, 0,
+        "a warning must not fail validate, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("representative-queries"),
+        "report was {stdout}"
+    );
+
+    // Single file mode reads one catalog on its own.
+    let ard = site.join(".well-known/ard.json");
+    let (code, _, _) = run(&["validate", "--file", &ard.to_string_lossy()]);
+    assert_eq!(code, 0);
+
+    // A catalog that does not parse is a could not run, exit 2.
+    let garbage = temp_site("validate-garbage").join("catalog.json");
+    std::fs::write(&garbage, "not json").expect("garbage");
+    let (code, _, _) = run(&["validate", "--file", &garbage.to_string_lossy()]);
+    assert_eq!(code, 2, "unparseable catalog must exit 2");
 }

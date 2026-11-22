@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod drift;
 pub mod hash;
 pub mod snapshot;
+pub mod validate;
 
 use serde::{Deserialize, Serialize};
 

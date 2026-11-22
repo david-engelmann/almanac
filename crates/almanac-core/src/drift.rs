@@ -704,6 +704,7 @@ mod tests {
                 version: None,
                 digest: None,
                 updated_at: None,
+                trust_manifest: None,
             }],
         }
     }

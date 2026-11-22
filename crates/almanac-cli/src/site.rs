@@ -20,7 +20,7 @@ use almanac_core::baseline::{
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
 use almanac_core::hash;
-use almanac_core::snapshot::{AuthSurface, SurfaceSnapshot};
+use almanac_core::snapshot::{AuthSurface, SurfaceSnapshot, ToolSurface};
 use serde::Serialize;
 
 use crate::probe;
@@ -110,8 +110,125 @@ fn parse_skill_frontmatter(text: &str) -> Result<(String, String), String> {
     }
 }
 
+/// Build the generation snapshot for a protected surface from
+/// its server card. The card is fetched from the well known
+/// card path on the endpoint's origin, and a card already on
+/// the site is the fallback when the fetch finds nothing. The
+/// returned bytes are the card as read, with the probed
+/// endpoint recorded when the card does not name one and the
+/// target is HTTP, ready to be written as the site's card so
+/// the digest binds what generation read. The card's own
+/// description comes back too, when it carries one.
+fn snapshot_from_card(
+    site: &Path,
+    target: &ProbeTarget,
+    probe_snapshot: &SurfaceSnapshot,
+) -> Result<(SurfaceSnapshot, Vec<u8>, Option<String>), String> {
+    let fetched = match target {
+        ProbeTarget::Http(url) => probe_http::fetch_server_card(url),
+        ProbeTarget::Stdio(_) => None,
+    };
+    let raw = match fetched {
+        Some(bytes) => bytes,
+        None => {
+            let path = site.join(".well-known/mcp/server-card.json");
+            fs::read(&path).map_err(|_| {
+                "the surface is protected, and no server card could be read from the \
+                 well known card path or from the site, so generation has no declared \
+                 surface to record"
+                    .to_string()
+            })?
+        }
+    };
+    let mut card: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| format!("the server card did not parse with {e}"))?;
+    let text = |key: &str| {
+        card.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let server_name = text("name");
+    if server_name.is_empty() {
+        return Err(
+            "the server card carries no name, so generation cannot record the surface".into(),
+        );
+    }
+    let mut tools = Vec::new();
+    if let Some(items) = card.get("tools").and_then(|v| v.as_array()) {
+        for item in items {
+            tools.push(ToolSurface {
+                name: item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                description: item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                input_schema: item
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            });
+        }
+    }
+    let names = |key: &str, field: &str| -> Vec<String> {
+        let mut out: Vec<String> = card
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_str()
+                            .map(String::from)
+                            .or_else(|| item.get(field).and_then(|v| v.as_str()).map(String::from))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    };
+    let protocol_version = text("protocolVersion");
+    let description = text("description");
+    let snapshot = SurfaceSnapshot {
+        transport: probe_snapshot.transport.clone(),
+        server_name,
+        server_version: text("version"),
+        stateless_shape: protocol_version == "2026-07-28",
+        protocol_version,
+        tools,
+        resources: names("resources", "uri"),
+        prompts: names("prompts", "name"),
+        auth: probe_snapshot.auth.clone(),
+        failure: None,
+    };
+    let bytes = if card.get("endpoint").is_none()
+        && let ProbeTarget::Http(url) = target
+    {
+        card["endpoint"] = serde_json::json!(url);
+        pretty_bytes(&card)
+    } else {
+        raw
+    };
+    Ok((
+        snapshot,
+        bytes,
+        if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        },
+    ))
+}
+
 /// The generate command. Probes the live surface, writes the dual
-/// path catalog, the server card and the baseline.
+/// path catalog, the server card and the baseline. A protected
+/// surface is generated from its server card instead.
 #[allow(clippy::too_many_arguments)]
 pub fn generate(
     site: &Path,
@@ -121,44 +238,54 @@ pub fn generate(
     skill_path: Option<&Path>,
     queries: &[String],
 ) -> Result<(), String> {
-    let snapshot = run_probe(target);
-    if let Some(failure) = &snapshot.failure {
+    let probe_snapshot = run_probe(target);
+    if let Some(failure) = &probe_snapshot.failure {
         return Err(format!(
             "the probe failed at {} with {}, and generation needs a surface it can read",
             failure.step, failure.detail
         ));
     }
-    if matches!(snapshot.auth, AuthSurface::Protected(_)) {
-        return Err(
-            "the surface is protected, so a live probe cannot read it. Generation for \
-             authenticated servers runs from the server card and lands in a later milestone"
-                .into(),
-        );
-    }
+    // A protected surface cannot be probed live, so generation
+    // reads it from its server card instead, and the baseline
+    // records the auth metadata the ladder fetched alongside.
+    let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
+    let snapshot = if matches!(probe_snapshot.auth, AuthSurface::Protected(_)) {
+        let (built, bytes, description) = snapshot_from_card(site, target, &probe_snapshot)?;
+        card_source = Some((bytes, description));
+        built
+    } else {
+        probe_snapshot
+    };
 
     let entry_id = format!("urn:air:{domain}:mcp:{}", snapshot.server_name);
-    let mut card = serde_json::json!({
-        "name": snapshot.server_name,
-        "version": snapshot.server_version,
-        "protocolVersion": snapshot.protocol_version,
-        "transport": snapshot.transport,
-        "tools": snapshot.tools.iter().map(|tool| serde_json::json!({
-            "name": tool.name,
-            "description": tool.description,
-            "inputSchema": tool.input_schema,
-        })).collect::<Vec<_>>(),
-        "resources": snapshot.resources,
-        "prompts": snapshot.prompts,
-    });
-    // For an HTTP surface the card records the endpoint it was
-    // probed at, so a later check with no target named can
-    // resolve the endpoint from the catalog entry's card, the
-    // way docs/HTTP-TRANSPORT.md asks, instead of guessing.
-    if let ProbeTarget::Http(url) = target {
-        card["endpoint"] = serde_json::json!(url);
-    }
-    warn_on_card_disagreement(site, &card);
-    let card_bytes = pretty_bytes(&card);
+    let card_bytes = match &card_source {
+        Some((bytes, _)) => bytes.clone(),
+        None => {
+            let mut card = serde_json::json!({
+                "name": snapshot.server_name,
+                "version": snapshot.server_version,
+                "protocolVersion": snapshot.protocol_version,
+                "transport": snapshot.transport,
+                "tools": snapshot.tools.iter().map(|tool| serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                })).collect::<Vec<_>>(),
+                "resources": snapshot.resources,
+                "prompts": snapshot.prompts,
+            });
+            // For an HTTP surface the card records the endpoint
+            // it was probed at, so a later check with no target
+            // named can resolve the endpoint from the catalog
+            // entry's card, the way docs/HTTP-TRANSPORT.md asks,
+            // instead of guessing.
+            if let ProbeTarget::Http(url) = target {
+                card["endpoint"] = serde_json::json!(url);
+            }
+            warn_on_card_disagreement(site, &card);
+            pretty_bytes(&card)
+        }
+    };
     let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
     write_file(&site.join(".well-known/mcp/server-card.json"), &card_bytes)?;
 
@@ -178,13 +305,17 @@ pub fn generate(
         media_type: "application/mcp-server-card+json".into(),
         url: Some(card_url.clone()),
         data: None,
-        description: format!("The {} MCP server.", snapshot.server_name),
+        description: match &card_source {
+            Some((_, Some(description))) => description.clone(),
+            _ => format!("The {} MCP server.", snapshot.server_name),
+        },
         capabilities: tool_names,
         representative_queries,
         tags: vec![],
         version: Some(snapshot.server_version.clone()),
         digest: Some(hash::digest_field(&card_bytes)),
         updated_at: None,
+        trust_manifest: None,
     }];
 
     let mcp_baseline = McpBaseline::from_snapshot(&entry_id, &snapshot);
@@ -195,7 +326,12 @@ pub fn generate(
     }];
     let mut provenance = vec![EntryProvenance {
         entry_id: entry_id.clone(),
-        produced_by: "live-probe".into(),
+        produced_by: if card_source.is_some() {
+            "server-card"
+        } else {
+            "live-probe"
+        }
+        .into(),
         overruled: vec![],
     }];
     let mut skills = Vec::new();
@@ -229,6 +365,7 @@ pub fn generate(
             version: None,
             digest: Some(hash::digest_field(&bytes)),
             updated_at: None,
+            trust_manifest: None,
         });
         skills.push(SkillBaseline {
             entry_id: skill_id.clone(),
@@ -579,4 +716,44 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
         eprintln!("declared evidence only, the surface is protected and was not probed live");
     }
     Ok(drift::exit_code(&report.findings, fail_at))
+}
+
+/// The validate command over a site, reading the catalog pair.
+/// Exit 1 when any finding is major or above, 0 when the
+/// catalog is sound or only warns. An Err is a catalog that
+/// could not be read, exit 2 at the caller.
+pub fn validate_site(site: &Path) -> Result<i32, String> {
+    let published: Catalog = read_json(&site.join(".well-known/ard.json"))?;
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    let legacy: Option<Catalog> = if legacy_path.exists() {
+        Some(read_json(&legacy_path)?)
+    } else {
+        None
+    };
+    Ok(report_validation(&published, legacy.as_ref()))
+}
+
+/// The validate command over one catalog file.
+pub fn validate_file(path: &Path) -> Result<i32, String> {
+    let published: Catalog = read_json(path)?;
+    Ok(report_validation(&published, None))
+}
+
+fn report_validation(published: &Catalog, legacy: Option<&Catalog>) -> i32 {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let findings =
+        almanac_core::validate::validate_catalog(published, legacy, &today_utc(), now_unix);
+    let report = Report::new(findings, Severity::Major);
+    let printed = PrintedReport {
+        mode: "validate",
+        report: &report,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&printed).expect("the report always serializes")
+    );
+    drift::exit_code(&report.findings, Severity::Major)
 }
