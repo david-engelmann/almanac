@@ -37,10 +37,12 @@ Generation is the on-ramp. The gate is the product.
   counts, dual path coherence and trust manifest shape and expiry.
 - check is the drift gate for CI, in an offline repo mode and a live
   mode that probes the deployed surface.
-- migrate, not yet built, takes a publisher stranded on the legacy
-  path, verifies their ai-catalog.json against the live surface
-  instead of copying it, and emits the dual path pair, the baseline
-  and the gate.
+- migrate takes a publisher stranded on the legacy path, verifies
+  their ai-catalog.json against the live surface and the site's
+  own files instead of copying it, and emits the dual path pair,
+  the baseline and the CI wiring for the entries that verify.
+  Entries that fail verification are reported, never silently
+  carried and never silently dropped.
 
 ## State
 
@@ -53,9 +55,9 @@ authenticated surface path, the drift engine behind them,
 generation from the server card for protected surfaces, and the
 validate command, and the first milestone has passed through three
 independent checkpoint reviews whose findings are fixed or recorded
-as named work in DECISIONS.md. The one command still missing is
-migrate. The design record lives in docs/DESIGN.md. No release
-exists yet.
+as named work in DECISIONS.md. All four commands are now built,
+migrate included. The design record lives in docs/DESIGN.md. No
+release exists yet.
 
 ## License
 

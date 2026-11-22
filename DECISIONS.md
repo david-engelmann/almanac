@@ -176,3 +176,82 @@ alone pass, an unreadable catalog is exit 2. Validate reads a
 whole site or one catalog file with --file. The trust manifest
 expiry minor class deferred at the milestone one checkpoint
 lands here with it, as that record said it would.
+
+## Migrate (2026-11-21)
+
+Main ordered migrate the same day it accepted milestone two,
+the last unbuilt command. The legacy catalog is read as a
+claim and verified entry by entry. An MCP entry verifies
+against the probed surface, or the server card when the
+surface is protected, and its announced capabilities
+reconcile to the served tools with every difference named in
+the report, a tool the surface dropped, a tool the catalog
+never announced. A skill entry verifies when the file it
+announces is in the site and its frontmatter parses. Any
+other url entry verifies when the artifact it announces is
+in the site. An inlined entry fails, because migration
+carries only what it can check against the surface or the
+site, and it is reported with that reason rather than dropped
+in silence. Carried entries keep the publisher's own fields,
+digests are recorded afresh from the artifacts as written,
+and the baseline is recorded from what verification saw, the
+same construction generate uses. The pair, the baseline and
+the CI wiring are written only when at least one entry
+verifies. Exit 0 when every entry verified, 1 when some
+failed or none did, 2 when migration could not run, no
+legacy catalog, an ard.json already present, no target named
+for a server claim, or a probe that could not read the
+surface. The CI wiring is a workflow that installs almanac
+from its repository and runs repo mode on pull requests and
+the live check weekly when the surface was probed over HTTP,
+and an existing workflow file is never overwritten.
+
+## Migrate checkpoint fix pass (2026-11-21)
+
+The three checkpoint reviews of migrate returned no criticals
+and six majors between the spec axis and the red team, and
+the fix pass tightened what verification means, in four ways.
+Capability and version claims are now judged, not just noted.
+A tool the entry announced that the surface no longer serves,
+a tool the surface serves that the entry never announced, and
+a version the surface does not match are failures of the
+entry's claim in the report, and the migration exits 1, while
+the entry itself still carries in reconciled form, because
+the server is real and dropping its entry would lose the
+listing the wedge exists to save. Announced digests are
+verified. A skill or artifact whose bytes no longer match the
+digest the catalog announced fails, and so does an MCP entry
+whose announced digest no longer matches the server card in
+the site. A surface that cannot be probed no longer stops the
+run. The server entries fail with the probe's reason and the
+entries that verify against the site are still judged, on the
+design's own principle that an unreachable announced server
+is a fact about the catalog. And identity is checked. The
+probed surface's name must match the MCP entry's name, a
+skill file's frontmatter name must match its entry, a second
+MCP entry fails because the baseline records one server, and
+a duplicated identifier fails after its first occurrence.
+
+Two readings from the first pass stand, recorded as the
+version 1 level rather than silently. A non-MCP, non-skill url
+entry verifies at the level of the artifact it announces
+being in the site with a matching digest when one was
+announced. Its content, an OpenAPI document's operations
+above all, is the generation roadmap's deeper verification,
+not migration's. And inlined entries fail, because an inlined
+claim has no external referent this build can check it
+against, and the failure is reported with that reason.
+
+The reviews' smaller findings landed too. The legacy catalog
+parses entry by entry, so one malformed entry is a reported
+failure rather than a dead end. A card already in the site
+earns the same disagreement warnings generate gives. Writes
+land baseline first, then the pair, and replacements of an
+existing card or baseline are noted in the report. Read
+failures name themselves instead of reporting absence. The CI
+workflow relativizes an absolute site path before writing it
+down. Provenance on carried skill and artifact entries reads
+migration, and the version an MCP entry gains from the
+surface is noted in the report. The red team's dynamic pass
+was blocked by the write fault and is owed against the fixed
+build, its cases prebuilt under the audit's own directory.

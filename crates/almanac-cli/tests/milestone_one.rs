@@ -993,3 +993,398 @@ fn validate_clean_then_broken() {
     let (code, _, _) = run(&["validate", "--file", &garbage.to_string_lossy()]);
     assert_eq!(code, 2, "unparseable catalog must exit 2");
 }
+
+// ----------------------------------------------------------------
+// Migrate. The legacy catalog is a claim, verified entry by
+// entry. What verifies carries, what fails is reported.
+
+const SEVEN_TOOLS: [&str; 7] = [
+    "validate_scene",
+    "inspect_traces",
+    "render_scene",
+    "session_run",
+    "session_frames",
+    "scene_panel_detail",
+    "incident_scene",
+];
+
+fn legacy_site(name: &str, entries: serde_json::Value) -> PathBuf {
+    let site = temp_site(name);
+    let catalog = serde_json::json!({
+        "host": {"displayName": "Example", "domain": "example.com"},
+        "entries": entries
+    });
+    std::fs::create_dir_all(site.join(".well-known")).expect("well known");
+    std::fs::write(
+        site.join(".well-known/ai-catalog.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&catalog).expect("serialize")
+        ),
+    )
+    .expect("legacy catalog");
+    site
+}
+
+fn legacy_mcp_entry(capabilities: Vec<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "identifier": "urn:air:example.com:mcp:telorama",
+        "displayName": "telorama",
+        "type": "application/mcp-server-card+json",
+        "url": "https://example.com/.well-known/mcp/server-card.json",
+        "description": "The telorama MCP server.",
+        "capabilities": capabilities,
+        "representativeQueries": ["What can telorama do", "Use telorama to complete a task"],
+        "version": "0.1.0"
+    })
+}
+
+fn legacy_skill_entry() -> serde_json::Value {
+    serde_json::json!({
+        "identifier": "urn:air:example.com:skill:demo-review",
+        "displayName": "demo-review",
+        "type": "text/markdown",
+        "url": "https://example.com/skills/demo-review/SKILL.md",
+        "description": "Reviews a demo.",
+        "representativeQueries": ["Review this demo", "Review that demo"]
+    })
+}
+
+fn write_demo_skill(site: &Path) {
+    let path = site.join("skills/demo-review/SKILL.md");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+    std::fs::write(
+        path,
+        "---\nname: demo-review\ndescription: Reviews a demo.\n---\n\nSteps.\n",
+    )
+    .expect("skill");
+}
+
+fn migrate_stdio(site: &Path, server: &Path, ci: &Path) -> (i32, String, String) {
+    run(&[
+        "migrate",
+        "--site",
+        &site_arg(site),
+        "--ci",
+        &ci.to_string_lossy(),
+        "--command",
+        &server.to_string_lossy(),
+    ])
+}
+
+#[test]
+fn migrate_clean_legacy_site_then_check_passes() {
+    let site = legacy_site(
+        "mig-clean",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec()), legacy_skill_entry()]),
+    );
+    write_demo_skill(&site);
+    let server = fixture_binary("fixture_server");
+    let ci = site.join("ci/almanac.yml");
+
+    let (code, stdout, stderr) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 0, "migrate failed with {stdout} {stderr}");
+    assert!(
+        stdout.contains("urn:air:example.com:mcp:telorama"),
+        "report was {stdout}"
+    );
+    assert!(site.join(".well-known/ard.json").exists());
+    assert!(site.join("baseline.json").exists());
+    assert!(ci.exists(), "CI wiring must be written");
+
+    // The migrated site passes the gate in both modes.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "repo check after migrate failed with {stdout}");
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--command",
+        &server.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "live check after migrate failed with {stdout}");
+
+    // A second migration refuses. The site is no longer legacy.
+    let (code, _, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 2, "a second migrate must refuse");
+}
+
+#[test]
+fn migrate_reconciles_a_dead_tool_and_reports_it() {
+    let mut capabilities = SEVEN_TOOLS.to_vec();
+    capabilities.push("vanished_tool");
+    let site = legacy_site(
+        "mig-dead-tool",
+        serde_json::json!([legacy_mcp_entry(capabilities)]),
+    );
+    let server = fixture_binary("fixture_server");
+    let ci = site.join("ci/almanac.yml");
+
+    let (code, stdout, stderr) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(
+        code, 1,
+        "a false capability claim must exit 1, report was {stdout} {stderr}"
+    );
+    assert!(
+        stdout.contains("vanished_tool"),
+        "the dead tool must be named in the report, which was {stdout}"
+    );
+    assert!(
+        stdout.contains("no longer serves"),
+        "the claim failure must be stated, report was {stdout}"
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("ard"))
+            .expect("parses");
+    let carried = catalog["entries"][0]["capabilities"]
+        .as_array()
+        .expect("capabilities");
+    assert_eq!(carried.len(), 7, "the dead tool must not carry over");
+    assert!(
+        !carried.iter().any(|c| c == "vanished_tool"),
+        "capabilities were {carried:?}"
+    );
+
+    // And the migrated site gates clean against the live surface.
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--command",
+        &server.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "live check after migrate failed with {stdout}");
+}
+
+#[test]
+fn migrate_reports_an_unverifiable_entry_and_still_lands() {
+    let ghost = serde_json::json!({
+        "identifier": "urn:air:example.com:openapi:ghost",
+        "displayName": "ghost",
+        "type": "application/openapi+json",
+        "url": "https://example.com/openapi.json",
+        "description": "An API that is not in the site.",
+        "representativeQueries": ["Call the ghost API", "List ghost operations"]
+    });
+    let site = legacy_site(
+        "mig-ghost",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec()), ghost]),
+    );
+    let server = fixture_binary("fixture_server");
+    let ci = site.join("ci/almanac.yml");
+
+    let (code, stdout, stderr) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(
+        code, 1,
+        "a failed entry must exit 1, report was {stdout} {stderr}"
+    );
+    assert!(
+        stdout.contains("urn:air:example.com:openapi:ghost"),
+        "the failed entry must be named, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("not in the site"),
+        "the reason must be named, report was {stdout}"
+    );
+    // The verified entry still landed as a pair.
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("ard"))
+            .expect("parses");
+    assert_eq!(catalog["entries"].as_array().expect("entries").len(), 1);
+
+    // A site with nothing to migrate is a could not run.
+    let empty = temp_site("mig-empty");
+    let (code, _, _) = migrate_stdio(&empty, &server, &ci);
+    assert_eq!(code, 2, "no legacy catalog must exit 2");
+}
+
+#[test]
+fn migrate_fails_false_claims() {
+    let server = fixture_binary("fixture_server");
+
+    // A skill whose file no longer matches the announced digest.
+    let mut skill = legacy_skill_entry();
+    skill["digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let site = legacy_site("mig-digest", serde_json::json!([skill]));
+    write_demo_skill(&site);
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 1, "digest mismatch must exit 1, report was {stdout}");
+    assert!(
+        stdout.contains("no longer matches the digest"),
+        "report was {stdout}"
+    );
+    assert!(
+        !site.join(".well-known/ard.json").exists(),
+        "nothing verified, so nothing may be written"
+    );
+
+    // A skill file declaring a different name than its entry.
+    let site = legacy_site("mig-name", serde_json::json!([legacy_skill_entry()]));
+    let path = site.join("skills/demo-review/SKILL.md");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+    std::fs::write(
+        path,
+        "---\nname: other-skill\ndescription: Reviews a demo.\n---\n\nSteps.\n",
+    )
+    .expect("skill");
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 1, "name mismatch must exit 1, report was {stdout}");
+    assert!(stdout.contains("other-skill"), "report was {stdout}");
+
+    // An MCP entry naming a different server than the surface.
+    let mut wrong = legacy_mcp_entry(SEVEN_TOOLS.to_vec());
+    wrong["identifier"] = serde_json::json!("urn:air:example.com:mcp:payments-api");
+    let site = legacy_site("mig-identity", serde_json::json!([wrong]));
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(
+        code, 1,
+        "identity mismatch must exit 1, report was {stdout}"
+    );
+    assert!(stdout.contains("calls itself"), "report was {stdout}");
+    assert!(!site.join(".well-known/ard.json").exists());
+
+    // A second MCP entry is reported, the first still migrates.
+    let mut second = legacy_mcp_entry(SEVEN_TOOLS.to_vec());
+    second["identifier"] = serde_json::json!("urn:air:example.com:mcp:telorama-two");
+    let site = legacy_site(
+        "mig-two-servers",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec()), second]),
+    );
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 1, "a second server must exit 1, report was {stdout}");
+    assert!(
+        stdout.contains("more than one MCP server"),
+        "report was {stdout}"
+    );
+    assert!(site.join(".well-known/ard.json").exists());
+
+    // A duplicated identifier and an inlined entry both fail,
+    // each with its reason, beside an entry that verifies.
+    let inlined = serde_json::json!({
+        "identifier": "urn:air:example.com:notes:inline",
+        "displayName": "inline",
+        "type": "application/json",
+        "data": {"hello": "world"},
+        "description": "Inlined notes.",
+        "representativeQueries": ["Show the notes", "Read the notes"]
+    });
+    let site = legacy_site(
+        "mig-dup-inline",
+        serde_json::json!([legacy_skill_entry(), legacy_skill_entry(), inlined]),
+    );
+    write_demo_skill(&site);
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 1, "report was {stdout}");
+    assert!(stdout.contains("more than once"), "report was {stdout}");
+    assert!(stdout.contains("inlined entry"), "report was {stdout}");
+
+    // One malformed entry is reported, not a dead end.
+    let malformed = serde_json::json!({
+        "identifier": "urn:air:example.com:skill:broken",
+        "displayName": "broken",
+        "type": "text/markdown",
+        "url": "https://example.com/skills/broken/SKILL.md"
+    });
+    let site = legacy_site(
+        "mig-malformed",
+        serde_json::json!([legacy_skill_entry(), malformed]),
+    );
+    write_demo_skill(&site);
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 1, "report was {stdout}");
+    assert!(stdout.contains("does not parse"), "report was {stdout}");
+    assert!(site.join(".well-known/ard.json").exists());
+}
+
+#[test]
+fn migrate_probe_failure_still_judges_the_site() {
+    let site = legacy_site(
+        "mig-probe-fails",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec()), legacy_skill_entry()]),
+    );
+    write_demo_skill(&site);
+    let ci = site.join("ci/almanac.yml");
+
+    // The server command does not exist. The server claim fails
+    // with the probe's reason, the skill still verifies, and
+    // the pair still lands for what verified.
+    let (code, stdout, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+        "--command",
+        "/nonexistent-server-binary",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a failed probe must exit 1, report was {stdout} {stderr}"
+    );
+    assert!(stdout.contains("the probe failed"), "report was {stdout}");
+    assert!(site.join(".well-known/ard.json").exists());
+
+    // A server claim with no target named is a could not run.
+    let site = legacy_site(
+        "mig-no-target",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec())]),
+    );
+    let ci = site.join("ci/almanac.yml");
+    let (code, _, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+    ]);
+    assert_eq!(code, 2, "no target must exit 2, stderr was {stderr}");
+
+    // An existing CI file is never overwritten.
+    let site = legacy_site("mig-ci-kept", serde_json::json!([legacy_skill_entry()]));
+    write_demo_skill(&site);
+    let ci = site.join("ci/almanac.yml");
+    std::fs::create_dir_all(ci.parent().expect("parent")).expect("dirs");
+    std::fs::write(&ci, "sentinel\n").expect("sentinel");
+    let server = fixture_binary("fixture_server");
+    let (code, stdout, _) = migrate_stdio(&site, &server, &ci);
+    assert_eq!(code, 0, "migrate failed with {stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&ci).expect("ci"),
+        "sentinel\n",
+        "the existing CI file must stand"
+    );
+    assert!(stdout.contains("did not overwrite"), "report was {stdout}");
+}
+
+#[test]
+fn migrate_protected_surface_from_the_card() {
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "auth-clean".to_string();
+    let site = legacy_site(
+        "mig-protected",
+        serde_json::json!([legacy_mcp_entry(SEVEN_TOOLS.to_vec())]),
+    );
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "protected migrate failed with {stdout} {stderr}");
+    assert!(
+        stderr.contains("declared evidence only"),
+        "stderr was {stderr}"
+    );
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "declared check after migrate failed with {stdout}");
+}

@@ -38,7 +38,8 @@ Commands
 
 Target a surface with --url https://host/mcp or with --command and
 the server command last. Sites are directories, --site DIR.
-Validate reads a whole site, or one catalog file with --file PATH.";
+Validate reads a whole site, or one catalog file with --file PATH.
+Migrate writes CI wiring to --ci PATH when it migrates a site.";
 
 #[derive(Default)]
 struct Flags {
@@ -48,6 +49,7 @@ struct Flags {
     name: Option<String>,
     skill: Option<String>,
     file: Option<String>,
+    ci: Option<String>,
     fail_at: Option<String>,
     queries: Vec<String>,
     command: Vec<String>,
@@ -79,6 +81,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--name" => flags.name = Some(value(i)?),
             "--skill" => flags.skill = Some(value(i)?),
             "--file" => flags.file = Some(value(i)?),
+            "--ci" => flags.ci = Some(value(i)?),
             "--fail-at" => flags.fail_at = Some(value(i)?),
             "--queries" => {
                 flags.queries = value(i)?.split(',').map(|q| q.trim().to_string()).collect()
@@ -160,10 +163,19 @@ fn run() -> Result<i32, String> {
                 }
             }
         }
-        "migrate" => Err(format!(
-            "almanac {command} is not yet implemented. Generate and check land first, \
-             in that order, because the gate is the product and generation is its onboarding"
-        )),
+        "migrate" => {
+            let flags = parse_flags(&args[1..])?;
+            let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
+            let target = target(&flags)?;
+            let ci = PathBuf::from(
+                flags
+                    .ci
+                    .as_deref()
+                    .unwrap_or(".github/workflows/almanac.yml"),
+            );
+            let site_arg = flags.site.as_deref().unwrap_or(".").to_string();
+            site::migrate_site(&site, target.as_ref(), &ci, &site_arg)
+        }
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     }
 }

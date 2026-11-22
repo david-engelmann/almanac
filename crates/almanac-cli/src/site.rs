@@ -1,4 +1,5 @@
-//! Site reading, writing, and the generate and check commands.
+//! Site reading, writing, and the generate, validate, check
+//! and migrate commands.
 //!
 //! A site directory stands for a publisher's web root plus the
 //! repo-side baseline file. The catalog pair lives under
@@ -226,6 +227,31 @@ fn snapshot_from_card(
     ))
 }
 
+/// The server card document for a probed surface, as a value.
+/// For an HTTP surface the card records the endpoint it was
+/// probed at, so a later check with no target named can resolve
+/// the endpoint from the catalog entry's card, the way
+/// docs/HTTP-TRANSPORT.md asks, instead of guessing.
+fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget) -> serde_json::Value {
+    let mut card = serde_json::json!({
+        "name": snapshot.server_name,
+        "version": snapshot.server_version,
+        "protocolVersion": snapshot.protocol_version,
+        "transport": snapshot.transport,
+        "tools": snapshot.tools.iter().map(|tool| serde_json::json!({
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": tool.input_schema,
+        })).collect::<Vec<_>>(),
+        "resources": snapshot.resources,
+        "prompts": snapshot.prompts,
+    });
+    if let ProbeTarget::Http(url) = target {
+        card["endpoint"] = serde_json::json!(url);
+    }
+    card
+}
+
 /// The generate command. Probes the live surface, writes the dual
 /// path catalog, the server card and the baseline. A protected
 /// surface is generated from its server card instead.
@@ -261,27 +287,7 @@ pub fn generate(
     let card_bytes = match &card_source {
         Some((bytes, _)) => bytes.clone(),
         None => {
-            let mut card = serde_json::json!({
-                "name": snapshot.server_name,
-                "version": snapshot.server_version,
-                "protocolVersion": snapshot.protocol_version,
-                "transport": snapshot.transport,
-                "tools": snapshot.tools.iter().map(|tool| serde_json::json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "inputSchema": tool.input_schema,
-                })).collect::<Vec<_>>(),
-                "resources": snapshot.resources,
-                "prompts": snapshot.prompts,
-            });
-            // For an HTTP surface the card records the endpoint
-            // it was probed at, so a later check with no target
-            // named can resolve the endpoint from the catalog
-            // entry's card, the way docs/HTTP-TRANSPORT.md asks,
-            // instead of guessing.
-            if let ProbeTarget::Http(url) = target {
-                card["endpoint"] = serde_json::json!(url);
-            }
+            let card = card_value(&snapshot, target);
             warn_on_card_disagreement(site, &card);
             pretty_bytes(&card)
         }
@@ -737,6 +743,562 @@ pub fn validate_site(site: &Path) -> Result<i32, String> {
 pub fn validate_file(path: &Path) -> Result<i32, String> {
     let published: Catalog = read_json(path)?;
     Ok(report_validation(&published, None))
+}
+
+/// One entry migration could not verify, with the reason.
+#[derive(Serialize)]
+struct MigrationFailure {
+    entry: String,
+    reason: String,
+}
+
+/// The migration report. The entries carried, the entries that
+/// failed verification with their reasons, and the notes naming
+/// what migration changed on the entries it carried.
+#[derive(Serialize)]
+struct MigrationReport {
+    mode: &'static str,
+    carried: Vec<String>,
+    failed: Vec<MigrationFailure>,
+    notes: Vec<String>,
+}
+
+fn migration_failure(entry: &str, reason: &str) -> MigrationFailure {
+    MigrationFailure {
+        entry: entry.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Carry one verified artifact entry. The artifact's bytes go
+/// into the baseline, the entry's digest is recorded afresh
+/// from those bytes, and provenance names the migration as the
+/// producing input.
+fn carry_artifact(
+    carried: &mut Vec<Entry>,
+    artifacts: &mut Vec<ArtifactBaseline>,
+    provenance: &mut Vec<EntryProvenance>,
+    entry: &Entry,
+    url: &str,
+    bytes: &[u8],
+) {
+    artifacts.push(ArtifactBaseline {
+        entry_id: entry.identifier.clone(),
+        url: url.to_string(),
+        sha256: hash::sha256_hex(bytes),
+    });
+    let mut kept = entry.clone();
+    kept.digest = Some(hash::digest_field(bytes));
+    provenance.push(EntryProvenance {
+        entry_id: entry.identifier.clone(),
+        produced_by: "migration".into(),
+        overruled: vec![],
+    });
+    carried.push(kept);
+}
+
+/// The migrate command, the adoption wedge for the publishers
+/// stranded on the legacy path. The existing ai-catalog.json is
+/// read as a claim, every entry is verified against the live
+/// surface or the site's own artifacts, and the entries that
+/// verify are written out as the dual path pair with a baseline
+/// recorded from what verification actually saw, plus the CI
+/// wiring that keeps the pair honest. Entries that fail are
+/// reported with their reasons, never silently carried and
+/// never silently dropped. Exit 0 when every entry verified,
+/// exit 1 when some failed or none did, and an Err, exit 2 at
+/// the caller, when migration could not run at all.
+pub fn migrate_site(
+    site: &Path,
+    target: Option<&ProbeTarget>,
+    ci_path: &Path,
+    site_arg: &str,
+) -> Result<i32, String> {
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    if !legacy_path.exists() {
+        return Err(
+            "the site carries no ai-catalog.json, so there is no legacy catalog to migrate".into(),
+        );
+    }
+    if site.join(".well-known/ard.json").exists() {
+        return Err(
+            "the site already publishes ard.json, so it is not on the legacy path. \
+             Run check to gate the pair it has"
+                .into(),
+        );
+    }
+    // The catalog is read as raw JSON first and its entries
+    // parsed one by one, so one malformed entry is a reported
+    // failure instead of a dead end for the whole file. Only a
+    // host block that will not parse stops the run.
+    let raw: serde_json::Value = read_json(&legacy_path)?;
+    let host: Host =
+        serde_json::from_value(raw.get("host").cloned().unwrap_or(serde_json::Value::Null))
+            .map_err(|e| format!("the legacy catalog's host block did not parse with {e}"))?;
+    let domain = host.domain.clone();
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut failed: Vec<MigrationFailure> = Vec::new();
+    if let Some(raw_entries) = raw.get("entries").and_then(|v| v.as_array()) {
+        for (index, raw_entry) in raw_entries.iter().enumerate() {
+            match serde_json::from_value::<Entry>(raw_entry.clone()) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    let label = raw_entry
+                        .get("identifier")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("entry {}", index + 1));
+                    let reason = format!("the entry does not parse as a catalog entry with {e}");
+                    failed.push(migration_failure(&label, &reason));
+                }
+            }
+        }
+    }
+    let has_mcp = entries
+        .iter()
+        .any(|e| e.media_type == "application/mcp-server-card+json");
+
+    // The server claim verifies against the live surface, or
+    // against the server card when the surface is protected,
+    // the same declared evidence path generate uses. A surface
+    // that cannot be read does not stop the run. The server
+    // entries fail with the reason, and the entries that verify
+    // against the site alone are still judged, because an
+    // unreachable announced server is a fact about the catalog,
+    // not a failure of the tool.
+    let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
+    let mut probed_target: Option<&ProbeTarget> = None;
+    let mut probe_failure: Option<String> = None;
+    let snapshot = if has_mcp {
+        let named = target.ok_or(
+            "the legacy catalog announces an MCP server, and migration verifies it \
+             against the live surface. Name the surface with --url or --command",
+        )?;
+        probed_target = Some(named);
+        let probe_snapshot = run_probe(named);
+        if let Some(failure) = &probe_snapshot.failure {
+            probe_failure = Some(format!(
+                "the probe failed at {} with {}",
+                failure.step, failure.detail
+            ));
+            None
+        } else if matches!(probe_snapshot.auth, AuthSurface::Protected(_)) {
+            match snapshot_from_card(site, named, &probe_snapshot) {
+                Ok((built, bytes, description)) => {
+                    card_source = Some((bytes, description));
+                    Some(built)
+                }
+                Err(e) => {
+                    probe_failure = Some(e);
+                    None
+                }
+            }
+        } else {
+            Some(probe_snapshot)
+        }
+    } else {
+        None
+    };
+    let card_bytes = snapshot.as_ref().map(|snap| match &card_source {
+        Some((bytes, _)) => bytes.clone(),
+        None => pretty_bytes(&card_value(
+            snap,
+            probed_target.expect("a snapshot implies a target"),
+        )),
+    });
+
+    let mut carried: Vec<Entry> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    if !has_mcp {
+        notes.push("the legacy catalog announces no MCP server, so no surface was probed".into());
+    }
+    let mut mcp_baseline: Option<McpBaseline> = None;
+    let mut mcp_seen = false;
+    let mut skill_baselines: Vec<SkillBaseline> = Vec::new();
+    let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
+    let mut provenance: Vec<EntryProvenance> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in &entries {
+        let id = entry.identifier.as_str();
+        if !seen.insert(id.to_string()) {
+            failed.push(migration_failure(
+                id,
+                "the catalog announces this identifier more than once, and only the first entry was judged",
+            ));
+            continue;
+        }
+        if entry.has_shape_error() {
+            failed.push(migration_failure(
+                id,
+                "the entry carries both url and data, or neither",
+            ));
+            continue;
+        }
+        if entry.data.is_some() {
+            failed.push(migration_failure(
+                id,
+                "an inlined entry makes a claim migration cannot check against the surface or the site, and migration carries only what it can verify",
+            ));
+            continue;
+        }
+        if !entry.anchored_to(&domain) {
+            failed.push(migration_failure(
+                id,
+                "the entry URN is not anchored to the publisher domain",
+            ));
+            continue;
+        }
+        match entry.media_type.as_str() {
+            "application/mcp-server-card+json" => {
+                if mcp_seen {
+                    failed.push(migration_failure(
+                        id,
+                        "the catalog announces more than one MCP server, and this build's baseline records one, so this entry was not migrated",
+                    ));
+                    continue;
+                }
+                mcp_seen = true;
+                let Some(snap) = &snapshot else {
+                    let reason = format!(
+                        "{}, so the announced server claim does not verify",
+                        probe_failure
+                            .as_deref()
+                            .unwrap_or("the surface could not be probed")
+                    );
+                    failed.push(migration_failure(id, &reason));
+                    continue;
+                };
+                let segment = id.rsplit(':').next().unwrap_or_default();
+                if segment != snap.server_name {
+                    let reason = format!(
+                        "the entry names {segment} and the probed surface calls itself {}, so the claim does not verify against this surface",
+                        snap.server_name
+                    );
+                    failed.push(migration_failure(id, &reason));
+                    continue;
+                }
+                if snap.tools.is_empty() {
+                    failed.push(migration_failure(
+                        id,
+                        "the live surface serves no tools, so the announced server claim does not verify",
+                    ));
+                    continue;
+                }
+                // A server card already in the site is a repo
+                // artifact the entry makes a claim about. When
+                // the entry announced a digest for it, the bytes
+                // on disk must still match that digest.
+                if let (Some(announced), Some(url)) = (&entry.digest, &entry.url)
+                    && let Some(path) = url_to_path(site, &domain, url)
+                    && let Ok(existing) = fs::read(&path)
+                    && *announced != hash::digest_field(&existing)
+                {
+                    failed.push(migration_failure(
+                        id,
+                        "the server card in the site no longer matches the digest the catalog announced, so the entry does not verify",
+                    ));
+                    continue;
+                }
+                if card_source.is_none()
+                    && let Some(named) = probed_target
+                {
+                    warn_on_card_disagreement(site, &card_value(snap, named));
+                }
+                // The capability and version claims are judged,
+                // not just noted. Each one that fails is a
+                // failure of the entry's claim and the migration
+                // exits nonzero, while the entry itself carries
+                // in its reconciled form, because the server is
+                // real and dropping its entry would lose the
+                // publisher's listing entirely.
+                let live_names: Vec<String> = snap.tools.iter().map(|t| t.name.clone()).collect();
+                for name in &entry.capabilities {
+                    if !live_names.contains(name) {
+                        let reason = format!(
+                            "the entry announced {name}, which the surface no longer serves"
+                        );
+                        failed.push(migration_failure(id, &reason));
+                    }
+                }
+                for name in &live_names {
+                    if !entry.capabilities.contains(name) {
+                        let reason =
+                            format!("the surface serves {name}, which the entry never announced");
+                        failed.push(migration_failure(id, &reason));
+                    }
+                }
+                if let Some(announced) = &entry.version
+                    && *announced != snap.server_version
+                {
+                    let reason = format!(
+                        "the entry announced version {announced} and the surface serves {}",
+                        snap.server_version
+                    );
+                    failed.push(migration_failure(id, &reason));
+                }
+                let bytes = card_bytes.as_ref().expect("card bytes for the MCP entry");
+                let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
+                let mut kept = entry.clone();
+                kept.capabilities = live_names;
+                if kept.url.as_deref() != Some(card_url.as_str()) {
+                    notes.push(format!(
+                        "{id} pointed at {}, and the migrated entry points at the server card the pair publishes",
+                        entry.url.clone().unwrap_or_default()
+                    ));
+                    kept.url = Some(card_url.clone());
+                }
+                kept.digest = Some(hash::digest_field(bytes));
+                if entry.version.is_none() {
+                    notes.push(format!(
+                        "{id} carried no version, and the migrated entry records the surface's version {}",
+                        snap.server_version
+                    ));
+                }
+                kept.version = Some(snap.server_version.clone());
+                mcp_baseline = Some(McpBaseline::from_snapshot(id, snap));
+                artifacts.push(ArtifactBaseline {
+                    entry_id: id.to_string(),
+                    url: card_url,
+                    sha256: hash::sha256_hex(bytes),
+                });
+                provenance.push(EntryProvenance {
+                    entry_id: id.to_string(),
+                    produced_by: if card_source.is_some() {
+                        "server-card"
+                    } else {
+                        "live-probe"
+                    }
+                    .into(),
+                    overruled: vec![],
+                });
+                carried.push(kept);
+            }
+            "text/markdown" => {
+                let Some(url) = &entry.url else {
+                    failed.push(migration_failure(
+                        id,
+                        "a skill entry with no url cannot be verified",
+                    ));
+                    continue;
+                };
+                let Some(path) = url_to_path(site, &domain, url) else {
+                    failed.push(migration_failure(
+                        id,
+                        "the skill url is not on the publisher's own origin",
+                    ));
+                    continue;
+                };
+                let bytes = match fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        failed.push(migration_failure(
+                            id,
+                            "the skill file the entry announces is not in the site",
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        let reason = format!("the skill file could not be read with {e}");
+                        failed.push(migration_failure(id, &reason));
+                        continue;
+                    }
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let Ok((name, _)) = parse_skill_frontmatter(&text) else {
+                    failed.push(migration_failure(
+                        id,
+                        "the skill file's frontmatter does not parse, so the entry does not verify",
+                    ));
+                    continue;
+                };
+                // The frontmatter is authoritative for its
+                // entry, so a file declaring a different skill
+                // does not verify this entry.
+                let segment = id.rsplit(':').next().unwrap_or_default();
+                if name != segment {
+                    let reason = format!(
+                        "the skill file declares the name {name} and the entry announces {segment}, so the entry does not verify"
+                    );
+                    failed.push(migration_failure(id, &reason));
+                    continue;
+                }
+                if let Some(announced) = &entry.digest
+                    && *announced != hash::digest_field(&bytes)
+                {
+                    failed.push(migration_failure(
+                        id,
+                        "the skill file no longer matches the digest the catalog announced, so the entry does not verify",
+                    ));
+                    continue;
+                }
+                skill_baselines.push(SkillBaseline {
+                    entry_id: id.to_string(),
+                    sha256: hash::sha256_hex(&bytes),
+                });
+                carry_artifact(
+                    &mut carried,
+                    &mut artifacts,
+                    &mut provenance,
+                    entry,
+                    url,
+                    &bytes,
+                );
+            }
+            _ => {
+                let url = entry.url.clone().unwrap_or_default();
+                let Some(path) = url_to_path(site, &domain, &url) else {
+                    failed.push(migration_failure(
+                        id,
+                        "the entry url is not on the publisher's own origin, and migration verifies against the site and the surface only",
+                    ));
+                    continue;
+                };
+                let bytes = match fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        failed.push(migration_failure(
+                            id,
+                            "the artifact the entry announces is not in the site",
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        let reason = format!("the artifact could not be read with {e}");
+                        failed.push(migration_failure(id, &reason));
+                        continue;
+                    }
+                };
+                if let Some(announced) = &entry.digest
+                    && *announced != hash::digest_field(&bytes)
+                {
+                    failed.push(migration_failure(
+                        id,
+                        "the artifact no longer matches the digest the catalog announced, so the entry does not verify",
+                    ));
+                    continue;
+                }
+                carry_artifact(
+                    &mut carried,
+                    &mut artifacts,
+                    &mut provenance,
+                    entry,
+                    &url,
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    let exit = if carried.is_empty() || !failed.is_empty() {
+        1
+    } else {
+        0
+    };
+
+    if !carried.is_empty() {
+        // The baseline lands before the pair, so an interrupted
+        // run never leaves a published pair whose first check
+        // cannot run for want of a baseline.
+        if let (Some(bytes), Some(_)) = (&card_bytes, &mcp_baseline) {
+            if site.join(".well-known/mcp/server-card.json").exists() {
+                notes.push(
+                    "an existing server card was replaced with the card migration produced".into(),
+                );
+            }
+            write_file(&site.join(".well-known/mcp/server-card.json"), bytes)?;
+        }
+        if site.join("baseline.json").exists() {
+            notes.push(
+                "an existing baseline.json was replaced with the baseline migration recorded"
+                    .into(),
+            );
+        }
+        let baseline = Baseline {
+            spec_version: SPEC_VERSION.into(),
+            mcp: mcp_baseline,
+            skills: skill_baselines,
+            artifacts,
+            provenance,
+        };
+        write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;
+        let catalog = Catalog {
+            host: host.clone(),
+            entries: carried.clone(),
+        };
+        let pair = catalog.canonical_bytes();
+        write_file(&site.join(".well-known/ard.json"), &pair)?;
+        write_file(&site.join(".well-known/ai-catalog.json"), &pair)?;
+        write_ci(ci_path, site_arg, probed_target, &mut notes)?;
+        notes.push(
+            "digests on the carried entries were recorded afresh from the artifacts as written"
+                .into(),
+        );
+    }
+
+    let report = MigrationReport {
+        mode: "migrate",
+        carried: carried.iter().map(|e| e.identifier.clone()).collect(),
+        failed,
+        notes,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("the report always serializes")
+    );
+    if card_source.is_some() {
+        eprintln!("declared evidence only, the surface is protected and was not probed live");
+    }
+    Ok(exit)
+}
+
+/// The CI wiring migration emits, a workflow that installs
+/// almanac from its repository and runs the gate, repo mode on
+/// pull requests and the live check on a weekly schedule when
+/// the surface was probed over HTTP. An existing file is never
+/// overwritten.
+fn write_ci(
+    path: &Path,
+    site_arg: &str,
+    target: Option<&ProbeTarget>,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    if path.exists() {
+        notes.push(format!(
+            "CI wiring already exists at {}, and migration did not overwrite it",
+            path.display()
+        ));
+        return Ok(());
+    }
+    // The workflow runs in CI, so an absolute site path from
+    // the operator's machine is relativized against the working
+    // directory when it can be, and falls back to the working
+    // directory itself.
+    let site_display = if Path::new(site_arg).is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                Path::new(site_arg)
+                    .strip_prefix(cwd)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| ".".to_string())
+    } else {
+        site_arg.to_string()
+    };
+    let live = match target {
+        Some(ProbeTarget::Http(url)) => format!(
+            "\n      - name: Live check\n        if: github.event_name == 'schedule'\n        run: almanac check --site {site_display} --url {url}\n"
+        ),
+        _ => String::new(),
+    };
+    let text = format!(
+        "name: almanac\n\non:\n  pull_request:\n  schedule:\n    - cron: \"17 5 * * 1\"\n\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Install almanac\n        run: cargo install --git https://github.com/david-engelmann/almanac almanac-cli --locked\n      - name: Repo mode check\n        run: almanac check --site {site_display}\n{live}"
+    );
+    write_file(path, text.as_bytes())?;
+    notes.push(format!("CI wiring written to {}", path.display()));
+    Ok(())
 }
 
 fn report_validation(published: &Catalog, legacy: Option<&Catalog>) -> i32 {
