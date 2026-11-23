@@ -563,3 +563,110 @@ output when an HTTP endpoint does not map into the site;
 and the card copies are written before the baseline, the
 ordering the legacy card always had, so a run killed
 mid-write can leave a copy no baseline records yet.
+
+### Charge 2: the transport re-baseline to MCP 2026-07-28
+
+Core MCP is now revision 2026-07-28, frozen until the
+next revision targeted 2027-03-30. The revision is
+stateless: no initialize handshake, no sessions, identity
+carried per request in a _meta block, and server/discover
+mandatory as the entry point. The transport work targeted
+the 2025 revisions and called the stateless shape a later
+addition; the later addition is now the baseline, and
+both probes are re-baselined to it:
+
+- Discover first, on both transports. The request carries
+  _meta with io.modelcontextprotocol/protocolVersion
+  naming 2026-07-28, the client identity and the client
+  capabilities under the keys the revision names. A result
+  is read for the same fields the initialize result
+  carried, serverInfo and protocolVersion (one snapshot
+  construction serves both ladders), and a result that
+  omits the version is recorded under the offered
+  revision. The lists then walk statelessly: no session
+  header, no protocol version header, no initialized
+  notification, no DELETE courtesy.
+- The fallback is the ladder as built, and its trigger is
+  evidence based. Only an answer that says the method is
+  unknown, a JSON-RPC method not found error or an HTTP
+  404 or 405, proves the server predates discover, and
+  only that answer is walked through the initialize
+  handshake offering 2025-06-18, with session echo, the
+  version header, the notification and the DELETE,
+  unchanged. Every other discover failure is a probe
+  failure at the server/discover step (see the fix pass
+  below for why the trigger narrowed at the checkpoint).
+  Every pre-existing fixture exercises the fallback path,
+  because none of them knows discover.
+- A 401 at either entry, or mid walk under either shape,
+  routes to the RFC 9728 and RFC 8414 metadata ladder,
+  whose shape is unchanged. A protected current-revision
+  server is therefore found at its discover call, not by
+  probing a handshake it does not speak.
+- The snapshot records which shape the surface took, and
+  the protocol version goes into the baseline either way,
+  so a server migrating between shapes between generation
+  and check fires the server version class, as designed.
+- The behavior is pinned, not just described. An HTTP
+  fixture mode speaks only the current revision (discover
+  answered, initialize refused as method not found, lists
+  served with no session) and logs every method it
+  receives; the test asserts discover was first and
+  initialize was never sent. A stdio fixture binary speaks
+  discover only, from the same shared fixture body with
+  the handshake arms switched off, and a test generates
+  and checks against it.
+- docs/HTTP-TRANSPORT.md is re-baselined to match, its
+  protocol posture and probe sequence rewritten around
+  discover first, and DESIGN.md's generation input line
+  names the discover entry beside the handshake.
+
+### Charge 2 checkpoint fix pass (2026-11-23)
+
+The three checkpoint reviews found no Critical and three
+Majors, all on the fallback's shape, all fixed before
+landing. As first built, any discover failure fell back to
+the initialize ladder, silently. The reviews showed what
+that buys: a dual-stack server whose discover 500s at
+check time gets walked down its legacy ladder, and every
+difference between the two surfaces reports as drift that
+never happened; a generate during a discover outage
+records the legacy surface as the baseline of record with
+nothing saying so; and a server answering initialize with
+the current revision's string could pass fully clean while
+its announced discover surface was never probed. The
+fallback is now evidence based, on both transports: only
+a method not found answer (the JSON-RPC error, or HTTP
+404 or 405) proves the server predates discover. A 500, a
+different error, a transport failure, a result that is
+not an object, or a result naming no server is a probe
+failure at the server/discover step, with the break
+named. The same pass closed the transports' divergence
+on a null discover result (HTTP accepted it, stdio fell
+back; both now fail the step), put the _meta block on the
+stdio stateless list calls (only the discover call had
+carried it, against the revision's per-request identity
+and this record's own words), and corrected the
+snapshot's stateless flag to describe the walk's shape
+rather than the negotiated string, since the baseline
+never records it and a statefully walked 2026-negotiating
+server was mislabelled. The fixtures now enforce the
+stateless shape instead of assuming it: the HTTP 2026
+mode refuses session and version headers and requires
+_meta on discover and the lists, and the discover
+speaking stdio fixture requires _meta on its list calls,
+so a probe that drifts from the shape fails the suite
+instead of passing on code reading. Two supports the
+narrowed trigger needed: the HTTP round trip now parses a
+JSON-RPC message on any status, because servers commonly
+carry the method not found error in a 400 body and the
+fallback decision reads it, and the drift engine's
+unreachable mapping names the entry step of either
+revision, discover or initialize, since a failure there
+means the announced server could not be reached at all.
+The HTTP fixture's session refusal now guards only the
+methods the fixture serves, because a method it does not
+implement is answered method not found whatever the
+session state, the way a real framework dispatches; the
+list calls it exists to police are guarded exactly as
+before.

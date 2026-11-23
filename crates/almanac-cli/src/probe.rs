@@ -2,10 +2,13 @@
 //!
 //! Spawns an MCP server process and walks its surface over
 //! newline-delimited JSON-RPC, the same walk the HTTP probe makes,
-//! and returns the one snapshot value the core compares. The
-//! protocol version offered is the newest this build speaks. The
-//! negotiated version comes back in the snapshot, because a server
-//! that renegotiates its protocol has changed its surface.
+//! and returns the one snapshot value the core compares. The walk
+//! enters through server/discover, the current revision's entry
+//! point, and falls back to the initialize handshake the earlier
+//! revisions use when the server does not know discover. The
+//! protocol version the surface answers with comes back in the
+//! snapshot, because a server that renegotiates its protocol has
+//! changed its surface.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -16,6 +19,77 @@ use almanac_core::snapshot::{AuthSurface, ProbeFailure, SurfaceSnapshot, ToolSur
 use serde_json::{Value, json};
 
 pub const OFFERED_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The current MCP protocol revision, frozen until the next
+/// revision lands. Under it the protocol is stateless: no
+/// initialize handshake, no sessions, identity carried per
+/// request, and server/discover is the mandatory entry point.
+pub const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
+
+/// The _meta block every request carries under the current
+/// revision: the protocol version, the client identity and the
+/// client capabilities, keyed the way the revision names them.
+/// Identity travels per request now, not in a handshake.
+pub(crate) fn request_meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": CURRENT_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": {"name": "almanac", "version": env!("CARGO_PKG_VERSION")},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+/// The parameters of the discover call, the current revision's
+/// entry point: the meta block and nothing else.
+pub(crate) fn discover_params() -> Value {
+    json!({"_meta": request_meta()})
+}
+
+/// The parameters of a list call under the current revision:
+/// the meta block, plus the cursor when paging.
+pub(crate) fn list_params(cursor: Option<&str>) -> Value {
+    let mut params = json!({"_meta": request_meta()});
+    if let Some(cursor) = cursor {
+        params["cursor"] = json!(cursor);
+    }
+    params
+}
+
+/// Build the open snapshot from a handshake-shaped result. A
+/// discover result under the current revision and an initialize
+/// result under the earlier ones carry the same fields the
+/// snapshot reads, serverInfo and protocolVersion, so one
+/// construction serves both ladders.
+pub(crate) fn handshake_snapshot(
+    transport: &str,
+    result: &Value,
+    stateless_shape: bool,
+) -> SurfaceSnapshot {
+    let server_info = result.get("serverInfo").cloned().unwrap_or(Value::Null);
+    SurfaceSnapshot {
+        transport: transport.to_string(),
+        server_name: server_info
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        server_version: server_info
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        protocol_version: result
+            .get("protocolVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        stateless_shape,
+        tools: vec![],
+        resources: vec![],
+        prompts: vec![],
+        auth: AuthSurface::Open,
+        failure: None,
+    }
+}
 
 /// The normative server card URL for an MCP endpoint, per
 /// SEP-2127 Final: the endpoint URL with /server-card appended.
@@ -212,9 +286,11 @@ impl StdioClient {
     /// the whole request, not per line, so a server streaming
     /// unrelated lines cannot keep a request alive. When
     /// `allow_not_found` is set, a method-not-found error
-    /// returns the sentinel the list calls treat as an empty
-    /// surface. The handshake passes false, because a missing
-    /// initialize is a failure, not an empty surface.
+    /// returns a sentinel the callers read two ways: the list
+    /// calls treat it as an empty surface, and the discover
+    /// call treats it as the signal to fall back to the
+    /// handshake. The handshake itself passes false, because a
+    /// missing initialize is a failure, not an empty surface.
     fn request(
         &mut self,
         method: &str,
@@ -258,13 +334,17 @@ impl StdioClient {
     /// is capped, and a server that repeats the cursor it was
     /// just given fails the call, so a paging loop can never
     /// hold the gate open.
-    fn list_all(&mut self, method: &str) -> Result<Vec<Value>, String> {
+    fn list_all(&mut self, method: &str, stateless: bool) -> Result<Vec<Value>, String> {
         let mut pages = Vec::new();
         let mut cursor: Option<String> = None;
         for _page in 0..MAX_PAGES {
-            let params = match &cursor {
-                Some(cursor) => json!({"cursor": cursor}),
-                None => json!({}),
+            let params = if stateless {
+                list_params(cursor.as_deref())
+            } else {
+                match &cursor {
+                    Some(cursor) => json!({"cursor": cursor}),
+                    None => json!({}),
+                }
             };
             let result = self.request(method, params, true)?;
             if result.get("__method_not_found").is_some() {
@@ -301,6 +381,43 @@ pub fn probe_stdio(command: &[String]) -> SurfaceSnapshot {
 }
 
 fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
+    // Discover first, the current revision's entry point. The
+    // fallback is evidence based, as on the HTTP side: only the
+    // method not found sentinel proves the server predates
+    // discover. Any other discover failure (a different error,
+    // a timeout, a result that is not an object or names no
+    // server) is a failure at the server/discover step, because
+    // falling back would let a broken discover hide behind a
+    // healthy handshake and manufacture drift against the
+    // legacy surface.
+    match client.request("server/discover", discover_params(), true) {
+        Ok(result) if result.get("__method_not_found").is_some() => {}
+        Ok(result) => {
+            if !result.is_object() {
+                return failed_snapshot(
+                    transport,
+                    "server/discover",
+                    "server answered server/discover without a usable result".into(),
+                );
+            }
+            let mut snapshot = handshake_snapshot(transport, &result, true);
+            if snapshot.server_name.is_empty() {
+                return failed_snapshot(
+                    transport,
+                    "server/discover",
+                    "the discover result named no server".into(),
+                );
+            }
+            if snapshot.protocol_version.is_empty() {
+                snapshot.protocol_version = CURRENT_PROTOCOL_VERSION.into();
+            }
+            gather_lists(client, &mut snapshot, true);
+            return snapshot;
+        }
+        Err(detail) => return failed_snapshot(transport, "server/discover", detail),
+    }
+    // The server predates discover. The initialize handshake
+    // below is the earlier revisions' entry, unchanged.
     let init = match client.request(
         "initialize",
         json!({
@@ -313,31 +430,10 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
         Ok(result) => result,
         Err(detail) => return failed_snapshot(transport, "initialize", detail),
     };
-    let server_info = init.get("serverInfo").cloned().unwrap_or(Value::Null);
-    let mut snapshot = SurfaceSnapshot {
-        transport: transport.to_string(),
-        server_name: server_info
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        server_version: server_info
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        protocol_version: init
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        stateless_shape: init.get("protocolVersion").and_then(|v| v.as_str()) == Some("2026-07-28"),
-        tools: vec![],
-        resources: vec![],
-        prompts: vec![],
-        auth: AuthSurface::Open,
-        failure: None,
-    };
+    // The snapshot's stateless flag describes the walk's shape,
+    // not the negotiated string, and this ladder walks statefully
+    // whatever version the server names.
+    let mut snapshot = handshake_snapshot(transport, &init, false);
     if let Err(detail) = client.notify("notifications/initialized") {
         snapshot.failure = Some(ProbeFailure {
             step: "notifications/initialized".into(),
@@ -345,11 +441,21 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
         });
         return snapshot;
     }
+    gather_lists(client, &mut snapshot, false);
+    snapshot
+}
+
+/// Gather the three lists into the snapshot, recording the
+/// step that failed when one does. Both entry ladders end
+/// here. Under the current revision the list requests carry
+/// the _meta block like every other request; behind the
+/// handshake they carry only the cursor.
+fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, stateless: bool) {
     for kind in LIST_KINDS {
-        match client.list_all(kind.method()) {
+        match client.list_all(kind.method(), stateless) {
             Ok(pages) => {
                 for page in &pages {
-                    kind.apply(&mut snapshot, page);
+                    kind.apply(snapshot, page);
                 }
             }
             Err(detail) => {
@@ -357,11 +463,10 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
                     step: kind.method().into(),
                     detail,
                 });
-                return snapshot;
+                return;
             }
         }
     }
     snapshot.resources.sort();
     snapshot.prompts.sort();
-    snapshot
 }

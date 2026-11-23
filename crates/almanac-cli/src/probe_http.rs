@@ -1,13 +1,18 @@
 //! The Streamable HTTP probe.
 //!
 //! Implements the probe sequence and the authenticated ladder from
-//! docs/HTTP-TRANSPORT.md. One endpoint, JSON-RPC by POST, both
-//! response framings read, the session id echoed when one is
-//! issued, the protocol version header sent after initialization,
-//! no GET stream opened, lists paginated to completion. A 401 is a
-//! branch, not a dead end. It leads to the OAuth metadata ladder,
-//! and the run degrades to declared evidence with the metadata
-//! recorded for the drift engine.
+//! docs/HTTP-TRANSPORT.md. The walk enters through
+//! server/discover, the current revision's entry point, and walks
+//! the lists statelessly when the server answers it. A server that
+//! does not know discover is walked through the initialize
+//! handshake the earlier revisions use, with the session id echoed
+//! when one is issued and the protocol version header sent after
+//! initialization. One endpoint, JSON-RPC by POST, both response
+//! framings read, no GET stream opened, lists paginated to
+//! completion. A 401 at either entry is a branch, not a dead end.
+//! It leads to the OAuth metadata ladder, and the run degrades to
+//! declared evidence with the metadata recorded for the drift
+//! engine.
 //!
 //! Redirects on the MCP endpoint are not followed. An announced
 //! endpoint that forwards agents elsewhere is a surface change to
@@ -20,7 +25,8 @@ use serde_json::{Value, json};
 use ureq::Agent;
 
 use crate::probe::{
-    LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, failed_snapshot, is_method_not_found,
+    CURRENT_PROTOCOL_VERSION, LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, discover_params,
+    failed_snapshot, handshake_snapshot, is_method_not_found, list_params,
 };
 use crate::sse;
 
@@ -103,7 +109,13 @@ fn rpc(
             .read_to_end(&mut bytes);
         String::from_utf8_lossy(&bytes).to_string()
     };
-    let message = if status == 200 && id.is_some() {
+    // The message is parsed on any status, not only on 200,
+    // because a JSON-RPC error body is data whatever HTTP
+    // status carries it. Servers that refuse an unknown
+    // method often answer 400 with the method not found error
+    // in the body, and the probe's fallback decisions read
+    // that error, so discarding it by status would blind them.
+    let message = if id.is_some() {
         if content_type.contains("text/event-stream") {
             sse::messages(&body)
                 .into_iter()
@@ -310,11 +322,192 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
     }
 }
 
-/// Probe an MCP server over Streamable HTTP.
+/// How a list walk ended. A protected answer mid walk hands
+/// back the degraded snapshot the metadata ladder built, and
+/// the caller returns it instead of the walked one.
+enum ListWalk {
+    Done,
+    Protected(Box<SurfaceSnapshot>),
+}
+
+/// Walk the three lists into the snapshot over HTTP, following
+/// pagination to completion. Under the current revision the
+/// requests are stateless, identity in the meta block, no
+/// session and no version header. Under the earlier revisions
+/// the session and the negotiated version header ride along.
+/// Both shapes share this walk, because a partial list is a
+/// wrong list under either.
+fn walk_lists(
+    agent: &Agent,
+    url: &str,
+    snapshot: &mut SurfaceSnapshot,
+    session: Option<&str>,
+    version: Option<&str>,
+    stateless: bool,
+    next_id: &mut i64,
+) -> ListWalk {
+    for kind in LIST_KINDS {
+        let method = kind.method();
+        let mut cursor: Option<String> = None;
+        let mut terminated = false;
+        for _page in 0..MAX_PAGES {
+            let params = if stateless {
+                list_params(cursor.as_deref())
+            } else {
+                match &cursor {
+                    Some(cursor) => json!({"cursor": cursor}),
+                    None => json!({}),
+                }
+            };
+            let id = *next_id;
+            *next_id += 1;
+            let outcome = match rpc(agent, url, session, version, Some(id), method, params) {
+                Ok(outcome) => outcome,
+                Err(detail) => {
+                    snapshot.failure = Some(ProbeFailure {
+                        step: method.into(),
+                        detail,
+                    });
+                    return ListWalk::Done;
+                }
+            };
+            if outcome.status == 401 {
+                return ListWalk::Protected(Box::new(protected_snapshot(
+                    agent,
+                    url,
+                    outcome.www_authenticate.as_deref(),
+                )));
+            }
+            let Some(message) = outcome.message else {
+                snapshot.failure = Some(ProbeFailure {
+                    step: method.into(),
+                    detail: format!("endpoint answered HTTP {} without a result", outcome.status),
+                });
+                return ListWalk::Done;
+            };
+            if is_method_not_found(&message) {
+                terminated = true;
+                break;
+            }
+            if let Some(error) = message.get("error") {
+                snapshot.failure = Some(ProbeFailure {
+                    step: method.into(),
+                    detail: format!("server answered {method} with error {error}"),
+                });
+                return ListWalk::Done;
+            }
+            let page = message.get("result").cloned().unwrap_or(Value::Null);
+            kind.apply(snapshot, &page);
+            match page.get("nextCursor").and_then(|v| v.as_str()) {
+                Some(next) if Some(next) != cursor.as_deref() => {
+                    cursor = Some(next.to_string());
+                }
+                Some(_) => {
+                    snapshot.failure = Some(ProbeFailure {
+                        step: method.into(),
+                        detail: "the server repeated a pagination cursor".into(),
+                    });
+                    return ListWalk::Done;
+                }
+                None => {
+                    terminated = true;
+                    break;
+                }
+            }
+        }
+        if !terminated {
+            snapshot.failure = Some(ProbeFailure {
+                step: method.into(),
+                detail: format!("pagination did not terminate after {MAX_PAGES} pages"),
+            });
+            return ListWalk::Done;
+        }
+    }
+    snapshot.resources.sort();
+    snapshot.prompts.sort();
+    ListWalk::Done
+}
+
+/// Probe an MCP server over Streamable HTTP. Discover first,
+/// the current revision's entry point, and the initialize
+/// ladder behind it for the servers that predate discover.
+///
+/// The fallback is evidence based, because the two entries
+/// diagnose different servers. Only an answer that says the
+/// method is unknown, a JSON-RPC method not found error or an
+/// HTTP 404 or 405, proves the server predates discover, and
+/// only that answer falls back. A server that claims the
+/// current revision and breaks at discover (a 500, another
+/// JSON-RPC error, a result that is not an object, a result
+/// naming no server) fails at the server/discover step with
+/// the break named, because falling back would manufacture
+/// drift against whichever surface the legacy ladder happened
+/// to show, and would let a broken discover hide behind a
+/// healthy handshake indefinitely. A transport failure is a
+/// discover failure too, for the same reason.
 pub fn probe_http(url: &str) -> SurfaceSnapshot {
     let agent = build_agent();
-    let init = match rpc(
+    let outcome = match rpc(
         &agent,
+        url,
+        None,
+        None,
+        Some(1),
+        "server/discover",
+        discover_params(),
+    ) {
+        Ok(outcome) => outcome,
+        Err(detail) => return failed_snapshot(TRANSPORT, "server/discover", detail),
+    };
+    if outcome.status == 401 {
+        return protected_snapshot(&agent, url, outcome.www_authenticate.as_deref());
+    }
+    if outcome.message.as_ref().is_some_and(is_method_not_found)
+        || matches!(outcome.status, 404 | 405)
+    {
+        return initialize_ladder(&agent, url);
+    }
+    let result = outcome
+        .message
+        .as_ref()
+        .and_then(|message| message.get("result"))
+        .filter(|result| result.is_object());
+    let Some(result) = result else {
+        let detail = match &outcome.message {
+            Some(message) => match message.get("error") {
+                Some(error) => format!("server answered server/discover with error {error}"),
+                None => "server answered server/discover without a usable result".to_string(),
+            },
+            None => format!("endpoint answered HTTP {} without a result", outcome.status),
+        };
+        return failed_snapshot(TRANSPORT, "server/discover", detail);
+    };
+    let mut snapshot = handshake_snapshot(TRANSPORT, result, true);
+    if snapshot.server_name.is_empty() {
+        return failed_snapshot(
+            TRANSPORT,
+            "server/discover",
+            "the discover result named no server".into(),
+        );
+    }
+    if snapshot.protocol_version.is_empty() {
+        snapshot.protocol_version = CURRENT_PROTOCOL_VERSION.into();
+    }
+    let mut next_id = 2_i64;
+    if let ListWalk::Protected(protected) =
+        walk_lists(&agent, url, &mut snapshot, None, None, true, &mut next_id)
+    {
+        return *protected;
+    }
+    snapshot
+}
+
+/// The earlier revisions' entry: an initialize handshake, the
+/// initialized notification, the lists with the session echoed,
+/// and the DELETE courtesy when the server issued a session.
+fn initialize_ladder(agent: &Agent, url: &str) -> SurfaceSnapshot {
+    let init = match rpc(
+        agent,
         url,
         None,
         None,
@@ -330,7 +523,7 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
         Err(detail) => return failed_snapshot(TRANSPORT, "initialize", detail),
     };
     if init.status == 401 {
-        return protected_snapshot(&agent, url, init.www_authenticate.as_deref());
+        return protected_snapshot(agent, url, init.www_authenticate.as_deref());
     }
     if init.status != 200 {
         let detail = match (&init.location, init.status) {
@@ -356,32 +549,15 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
         );
     }
     let result = init_message.get("result").cloned().unwrap_or(Value::Null);
-    let server_info = result.get("serverInfo").cloned().unwrap_or(Value::Null);
     let negotiated = result
         .get("protocolVersion")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let mut snapshot = SurfaceSnapshot {
-        transport: TRANSPORT.to_string(),
-        server_name: server_info
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        server_version: server_info
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        protocol_version: negotiated.clone(),
-        stateless_shape: negotiated == "2026-07-28",
-        tools: vec![],
-        resources: vec![],
-        prompts: vec![],
-        auth: AuthSurface::Open,
-        failure: None,
-    };
+    // The snapshot's stateless flag describes the walk's shape,
+    // not the negotiated string, and this ladder walks statefully
+    // whatever version the server names.
+    let mut snapshot = handshake_snapshot(TRANSPORT, &result, false);
     let session = init.session_id.as_deref();
     let version = Some(negotiated.as_str());
     let mut next_id = 2_i64;
@@ -390,7 +566,7 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
     // because it means the surface is protected after all, so
     // that one answer routes to the metadata ladder.
     if let Ok(outcome) = rpc(
-        &agent,
+        agent,
         url,
         session,
         version,
@@ -399,80 +575,20 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
         json!({}),
     ) && outcome.status == 401
     {
-        return protected_snapshot(&agent, url, outcome.www_authenticate.as_deref());
+        return protected_snapshot(agent, url, outcome.www_authenticate.as_deref());
     }
 
-    for kind in LIST_KINDS {
-        let method = kind.method();
-        let mut cursor: Option<String> = None;
-        let mut terminated = false;
-        for _page in 0..MAX_PAGES {
-            let params = match &cursor {
-                Some(cursor) => json!({"cursor": cursor}),
-                None => json!({}),
-            };
-            let id = next_id;
-            next_id += 1;
-            let outcome = match rpc(&agent, url, session, version, Some(id), method, params) {
-                Ok(outcome) => outcome,
-                Err(detail) => {
-                    snapshot.failure = Some(ProbeFailure {
-                        step: method.into(),
-                        detail,
-                    });
-                    return snapshot;
-                }
-            };
-            if outcome.status == 401 {
-                return protected_snapshot(&agent, url, outcome.www_authenticate.as_deref());
-            }
-            let Some(message) = outcome.message else {
-                snapshot.failure = Some(ProbeFailure {
-                    step: method.into(),
-                    detail: format!("endpoint answered HTTP {} without a result", outcome.status),
-                });
-                return snapshot;
-            };
-            if is_method_not_found(&message) {
-                terminated = true;
-                break;
-            }
-            if let Some(error) = message.get("error") {
-                snapshot.failure = Some(ProbeFailure {
-                    step: method.into(),
-                    detail: format!("server answered {method} with error {error}"),
-                });
-                return snapshot;
-            }
-            let page = message.get("result").cloned().unwrap_or(Value::Null);
-            kind.apply(&mut snapshot, &page);
-            match page.get("nextCursor").and_then(|v| v.as_str()) {
-                Some(next) if Some(next) != cursor.as_deref() => {
-                    cursor = Some(next.to_string());
-                }
-                Some(_) => {
-                    snapshot.failure = Some(ProbeFailure {
-                        step: method.into(),
-                        detail: "the server repeated a pagination cursor".into(),
-                    });
-                    return snapshot;
-                }
-                None => {
-                    terminated = true;
-                    break;
-                }
-            }
-        }
-        if !terminated {
-            snapshot.failure = Some(ProbeFailure {
-                step: method.into(),
-                detail: format!("pagination did not terminate after {MAX_PAGES} pages"),
-            });
-            return snapshot;
-        }
+    if let ListWalk::Protected(protected) = walk_lists(
+        agent,
+        url,
+        &mut snapshot,
+        session,
+        version,
+        false,
+        &mut next_id,
+    ) {
+        return *protected;
     }
-    snapshot.resources.sort();
-    snapshot.prompts.sort();
 
     if let Some(session) = session {
         let delete = agent

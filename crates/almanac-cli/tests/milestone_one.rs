@@ -193,6 +193,10 @@ fn skill_digest_and_path_breaks() {
 
 type Mode = Arc<Mutex<String>>;
 
+/// The JSON-RPC methods the HTTP fixture has received, in
+/// order, for the tests that pin the probe's entry point.
+type Log = Arc<Mutex<Vec<String>>>;
+
 fn fixture_tools(mode: &str) -> serde_json::Value {
     let schema = |extra: serde_json::Value| {
         let mut base =
@@ -230,20 +234,28 @@ fn fixture_tools(mode: &str) -> serde_json::Value {
 }
 
 fn start_http_fixture() -> (String, Mode) {
+    let (url, mode, _log) = start_http_fixture_logged();
+    (url, mode)
+}
+
+fn start_http_fixture_logged() -> (String, Mode, Log) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
     let port = listener.local_addr().expect("addr").port();
     let mode: Mode = Arc::new(Mutex::new("open-clean".to_string()));
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
     let server_mode = mode.clone();
+    let server_log = log.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let mode = server_mode.clone();
+            let log = server_log.clone();
             std::thread::spawn(move || {
-                handle_http(&mut stream, &mode, port);
+                handle_http(&mut stream, &mode, &log, port);
             });
         }
     });
-    (format!("http://127.0.0.1:{port}/mcp"), mode)
+    (format!("http://127.0.0.1:{port}/mcp"), mode, log)
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> (String, String, String, String) {
@@ -321,7 +333,7 @@ fn fixture_card() -> serde_json::Value {
     })
 }
 
-fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
+fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u16) {
     let (method, path, headers, body) = read_request(stream);
     let mode = mode.lock().expect("mode lock").clone();
     let origin = format!("http://127.0.0.1:{port}");
@@ -400,10 +412,72 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
             let request: serde_json::Value =
                 serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
             let method_name = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            log.lock().expect("log lock").push(method_name.to_string());
+            // The current revision's mode is strict the other
+            // way: a stateless request carries no session id and
+            // no protocol version header, and identity rides in
+            // the _meta block on every call, so the fixture
+            // refuses the headers and requires the meta.
+            if mode == "open-2026" {
+                let request_id = request
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                if headers.contains("mcp-session-id:") || headers.contains("mcp-protocol-version:")
+                {
+                    respond(
+                        stream,
+                        400,
+                        "application/json",
+                        "",
+                        &serde_json::json!({
+                            "jsonrpc": "2.0", "id": request_id,
+                            "error": {"code": -32602, "message": "stateless requests carry no session or version header"}
+                        })
+                        .to_string(),
+                    );
+                    return;
+                }
+                let carries_meta = request
+                    .get("params")
+                    .and_then(|p| p.get("_meta"))
+                    .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+                    .is_some();
+                if matches!(
+                    method_name,
+                    "server/discover" | "tools/list" | "resources/list" | "prompts/list"
+                ) && !carries_meta
+                {
+                    respond(
+                        stream,
+                        200,
+                        "application/json",
+                        "",
+                        &serde_json::json!({
+                            "jsonrpc": "2.0", "id": request_id,
+                            "error": {"code": -32602, "message": "missing _meta"}
+                        })
+                        .to_string(),
+                    );
+                    return;
+                }
+            }
             // Session strict. The fixture issues a session id at
             // initialize and refuses later calls that do not echo
             // it, so the suite catches a probe that stops echoing.
-            if method_name != "initialize" && !headers.contains("mcp-session-id: fixture-session") {
+            // The check guards the methods the fixture serves,
+            // because a method it does not implement is answered
+            // method not found below whatever the session state,
+            // the way a real framework dispatches. The current
+            // revision's mode is stateless and exempt, because
+            // its requests carry no session by design.
+            if mode != "open-2026"
+                && matches!(
+                    method_name,
+                    "tools/list" | "resources/list" | "prompts/list"
+                )
+                && !headers.contains("mcp-session-id: fixture-session")
+            {
                 respond(
                     stream,
                     400,
@@ -424,6 +498,18 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
                 .and_then(|c| c.as_str())
                 .map(String::from);
             let payload = match method_name {
+                "server/discover" if mode == "open-2026" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "protocolVersion": "2026-07-28",
+                        "capabilities": {},
+                        "serverInfo": {"name": "telorama", "version": "0.1.0"}
+                    }
+                }),
+                "initialize" if mode == "open-2026" => serde_json::json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": "method not found"}
+                }),
                 "initialize" => {
                     let version = if mode == "open-version" {
                         "0.2.0"
@@ -2056,4 +2142,56 @@ fn migrate_publishes_the_card_at_both_locations() {
         code, 1,
         "a tampered normative copy must fail, report was {stdout}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Applicability audit charge 2 (2026-11-23): the probe ladder is
+// re-baselined to MCP core 2026-07-28. Discover first, stateless;
+// the initialize handshake is the fallback for older servers.
+// ---------------------------------------------------------------------
+
+#[test]
+fn http_discover_first_stateless() {
+    let (url, mode, log) = start_http_fixture_logged();
+    *mode.lock().expect("mode") = "open-2026".to_string();
+    let site = temp_site("http2026");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let seen = log.lock().expect("log").clone();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("server/discover"),
+        "discover must be the first request, saw {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|m| m == "initialize"),
+        "a current-revision surface must never see initialize, saw {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|m| m == "notifications/initialized"),
+        "the stateless walk sends no initialized notification, saw {seen:?}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(baseline["mcp"]["protocol_version"], "2026-07-28");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn stdio_discover_first_stateless() {
+    let site = temp_site("stdio2026");
+    let server = fixture_binary("fixture_server_2026");
+    let (code, _, stderr) = generate_stdio(&site, &server);
+    assert_eq!(
+        code, 0,
+        "generate against a discover-only server failed with {stderr}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(baseline["mcp"]["protocol_version"], "2026-07-28");
+    let (code, stdout, _) = check_stdio(&site, &server);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
 }

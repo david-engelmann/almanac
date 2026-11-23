@@ -6,8 +6,12 @@
 // render tool in its own source, so the renamed fixture differs
 // from the clean one by a source level rename followed by a
 // rebuild, which is the stronger form of the rename test the
-// design record owes. This file is included, never compiled
-// alone.
+// design record owes. The including file also defines
+// SPEAKS_DISCOVER: when it is true the fixture speaks only the
+// current revision, answering server/discover and refusing
+// initialize, and it requires the _meta block on its list calls
+// the way the revision requires identity on every request. This
+// file is included, never compiled alone.
 
 use std::io::{BufRead, Write};
 
@@ -43,7 +47,32 @@ fn main() {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let id = request.get("id").cloned();
+        // A current revision server validates the _meta block
+        // on every request, so a discover speaking fixture
+        // refuses list calls that arrive without it.
+        let lacks_meta = SPEAKS_DISCOVER
+            && matches!(method, "tools/list" | "resources/list" | "prompts/list")
+            && request
+                .get("params")
+                .and_then(|p| p.get("_meta"))
+                .is_none();
+        if lacks_meta {
+            let Some(id) = id else { continue };
+            let response = serde_json::json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32602, "message": "missing _meta"}
+            });
+            let _ = writeln!(stdout, "{response}");
+            let _ = stdout.flush();
+            continue;
+        }
         let result = match method {
+            "server/discover" if SPEAKS_DISCOVER => Some(serde_json::json!({
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "serverInfo": {"name": "telorama", "version": "0.1.0"}
+            })),
+            "initialize" if SPEAKS_DISCOVER => None,
             "initialize" => Some(serde_json::json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},

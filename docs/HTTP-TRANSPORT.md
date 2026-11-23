@@ -20,14 +20,31 @@ Two things about that surface are deliberately not assumed here.
 The endpoint path and the tool list are learned from the catalog
 entry and the probe, never hardcoded. A checker that assumes the
 first customer's paths has stopped being a checker. And the
-protocol revision the server negotiates is learned at handshake
-time and recorded, for the reason the next section gives.
+protocol revision the server negotiates is learned at the entry
+point and recorded, for the reason the next section gives.
 
 ## Protocol posture
 
-The probe speaks the stateful Streamable HTTP shape defined by the
-2025-06-18 revision and carried into 2025-11-25, because that is
-what deployed servers run. The rules that matter to a probe, read
+Re-baselined 2026-11-23 to the current core revision, 2026-07-28,
+which is frozen until the next revision targeted 2027-03-30. The
+probe speaks that revision first. It is stateless, with no
+initialize handshake, no sessions and no Mcp-Session-Id, and
+server/discover is the mandatory entry point every server
+implements. Every request
+carries a _meta block naming io.modelcontextprotocol/protocolVersion
+with the revision, the client identity and the client
+capabilities, because identity travels per request now, not in a
+handshake. The discover result is read for the same fields the
+initialize result carried, serverInfo and protocolVersion, and a
+result that omits the version is recorded under the revision the
+probe offered.
+
+Deployed servers still run the earlier revisions, so the probe
+keeps the stateful ladder as its fallback. A server that does not
+know server/discover, answering it method not found or with
+nothing usable, is walked through the initialize handshake of the
+2025-06-18 revision, carried into 2025-11-25, exactly as this note
+originally specified. The rules that matter to that ladder, read
 from the specification text.
 
 - One MCP endpoint per server, supporting POST and GET.
@@ -50,33 +67,47 @@ from the specification text.
 
 Tolerance in the other direction. A server that answers initialize
 without a session id is running stateless or near stateless, and
-the probe proceeds without one. A server speaking the newer
-stateless shape, carrying identity per request rather than in a
-handshake, is recorded as such in the snapshot. Full support for
-that revision is a later addition, named here so its absence is a
-decision and not a surprise. The negotiated protocolVersion from
-the initialize result goes into the baseline either way, and a
+the probe proceeds without one. The snapshot records which shape
+the surface took, stateless under the current revision or the
+handshake ladder behind it, and the protocolVersion from the
+discover or initialize result goes into the baseline either way. A
 change in it rides the server version drift class in DESIGN.md
 section 6, because a server that renegotiates its protocol has
-changed its surface.
+changed its surface. A server migrating between the two shapes
+between generation and check shows up there too, which is the
+gate working as intended, not noise.
 
 ## Probe sequence
 
 One probe run against one MCP entry proceeds in this order.
 
-1. Resolve the endpoint URL from the catalog entry. No discovery,
-   no guessing at well known MCP paths. The catalog is the claim
-   and the entry names the surface.
-2. POST initialize with the probe's client identity and the newest
-   protocol version the probe supports. Record the HTTP status,
-   the response media type, the session id header if present and
-   the negotiated protocolVersion and serverInfo from the result.
-3. POST notifications/initialized, expecting 202 with no body. As
-   built in milestone one, a 401 answer to the notification routes
-   the run to the metadata ladder below, because the surface is
+1. Resolve the endpoint URL from the catalog entry. No guessing
+   at well known MCP paths. The catalog is the claim and the entry
+   names the surface. (server/discover below is the protocol's
+   own entry method on that endpoint, not a path guess.)
+2. POST server/discover with the _meta block. Record the HTTP
+   status and the protocolVersion and serverInfo from the result.
+   On a result, walk the lists statelessly, each request carrying
+   the _meta block, no session, no version header, no initialized
+   notification, no DELETE.
+3. When discover is answered method not found, in the JSON-RPC
+   error or as an HTTP 404 or 405, the server predates the
+   revision, so fall back to the earlier ladder. Any other
+   discover failure, a 500, a different error, a result that is
+   not an object or names no server, a transport failure, is a
+   probe failure at the server/discover step and the ladder is
+   not attempted, because a broken current revision surface must
+   not hide behind a healthy legacy one. POST initialize with the probe's client
+   identity and the newest of the earlier protocol versions the
+   probe supports. Record the HTTP status, the response media
+   type, the session id header if present and the negotiated
+   protocolVersion and serverInfo from the result. Then POST
+   notifications/initialized, expecting 202 with no body. As built
+   in milestone one, a 401 answer to the notification routes the
+   run to the metadata ladder below, because the surface is
    protected after all. Every other answer is ignored, because a
-   refused notification on a working surface is the server's quirk,
-   not drift.
+   refused notification on a working surface is the server's
+   quirk, not drift.
 4. POST tools/list. Follow pagination cursors until the set is
    complete. A partial tool set is a wrong tool set, and a checker
    that compares against half a surface manufactures drift.
@@ -100,8 +131,10 @@ step rather than swallowing an unbounded stream.
 Failure at any step is data, not an exception. The snapshot
 records which step failed and how, an HTTP status, a JSON-RPC
 error, a timeout, a malformed body. The core decides what that
-means. An announced server that cannot complete initialize is the
-critical handshake failure DESIGN.md section 6 already defines.
+means. An announced server that cannot complete its entry point,
+discover under the current revision or the initialize handshake
+behind it, is the critical handshake failure DESIGN.md section 6
+already defines.
 
 Resolution, as built in milestone one (2026-11-21). Step 1 has a
 tension inside the design record, because the catalog entry for an
@@ -122,9 +155,10 @@ customer, so the probe treats 401 as a branch, not a dead end.
 
 The ladder, in order.
 
-1. Open. Initialize completes. The probe runs the full sequence
-   and the run is a live pass.
-2. Protected, with metadata. Initialize returns 401 with a
+1. Open. The entry request completes, discover under the current
+   revision or initialize behind it. The probe runs the full
+   sequence and the run is a live pass.
+2. Protected, with metadata. The entry request returns 401 with a
    WWW-Authenticate header naming a resource_metadata URL, or the
    metadata is found at the well known path
    /.well-known/oauth-protected-resource under the server's
@@ -137,7 +171,7 @@ The ladder, in order.
    catalog against the baseline, and the report labels it declared
    evidence only, in those words. It never prints live pass for a
    surface it could not touch.
-3. Protected, bare. Initialize returns 401 with no metadata
+3. Protected, bare. The entry request returns 401 with no metadata
    reachable. The degradation is the same, and the snapshot records
    the auth surface as protected without published metadata, which
    is itself a fact the drift model can watch. A server that gains

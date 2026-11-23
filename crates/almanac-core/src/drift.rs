@@ -295,7 +295,14 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
         if let Some(snapshot) = inputs.snapshot {
             match &snapshot.failure {
                 Some(failure) => {
-                    let kind = if failure.step == "initialize" {
+                    // A failure at the entry step, discover
+                    // under the current revision or initialize
+                    // behind it, means the announced server
+                    // could not be reached at all. A failure
+                    // further into the walk is a probe failure
+                    // against a server that did answer.
+                    let kind = if matches!(failure.step.as_str(), "initialize" | "server/discover")
+                    {
                         "server-unreachable"
                     } else {
                         "probe-failure"

@@ -4,5 +4,6 @@
 //! rename as critical in both directions.
 
 const RENDER_TOOL: &str = "render_scenes";
+const SPEAKS_DISCOVER: bool = false;
 
 include!("shared/fixture_common.rs");

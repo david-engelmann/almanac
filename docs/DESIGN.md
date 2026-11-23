@@ -344,9 +344,11 @@ first build milestone after creation, in that order.
 
 Inputs, in the order a publisher meets them.
 
-- A live surface probe. For an MCP server, an initialize handshake
-  plus tools/list, resources/list and prompts/list where offered. For
-  a REST API, the OpenAPI document the deployment actually serves.
+- A live surface probe. For an MCP server, a server/discover entry
+  under the current protocol revision, or the initialize handshake
+  the earlier revisions use, plus tools/list, resources/list and
+  prompts/list where offered. For a REST API, the OpenAPI document
+  the deployment actually serves.
 - An MCP server card, repo local or hosted at the locations the
   SEP-2127 extension defines, the endpoint's /server-card path
   first and the well known path behind it.
