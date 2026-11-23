@@ -1388,3 +1388,72 @@ fn migrate_protected_surface_from_the_card() {
     let (code, stdout, _) = check_http(&site, &url);
     assert_eq!(code, 0, "declared check after migrate failed with {stdout}");
 }
+
+// ----------------------------------------------------------------
+// Amendment C. The agents.json cross check. agents.json names
+// MCP endpoints as a corroborating surface; disagreement with
+// the catalog the site publishes is minor drift, at the default
+// gate a warning, never a failure.
+
+#[test]
+fn agents_json_cross_check() {
+    let (url, _mode) = start_http_fixture();
+    let site = temp_site("agentsjson");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // No agents.json, the cross check does not run.
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+    assert!(!stdout.contains("agents-json"), "report was {stdout}");
+
+    // agents.json naming the endpoint the catalog announces
+    // through its card, agreement.
+    std::fs::write(
+        site.join("agents.json"),
+        format!("{{\"mcp\": [{{\"url\": \"{url}\", \"type\": \"streamable-http\"}}]}}"),
+    )
+    .expect("write agents.json");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "agreeing check failed with {stdout}");
+    assert!(!stdout.contains("agents-json"), "report was {stdout}");
+
+    // agents.json naming a different endpoint disagrees in both
+    // directions, at minor severity, so the run still passes.
+    std::fs::write(
+        site.join("agents.json"),
+        "{\"mcp\": [{\"url\": \"http://127.0.0.1:9/elsewhere\"}]}",
+    )
+    .expect("write agents.json");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(
+        code, 0,
+        "mismatch is minor and must pass, report was {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("agents-json-mismatch").count(),
+        2,
+        "both directions must be reported, report was {stdout}"
+    );
+
+    // An agents.json with no mcp block names no endpoints, so
+    // the announced endpoint stands uncorroborated, one finding.
+    std::fs::write(site.join("agents.json"), "{}").expect("write agents.json");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "report was {stdout}");
+    assert_eq!(
+        stdout.matches("agents-json-mismatch").count(),
+        1,
+        "exactly one direction can fire, report was {stdout}"
+    );
+
+    // A present but unreadable agents.json is reported as its
+    // own finding, never silently compared against.
+    std::fs::write(site.join("agents.json"), "not json").expect("write agents.json");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "report was {stdout}");
+    assert!(
+        stdout.contains("agents-json-unreadable"),
+        "report was {stdout}"
+    );
+}

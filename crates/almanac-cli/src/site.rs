@@ -476,6 +476,44 @@ struct AlmanacConfig {
     suppress: Vec<Suppression>,
 }
 
+/// Read the site's agents.json, the structured companion of
+/// agents.txt, for the Amendment C cross check. Returns the MCP
+/// endpoint URLs it names and a broken flag. No file at the site
+/// root is (None, false), the cross check does not run. A file
+/// that is present but is not an agents.json document, bad JSON,
+/// an `mcp` that is not an array, an entry without a string
+/// `url`, is (None, true), a broken public claim the check
+/// reports rather than compares against. A document with no
+/// `mcp` block names no endpoints, which is a claim too. The
+/// shape is the agents.txt standard v1.0 section 5, the `url`
+/// of each object in the top level `mcp` array.
+fn read_agents_json(site: &Path) -> (Option<Vec<String>>, bool) {
+    let path = site.join("agents.json");
+    if !path.exists() {
+        return (None, false);
+    }
+    let Ok(bytes) = fs::read(&path) else {
+        return (None, true);
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (None, true);
+    };
+    let Some(mcp) = value.get("mcp") else {
+        return (Some(Vec::new()), false);
+    };
+    let Some(items) = mcp.as_array() else {
+        return (None, true);
+    };
+    let mut urls = Vec::new();
+    for item in items {
+        match item.get("url").and_then(|v| v.as_str()) {
+            Some(url) => urls.push(url.to_string()),
+            None => return (None, true),
+        }
+    }
+    (Some(urls), false)
+}
+
 /// Load and validate the suppressions. A suppression without a
 /// reason, or with a malformed expiry, is a configuration error
 /// and the check does not run, because a silent misreading here
@@ -688,6 +726,25 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
     }
     present_skill_ids.sort();
 
+    // Amendment C. The catalog's MCP entries name server cards,
+    // and each card carries the endpoint it describes, so the
+    // catalog's announced endpoints resolve through the cards
+    // the site serves. agents.json, when the site serves one,
+    // names its endpoints directly.
+    let mut catalog_endpoints: Vec<(String, String)> = Vec::new();
+    for entry in &published.entries {
+        if entry.media_type == "application/mcp-server-card+json"
+            && let Some(url) = &entry.url
+            && let Some(path) = url_to_path(site, &published.host.domain, url)
+            && let Ok(bytes) = fs::read(&path)
+            && let Ok(card) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(endpoint) = card.get("endpoint").and_then(|v| v.as_str())
+        {
+            catalog_endpoints.push((entry.identifier.clone(), endpoint.to_string()));
+        }
+    }
+    let (agents_json_endpoints, agents_json_broken) = read_agents_json(site);
+
     let today = today_utc();
     let findings = drift::check(&CheckInputs {
         published: &published,
@@ -699,6 +756,9 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
         artifact_digests: &artifact_digests,
         present_skill_ids: &present_skill_ids,
         card: card.as_ref(),
+        agents_json_endpoints: agents_json_endpoints.as_deref(),
+        agents_json_broken,
+        catalog_endpoints: &catalog_endpoints,
         suppressions: &suppressions,
         today: &today,
     });

@@ -94,6 +94,20 @@ pub struct CheckInputs<'a> {
     pub present_skill_ids: &'a [String],
     /// The server card as read now, for declared evidence runs.
     pub card: Option<&'a CardView>,
+    /// The MCP endpoint URLs the site's agents.json names, when
+    /// the site serves one the CLI could read. None when the site
+    /// serves no agents.json, and then the cross check does not
+    /// run. Amendment C, DESIGN.md section 7.
+    pub agents_json_endpoints: Option<&'a [String]>,
+    /// True when the site serves an agents.json that could not
+    /// be read as one, so the cross check reports the broken
+    /// claim instead of comparing against it.
+    pub agents_json_broken: bool,
+    /// The MCP endpoints the published catalog announces, by
+    /// entry identifier, resolved from each entry's server card.
+    /// An entry whose endpoint cannot be determined is absent,
+    /// and its direction of the cross check is skipped.
+    pub catalog_endpoints: &'a [(String, String)],
     pub suppressions: &'a [Suppression],
     /// Today's date, YYYY-MM-DD, for suppression expiry.
     pub today: &'a str,
@@ -303,6 +317,11 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
         }
     }
 
+    // The agents.json cross check runs in every mode. It
+    // compares two published claims, the catalog and the
+    // neighbouring agents.json, and never touches the surface.
+    check_agents_json(inputs, &mut findings);
+
     apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
     findings.sort_by(|a, b| {
@@ -313,6 +332,83 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
             .then_with(|| a.detail.cmp(&b.detail))
     });
     findings
+}
+
+/// Amendment C, the agents.json cross check. agents.json, the
+/// structured companion of agents.txt, names a site's MCP
+/// endpoints as a public claim beside the catalog's. Two public
+/// claims about one surface should not disagree, so a mismatch
+/// in either direction is a minor finding, per DESIGN.md
+/// section 7. The schema is the agents.txt standard v1.0
+/// section 5, read firsthand: the endpoints are the `url` of
+/// each object in the top level `mcp` array.
+///
+/// The comparison is endpoint against endpoint. The catalog's
+/// MCP entry names the server card, so the CLI resolves each
+/// entry through its card's endpoint field and passes the
+/// resolved pairs in. An entry whose endpoint cannot be
+/// determined takes no part, and the agents.json direction is
+/// judged only when the catalog announces no MCP entry at all
+/// or at least one endpoint could be determined, so a stdio
+/// card without an endpoint never produces a phantom mismatch.
+/// Trailing slashes are normalized away; the two files are
+/// written by different tools and a slash is not a claim.
+fn check_agents_json(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    if inputs.agents_json_broken {
+        findings.push(finding(
+            Severity::Minor,
+            "agents-json-unreadable",
+            None,
+            "the site serves an agents.json that could not be read as an \
+             agents.json document, so its claims could not be cross \
+             checked against the catalog"
+                .into(),
+        ));
+        return;
+    }
+    let Some(agents_urls) = inputs.agents_json_endpoints else {
+        return;
+    };
+    let norm = |url: &str| url.trim_end_matches('/').to_string();
+    let agents_set: Vec<String> = agents_urls.iter().map(|u| norm(u)).collect();
+    let catalog_set: Vec<String> = inputs
+        .catalog_endpoints
+        .iter()
+        .map(|(_, endpoint)| norm(endpoint))
+        .collect();
+    let catalog_has_mcp = inputs
+        .published
+        .entries
+        .iter()
+        .any(|e| e.media_type == "application/mcp-server-card+json");
+    if !catalog_has_mcp || !inputs.catalog_endpoints.is_empty() {
+        for url in agents_urls {
+            if !catalog_set.contains(&norm(url)) {
+                findings.push(finding(
+                    Severity::Minor,
+                    "agents-json-mismatch",
+                    None,
+                    format!(
+                        "agents.json names the MCP endpoint {url}, which \
+                         the catalog does not announce"
+                    ),
+                ));
+            }
+        }
+    }
+    for (entry_id, endpoint) in inputs.catalog_endpoints {
+        if !agents_set.contains(&norm(endpoint)) {
+            findings.push(finding(
+                Severity::Minor,
+                "agents-json-mismatch",
+                Some(entry_id),
+                format!(
+                    "the catalog announces the MCP endpoint {endpoint}, \
+                     which agents.json does not name"
+                ),
+            ));
+        }
+    }
 }
 
 /// Suppressions hold findings back, and expired suppressions
@@ -680,6 +776,9 @@ mod tests {
             artifact_digests: &[],
             present_skill_ids: &[],
             card: None,
+            agents_json_endpoints: None,
+            agents_json_broken: false,
+            catalog_endpoints: &[],
             suppressions: &[],
             today: "2026-11-21",
         }
@@ -844,5 +943,100 @@ mod tests {
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().any(|f| f.kind == "suppression-expired"));
         assert!(findings.iter().any(|f| f.kind == "tool-schema-changed"));
+    }
+
+    #[test]
+    fn agents_json_agreement_produces_no_findings() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let cat = catalog();
+        let agents = vec!["https://example.com/mcp".to_string()];
+        let announced = vec![(
+            "urn:air:example.com:mcp:demo".to_string(),
+            "https://example.com/mcp/".to_string(),
+        )];
+        let mut with = inputs(&cat, &base, None);
+        with.agents_json_endpoints = Some(&agents);
+        with.catalog_endpoints = &announced;
+        assert!(check(&with).is_empty());
+    }
+
+    #[test]
+    fn agents_json_mismatch_fires_in_both_directions() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let cat = catalog();
+        let agents = vec!["https://example.com/other-mcp".to_string()];
+        let announced = vec![(
+            "urn:air:example.com:mcp:demo".to_string(),
+            "https://example.com/mcp".to_string(),
+        )];
+        let mut with = inputs(&cat, &base, None);
+        with.agents_json_endpoints = Some(&agents);
+        with.catalog_endpoints = &announced;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind == "agents-json-mismatch" && f.severity == Severity::Minor)
+        );
+        assert!(findings.iter().any(|f| f.entry.is_none()));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.entry.as_deref() == Some("urn:air:example.com:mcp:demo"))
+        );
+    }
+
+    #[test]
+    fn agents_json_endpoint_with_no_catalog_mcp_entry_fires() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let mut cat = catalog();
+        cat.entries.clear();
+        let agents = vec!["https://example.com/mcp".to_string()];
+        let mut with = inputs(&cat, &base, None);
+        with.agents_json_endpoints = Some(&agents);
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "agents-json-mismatch");
+    }
+
+    #[test]
+    fn agents_json_unreadable_and_absent_cases() {
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let cat = catalog();
+        let mut broken = inputs(&cat, &base, None);
+        broken.agents_json_broken = true;
+        let findings = check(&broken);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "agents-json-unreadable");
+        assert_eq!(findings[0].severity, Severity::Minor);
+
+        // No agents.json at all, the cross check does not run,
+        // even with an announced endpoint it never names.
+        let announced = vec![(
+            "urn:air:example.com:mcp:demo".to_string(),
+            "https://example.com/mcp".to_string(),
+        )];
+        let mut absent = inputs(&cat, &base, None);
+        absent.catalog_endpoints = &announced;
+        assert!(check(&absent).is_empty());
+    }
+
+    #[test]
+    fn agents_json_skipped_when_no_endpoint_is_determinable() {
+        // The catalog announces an MCP entry but its card carries
+        // no endpoint (a stdio server), so the agents.json
+        // direction cannot be judged and must not fire.
+        let snap = snapshot(vec![ping()]);
+        let base = baseline_for(&snap);
+        let cat = catalog();
+        let agents = vec!["https://example.com/mcp".to_string()];
+        let mut with = inputs(&cat, &base, None);
+        with.agents_json_endpoints = Some(&agents);
+        assert!(check(&with).is_empty());
     }
 }

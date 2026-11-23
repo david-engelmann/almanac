@@ -36,7 +36,10 @@ Generation is the on-ramp. The gate is the product.
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.
 - check is the drift gate for CI, in an offline repo mode and a live
-  mode that probes the deployed surface.
+  mode that probes the deployed surface. It also cross checks the
+  MCP endpoints a site's agents.json names against the ones the
+  catalog announces, because two public claims about one surface
+  should not disagree.
 - migrate takes a publisher stranded on the legacy path, verifies
   their ai-catalog.json against the live surface and the site's
   own files instead of copying it, and emits the dual path pair,
@@ -56,8 +59,9 @@ generation from the server card for protected surfaces, and the
 validate command, and the first milestone has passed through three
 independent checkpoint reviews whose findings are fixed or recorded
 as named work in DECISIONS.md. All four commands are now built,
-migrate included. The design record lives in docs/DESIGN.md. No
-release exists yet.
+migrate included, and the agents.json cross check completes the
+five design amendments. The design record lives in
+docs/DESIGN.md. No release exists yet.
 
 ## License
 

@@ -255,3 +255,49 @@ migration, and the version an MCP entry gains from the
 surface is noted in the report. The red team's dynamic pass
 was blocked by the write fault and is owed against the fixed
 build, its cases prebuilt under the audit's own directory.
+(That pass was discharged firsthand on 2026-11-21 against
+the fixed build, all ten prebuilt cases behaving as designed,
+and reported to Main with the migrate completion report.)
+
+## Amendment C, the agents.json cross check (2026-11-22)
+
+The last of the five approved amendments is built. The
+blocker on record was a firsthand schema read, and it is now
+done: the agents.txt standard v1.0, section 5, in the
+agents-txt/agents-txt repository, read 2026-11-22. agents.json
+sits at the site root, a sibling of agents.txt, and its MCP
+endpoints are the `url` of each object in the top level `mcp`
+array, beside a `type` that is always streamable-http and an
+optional description. Every block is optional and omitted
+when the capability is not configured.
+
+The check compares endpoint against endpoint. The catalog's
+MCP entry names the server card, and the card carries the
+endpoint it describes, so the CLI resolves each catalog entry
+through the card file the site serves and the core compares
+the two endpoint sets as a pure function. A disagreement in
+either direction is one minor finding, kind
+agents-json-mismatch. The design text names repo mode; the
+comparison involves no surface, so it runs in the one shared
+check path in every mode, and this record notes the reading.
+
+Three judgement calls, recorded. Trailing slashes normalize
+away, because the two files are written by different tools
+and a slash is not a claim. An entry whose endpoint cannot
+be determined, a card with no endpoint field, takes no part,
+and the agents.json direction is judged only when the
+catalog announces no MCP entry at all or at least one
+endpoint could be determined, so a stdio card never produces
+a phantom mismatch. And an agents.json that is present but
+cannot be read as one, bad JSON, an `mcp` that is not an
+array, an entry without a string `url`, is a broken public
+claim: one minor finding, kind agents-json-unreadable,
+reported rather than compared against. Absence of the file
+is not a finding; the neighbour format is a should, not a
+requirement this gate enforces.
+
+The pointer snippet from DESIGN.md section 7 stays unbuilt.
+The amendment approves the cross check, and the snippet is a
+permissive "can" in the design text, not a version 1
+commitment. agents.txt and agents.json are never generated,
+per Rule 6.
