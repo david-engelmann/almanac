@@ -25,6 +25,12 @@ pub struct Baseline {
     /// the catalog entry carries, for digest drift checks that run
     /// from the catalog alone.
     pub artifacts: Vec<ArtifactBaseline>,
+    /// OpenAPI documents by entry identifier, with the operation
+    /// facts recorded at generation. Baselines written before
+    /// the generation roadmap's OpenAPI slice carry no such
+    /// list, so the field defaults empty.
+    #[serde(default)]
+    pub openapi: Vec<OpenApiBaseline>,
     /// Per entry provenance. Which input produced the entry, and
     /// which inputs it overruled on the way.
     pub provenance: Vec<EntryProvenance>,
@@ -102,6 +108,68 @@ pub struct ArtifactBaseline {
     pub sha256: String,
 }
 
+/// One OpenAPI document's recorded facts. The document is
+/// compared fact by fact at check time, never byte by byte;
+/// the hash is kept so the record shows exactly which bytes
+/// the facts were reduced from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenApiBaseline {
+    pub entry_id: String,
+    pub url: String,
+    /// The sha256 hex of the document at generation.
+    pub sha256: String,
+    /// The info block version at generation.
+    pub version: String,
+    /// The servers URLs at generation, sorted.
+    pub servers: Vec<String>,
+    /// Whether the document demanded security at generation.
+    pub security_required: bool,
+    pub components_sha256: String,
+    pub operations: Vec<OperationBaseline>,
+}
+
+/// One operation's recorded facts, mirroring ToolBaseline.
+/// The three channels are recorded apart so a change in one
+/// can never mask a change in another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperationBaseline {
+    pub id: String,
+    /// Required parameters as "in:name", sorted.
+    pub required: Vec<String>,
+    pub description_sha256: String,
+    pub contract_sha256: String,
+}
+
+impl OpenApiBaseline {
+    /// Record a reduced document as the baseline for one entry.
+    pub fn from_view(
+        entry_id: &str,
+        url: &str,
+        sha256: &str,
+        view: &crate::openapi::OpenApiView,
+    ) -> Self {
+        OpenApiBaseline {
+            entry_id: entry_id.to_string(),
+            url: url.to_string(),
+            sha256: sha256.to_string(),
+            version: view.version.clone(),
+            servers: view.servers.clone(),
+            security_required: view.security_required,
+            components_sha256: view.components_sha256.clone(),
+            operations: view
+                .operations
+                .iter()
+                .map(|op| OperationBaseline {
+                    id: op.id.clone(),
+                    required: op.required.clone(),
+                    description_sha256: crate::hash::sha256_str(&op.description),
+                    contract_sha256: op.contract_sha256.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl McpBaseline {
     /// Record a probed surface as the baseline for one entry.
     pub fn from_snapshot(entry_id: &str, snapshot: &SurfaceSnapshot) -> Self {
@@ -165,5 +233,22 @@ mod tests {
             crate::hash::sha256_json(&serde_json::json!({"type": "object"}))
         );
         assert_eq!(baseline.server_name, "demo");
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_openapi_slice_still_parses() {
+        // The OpenAPI slice added the openapi list with a serde
+        // default. A publisher's committed baseline from before
+        // the slice has no such key, and it must still load, or
+        // every existing baseline breaks at upgrade.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": null,
+            "skills": [],
+            "artifacts": [],
+            "provenance": []
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        assert!(baseline.openapi.is_empty());
     }
 }

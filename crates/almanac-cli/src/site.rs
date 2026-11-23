@@ -16,11 +16,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use almanac_core::Severity;
 use almanac_core::baseline::{
-    ArtifactBaseline, Baseline, EntryProvenance, McpBaseline, SkillBaseline,
+    ArtifactBaseline, Baseline, EntryProvenance, McpBaseline, OpenApiBaseline, SkillBaseline,
 };
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
 use almanac_core::hash;
+use almanac_core::openapi::{OpenApiView, reduce_openapi};
 use almanac_core::snapshot::{AuthSurface, SurfaceSnapshot, ToolSurface};
 use serde::Serialize;
 
@@ -262,6 +263,7 @@ pub fn generate(
     display_name: &str,
     target: &ProbeTarget,
     skill_path: Option<&Path>,
+    openapi_paths: &[PathBuf],
     queries: &[String],
 ) -> Result<(), String> {
     let probe_snapshot = run_probe(target);
@@ -347,7 +349,7 @@ pub fn generate(
             .map_err(|e| format!("could not read {} with {e}", skill_path.display()))?;
         let text = String::from_utf8_lossy(&bytes);
         let (name, description) = parse_skill_frontmatter(&text)?;
-        if !valid_skill_name(&name) {
+        if !valid_plain_name(&name) {
             return Err(format!(
                 "the SKILL.md name {name} is not a plain skill name, and generation will not write a path from it"
             ));
@@ -389,6 +391,140 @@ pub fn generate(
         });
     }
 
+    // The generation roadmap's first input. An OpenAPI document
+    // becomes an API entry, and the baseline records its facts
+    // for the fact by fact comparison check runs. Every
+    // document is read, reduced and planned before any of them
+    // is written, so a run that refuses (a bad document, a
+    // duplicate identifier) leaves the site exactly as it was,
+    // and no document can overwrite another document's source
+    // before that source has been read.
+    struct PlannedApi {
+        source: String,
+        bytes: Vec<u8>,
+        view: OpenApiView,
+        api_id: String,
+        api_url: String,
+        copy_to: Option<PathBuf>,
+    }
+    let site_canon = fs::canonicalize(site).unwrap_or_else(|_| site.to_path_buf());
+    let mut planned: Vec<PlannedApi> = Vec::new();
+    for openapi_path in openapi_paths {
+        let bytes = fs::read(openapi_path)
+            .map_err(|e| format!("could not read {} with {e}", openapi_path.display()))?;
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "{} is not a JSON document ({e}), and generate reads OpenAPI documents in JSON only, never YAML",
+                openapi_path.display()
+            )
+        })?;
+        let view = reduce_openapi(&doc).map_err(|reason| {
+            format!("{} cannot be announced, {reason}", openapi_path.display())
+        })?;
+        let file_name = openapi_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{} has no usable file name", openapi_path.display()))?;
+        if file_name == "baseline.json" {
+            return Err(
+                "an OpenAPI document named baseline.json cannot be announced, because that name belongs to the site's own baseline"
+                    .into(),
+            );
+        }
+        let stem = file_name.strip_suffix(".json").unwrap_or(file_name);
+        if !valid_plain_name(stem) {
+            return Err(format!(
+                "the file stem {stem} is not a plain name, and generation will not build an identifier from it"
+            ));
+        }
+        let api_id = format!("urn:air:{domain}:openapi:{stem}");
+        if entries.iter().any(|e| e.identifier == api_id)
+            || planned.iter().any(|p| p.api_id == api_id)
+        {
+            return Err(format!(
+                "two OpenAPI documents would both announce {api_id}, and generation will not merge them"
+            ));
+        }
+        // Where the document lives in the site, resolved on
+        // canonical paths, so a spelled path lands at the URL
+        // the checker will look for. Inside the site the
+        // document is used in place; outside it, it is copied
+        // to the site root under its file name.
+        let doc_canon =
+            fs::canonicalize(openapi_path).unwrap_or_else(|_| openapi_path.to_path_buf());
+        let (api_url, copy_to) = match doc_canon.strip_prefix(&site_canon) {
+            Ok(rel) => (
+                format!(
+                    "https://{domain}/{}",
+                    rel.to_string_lossy().replace('\\', "/")
+                ),
+                None,
+            ),
+            Err(_) => (
+                format!("https://{domain}/{file_name}"),
+                Some(site.join(file_name)),
+            ),
+        };
+        planned.push(PlannedApi {
+            source: openapi_path.display().to_string(),
+            bytes,
+            view,
+            api_id,
+            api_url,
+            copy_to,
+        });
+    }
+    let mut openapi: Vec<OpenApiBaseline> = Vec::new();
+    for plan in planned {
+        if let Some(dest) = &plan.copy_to {
+            write_file(dest, &plan.bytes)?;
+        }
+        let description = match &plan.view.description {
+            Some(description) => description.clone(),
+            None => {
+                eprintln!(
+                    "warning, {} carries no info description, so the entry announces its title as its description",
+                    plan.source
+                );
+                plan.view.title.clone()
+            }
+        };
+        entries.push(Entry {
+            identifier: plan.api_id.clone(),
+            display_name: plan.view.title.clone(),
+            media_type: "application/openapi+json".into(),
+            url: Some(plan.api_url.clone()),
+            data: None,
+            description,
+            capabilities: plan
+                .view
+                .operations
+                .iter()
+                .map(|op| op.id.clone())
+                .collect(),
+            representative_queries: vec![
+                format!("What can the {} API do", plan.view.title),
+                format!("Use the {} API to complete a task", plan.view.title),
+            ],
+            tags: vec![],
+            version: Some(plan.view.version.clone()),
+            digest: Some(hash::digest_field(&plan.bytes)),
+            updated_at: None,
+            trust_manifest: None,
+        });
+        openapi.push(OpenApiBaseline::from_view(
+            &plan.api_id,
+            &plan.api_url,
+            &hash::sha256_hex(&plan.bytes),
+            &plan.view,
+        ));
+        provenance.push(EntryProvenance {
+            entry_id: plan.api_id,
+            produced_by: "openapi-file".into(),
+            overruled: vec![],
+        });
+    }
+
     let catalog = Catalog {
         host: Host {
             display_name: display_name.to_string(),
@@ -409,17 +545,19 @@ pub fn generate(
         mcp: Some(mcp_baseline),
         skills,
         artifacts,
+        openapi,
         provenance,
     };
     write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;
     Ok(())
 }
 
-/// A skill name becomes a directory name under the site, so it
-/// must be one plain segment. Frontmatter is untrusted input,
-/// and a name carrying path separators would write outside the
-/// site directory.
-fn valid_skill_name(name: &str) -> bool {
+/// A name that becomes a path segment or an identifier
+/// segment under the site (a skill name becomes a directory, a
+/// document stem becomes part of a URN) must be one plain
+/// segment. The inputs are untrusted, and a name carrying path
+/// separators would write outside the site directory.
+fn valid_plain_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.contains('/') && !name.contains('\\')
 }
 
@@ -745,6 +883,38 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
     }
     let (agents_json_endpoints, agents_json_broken) = read_agents_json(site);
 
+    // The OpenAPI documents the baseline records, reduced now.
+    // A document that is missing, not JSON, or no longer reads
+    // as an OpenAPI document is reported broken with its
+    // reason, never silently compared against.
+    let mut openapi_views: Vec<(String, OpenApiView)> = Vec::new();
+    let mut openapi_broken: Vec<(String, String)> = Vec::new();
+    for api in &baseline.openapi {
+        let Some(path) = url_to_path(site, &published.host.domain, &api.url) else {
+            openapi_broken.push((
+                api.entry_id.clone(),
+                "its URL does not map into the site".into(),
+            ));
+            continue;
+        };
+        match fs::read(&path) {
+            Err(_) => openapi_broken.push((
+                api.entry_id.clone(),
+                "the document is missing where its catalog entry points".into(),
+            )),
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Err(e) => openapi_broken.push((
+                    api.entry_id.clone(),
+                    format!("the document no longer parses as JSON ({e})"),
+                )),
+                Ok(doc) => match reduce_openapi(&doc) {
+                    Ok(view) => openapi_views.push((api.entry_id.clone(), view)),
+                    Err(reason) => openapi_broken.push((api.entry_id.clone(), reason)),
+                },
+            },
+        }
+    }
+
     let today = today_utc();
     let findings = drift::check(&CheckInputs {
         published: &published,
@@ -759,6 +929,8 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
         agents_json_endpoints: agents_json_endpoints.as_deref(),
         agents_json_broken,
         catalog_endpoints: &catalog_endpoints,
+        openapi_views: &openapi_views,
+        openapi_broken: &openapi_broken,
         suppressions: &suppressions,
         today: &today,
     });
@@ -976,6 +1148,7 @@ pub fn migrate_site(
     let mut mcp_seen = false;
     let mut skill_baselines: Vec<SkillBaseline> = Vec::new();
     let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
+    let mut openapi_baselines: Vec<OpenApiBaseline> = Vec::new();
     let mut provenance: Vec<EntryProvenance> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1238,6 +1411,72 @@ pub fn migrate_site(
                     ));
                     continue;
                 }
+                if entry.media_type == "application/openapi+json" {
+                    // An OpenAPI entry is verified as the
+                    // surface it is, not as a generic artifact,
+                    // so a migrated document is gated the same
+                    // way a generated one is. The document is
+                    // reduced, its operation and version claims
+                    // are judged the way the MCP entry's are,
+                    // and the baseline records the reduction.
+                    let view = match serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .map_err(|e| format!("the document does not parse as JSON with {e}"))
+                        .and_then(|doc| reduce_openapi(&doc))
+                    {
+                        Ok(view) => view,
+                        Err(reason) => {
+                            let reason = format!(
+                                "the document the entry announces cannot be read as an OpenAPI document, {reason}"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                            continue;
+                        }
+                    };
+                    let doc_ops: Vec<String> =
+                        view.operations.iter().map(|op| op.id.clone()).collect();
+                    for name in &entry.capabilities {
+                        if !doc_ops.contains(name) {
+                            let reason = format!(
+                                "the entry announced {name}, which the document does not serve"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                        }
+                    }
+                    for name in &doc_ops {
+                        if !entry.capabilities.contains(name) {
+                            let reason = format!(
+                                "the document serves {name}, which the entry never announced"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                        }
+                    }
+                    if let Some(announced) = &entry.version
+                        && *announced != view.version
+                    {
+                        let reason = format!(
+                            "the entry announced version {announced} and the document carries {}",
+                            view.version
+                        );
+                        failed.push(migration_failure(id, &reason));
+                    }
+                    let mut kept = entry.clone();
+                    kept.capabilities = doc_ops;
+                    kept.version = Some(view.version.clone());
+                    kept.digest = Some(hash::digest_field(&bytes));
+                    openapi_baselines.push(OpenApiBaseline::from_view(
+                        id,
+                        &url,
+                        &hash::sha256_hex(&bytes),
+                        &view,
+                    ));
+                    provenance.push(EntryProvenance {
+                        entry_id: id.to_string(),
+                        produced_by: "migration".into(),
+                        overruled: vec![],
+                    });
+                    carried.push(kept);
+                    continue;
+                }
                 carry_artifact(
                     &mut carried,
                     &mut artifacts,
@@ -1279,6 +1518,7 @@ pub fn migrate_site(
             mcp: mcp_baseline,
             skills: skill_baselines,
             artifacts,
+            openapi: openapi_baselines,
             provenance,
         };
         write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;

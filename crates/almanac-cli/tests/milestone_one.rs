@@ -1457,3 +1457,406 @@ fn agents_json_cross_check() {
         "report was {stdout}"
     );
 }
+
+// ----------------------------------------------------------------
+// The generation roadmap's first slice. An OpenAPI document is
+// a generation input and a drift surface, compared operation
+// by operation.
+
+fn billing_doc() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Billing", "version": "1.0.0", "description": "Charges cards."},
+        "paths": {
+            "/charges": {
+                "post": {
+                    "operationId": "createCharge",
+                    "description": "Create a charge.",
+                    "parameters": [{"name": "key", "in": "header", "required": true}]
+                },
+                "get": {"operationId": "listCharges", "description": "List charges."}
+            }
+        }
+    })
+}
+
+fn write_doc(path: &Path, doc: &serde_json::Value) {
+    std::fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(doc).expect("serialize")
+        ),
+    )
+    .expect("write document");
+}
+
+fn generate_stdio_with_openapi(
+    site: &Path,
+    fixture: &Path,
+    openapi: &Path,
+) -> (i32, String, String) {
+    run(&[
+        "generate",
+        "--site",
+        &site_arg(site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &openapi.to_string_lossy(),
+        "--command",
+        &fixture.to_string_lossy(),
+    ])
+}
+
+#[test]
+fn openapi_input_and_operation_drift() {
+    let src = temp_site("openapi-src");
+    let doc_path = src.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let site = temp_site("openapi");
+    let clean = fixture_binary("fixture_server");
+
+    // Generation announces the API beside the MCP server, and
+    // the document is copied into the site.
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let site_doc = site.join("billing.json");
+    assert!(site_doc.exists(), "the document must be copied in");
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        catalog_text.contains("application/openapi+json"),
+        "catalog was {catalog_text}"
+    );
+    assert!(
+        catalog_text.contains("createCharge"),
+        "catalog was {catalog_text}"
+    );
+    let baseline_text = std::fs::read_to_string(site.join("baseline.json")).expect("baseline");
+    assert!(
+        baseline_text.contains("\"openapi\""),
+        "baseline was {baseline_text}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // A formatting only rewrite of the served document is not
+    // drift. The comparison is operation by operation, never
+    // byte by byte.
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&site_doc).expect("doc")).expect("parses");
+    std::fs::write(&site_doc, serde_json::to_string(&doc).expect("serialize"))
+        .expect("rewrite compact");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "formatting rewrite must pass, report was {stdout}");
+
+    // An operation the document stops serving is major drift.
+    let mut broken = billing_doc();
+    broken["paths"]["/charges"]
+        .as_object_mut()
+        .expect("path item")
+        .remove("get");
+    write_doc(&site_doc, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "removed operation must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-operation-removed"),
+        "report was {stdout}"
+    );
+
+    // An operation the catalog never announced is critical.
+    let (code, _, _) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0);
+    let mut broken = billing_doc();
+    broken["paths"]["/refunds"] = serde_json::json!({
+        "post": {"operationId": "createRefund", "description": "Refund a charge."}
+    });
+    write_doc(&site_doc, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(
+        code, 1,
+        "unannounced operation must fail, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("openapi-operation-unannounced"),
+        "report was {stdout}"
+    );
+
+    // A new required parameter on a surviving operation is
+    // major drift.
+    let (code, _, _) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0);
+    let mut broken = billing_doc();
+    broken["paths"]["/charges"]["post"]["parameters"]
+        .as_array_mut()
+        .expect("params")
+        .push(serde_json::json!({"name": "tenant", "in": "header", "required": true}));
+    write_doc(&site_doc, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(
+        code, 1,
+        "new required parameter must fail, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("openapi-required-parameter-added"),
+        "report was {stdout}"
+    );
+
+    // A description only change warns and passes.
+    let (code, _, _) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0);
+    let mut edited = billing_doc();
+    edited["paths"]["/charges"]["get"]["description"] = serde_json::json!("List every charge.");
+    write_doc(&site_doc, &edited);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "description change must pass, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-operation-description-changed"),
+        "report was {stdout}"
+    );
+
+    // A missing document is critical, with the reason named.
+    let (code, _, _) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0);
+    std::fs::remove_file(&site_doc).expect("remove document");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "missing document must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-document-unreadable"),
+        "report was {stdout}"
+    );
+
+    // A catalog edited to announce an operation generation
+    // never recorded is divergence, the phantom rule.
+    let (code, _, _) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0);
+    for path in [".well-known/ard.json", ".well-known/ai-catalog.json"] {
+        let full = site.join(path);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&full).expect("catalog")).expect("parses");
+        let entry = catalog["entries"]
+            .as_array_mut()
+            .expect("entries")
+            .iter_mut()
+            .find(|e| e["type"] == "application/openapi+json")
+            .expect("api entry");
+        entry["capabilities"]
+            .as_array_mut()
+            .expect("capabilities")
+            .push(serde_json::json!("deleteEverything"));
+        std::fs::write(
+            &full,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&catalog).expect("serialize")
+            ),
+        )
+        .expect("write catalog");
+    }
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "phantom operation must fail, report was {stdout}");
+    assert!(
+        stdout.contains("catalog-baseline-divergence"),
+        "report was {stdout}"
+    );
+
+    // A YAML document and a non OpenAPI document are refused
+    // at generation, with the reason named, exit 2.
+    let yaml = src.join("api.yaml");
+    std::fs::write(&yaml, "openapi: 3.1.0\ninfo:\n  title: Billing\n").expect("yaml");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &yaml);
+    assert_eq!(code, 2, "YAML must refuse, stderr was {stderr}");
+    assert!(stderr.contains("YAML"), "stderr was {stderr}");
+    let not_api = src.join("notes.json");
+    write_doc(&not_api, &serde_json::json!({"hello": "world"}));
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &not_api);
+    assert_eq!(
+        code, 2,
+        "a non OpenAPI document must refuse, stderr was {stderr}"
+    );
+    assert!(stderr.contains("openapi"), "stderr was {stderr}");
+}
+
+#[test]
+fn openapi_generate_variants() {
+    let clean = fixture_binary("fixture_server");
+
+    // Two documents in one run, the repeatable flag's whole
+    // point, plus one document with no info description, which
+    // generates with its title as the description and a
+    // warning.
+    let src = temp_site("openapi-variants-src");
+    let billing = src.join("billing.json");
+    write_doc(&billing, &billing_doc());
+    let mut shipping_doc = billing_doc();
+    shipping_doc["info"] = serde_json::json!({"title": "Shipping", "version": "0.3.0"});
+    let shipping = src.join("shipping.json");
+    write_doc(&shipping, &shipping_doc);
+    let site = temp_site("openapi-variants");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &billing.to_string_lossy(),
+        "--openapi",
+        &shipping.to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(
+        stderr.contains("no info description"),
+        "stderr was {stderr}"
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("parses");
+    let apis: Vec<&serde_json::Value> = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|e| e["type"] == "application/openapi+json")
+        .collect();
+    assert_eq!(apis.len(), 2, "catalog was {catalog}");
+    let shipping_entry = apis
+        .iter()
+        .find(|e| e["identifier"] == "urn:air:example.com:openapi:shipping")
+        .expect("shipping entry");
+    assert_eq!(shipping_entry["description"], "Shipping");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // A document already inside the site is used in place, at
+    // its real served path, and no copy appears at the root.
+    let site = temp_site("openapi-insite");
+    let docs = site.join("docs");
+    std::fs::create_dir_all(&docs).expect("docs dir");
+    let inside = docs.join("api.json");
+    write_doc(&inside, &billing_doc());
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &inside);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        catalog_text.contains("https://example.com/docs/api.json"),
+        "catalog was {catalog_text}"
+    );
+    assert!(
+        !site.join("api.json").exists(),
+        "an in place document must not be copied to the root"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // Two documents with the same stem are refused before
+    // anything is written, and a document named baseline.json
+    // is refused for the name itself.
+    let other = temp_site("openapi-dup-src");
+    let dup = other.join("billing.json");
+    write_doc(&dup, &billing_doc());
+    let site = temp_site("openapi-dup");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &billing.to_string_lossy(),
+        "--openapi",
+        &dup.to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 2, "duplicate stems must refuse, stderr was {stderr}");
+    assert!(
+        stderr.contains("two OpenAPI documents"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        !site.join("billing.json").exists(),
+        "a refused run writes no documents"
+    );
+    let named = other.join("baseline.json");
+    write_doc(&named, &billing_doc());
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &named);
+    assert_eq!(
+        code, 2,
+        "a baseline.json document must refuse, stderr was {stderr}"
+    );
+    assert!(stderr.contains("baseline.json"), "stderr was {stderr}");
+}
+
+fn check_repo(site: &Path) -> (i32, String, String) {
+    run(&["check", "--site", &site_arg(site)])
+}
+
+#[test]
+fn migrate_records_openapi_baselines() {
+    let clean = fixture_binary("fixture_server");
+    let api_entry = |capabilities: Vec<&str>| {
+        serde_json::json!({
+            "identifier": "urn:air:example.com:openapi:billing",
+            "displayName": "Billing",
+            "type": "application/openapi+json",
+            "url": "https://example.com/billing.json",
+            "description": "Charges cards.",
+            "capabilities": capabilities,
+            "representativeQueries": ["What can the Billing API do", "Use the Billing API"],
+            "version": "1.0.0"
+        })
+    };
+    let site_with_doc = |name: &str, capabilities: Vec<&str>| {
+        let site = legacy_site(
+            name,
+            serde_json::json!([
+                legacy_mcp_entry(SEVEN_TOOLS.to_vec()),
+                api_entry(capabilities)
+            ]),
+        );
+        write_doc(&site.join("billing.json"), &billing_doc());
+        site
+    };
+
+    // A truthful legacy entry migrates into an OpenAPI
+    // baseline, and the migrated site checks clean, the same
+    // gate a generated document lives under.
+    let site = site_with_doc("migrate-openapi", vec!["createCharge", "listCharges"]);
+    let ci = site.join("workflow.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &clean, &ci);
+    assert_eq!(code, 0, "migrate failed with {stdout}");
+    let baseline_text = std::fs::read_to_string(site.join("baseline.json")).expect("baseline");
+    assert!(
+        baseline_text.contains("\"openapi\""),
+        "baseline was {baseline_text}"
+    );
+    let (code, stdout, _) = check_repo(&site);
+    assert_eq!(code, 0, "migrated check failed with {stdout}");
+
+    // A false capability claim is judged the way the MCP
+    // entry's claims are judged: reported, exit 1, and the
+    // entry carries reconciled to what the document serves.
+    let site = site_with_doc(
+        "migrate-openapi-lying",
+        vec!["createCharge", "listCharges", "deleteEverything"],
+    );
+    let ci = site.join("workflow.yml");
+    let (code, stdout, _) = migrate_stdio(&site, &clean, &ci);
+    assert_eq!(code, 1, "a false claim must fail, report was {stdout}");
+    assert!(stdout.contains("deleteEverything"), "report was {stdout}");
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        !catalog_text.contains("deleteEverything"),
+        "the carried entry is reconciled, catalog was {catalog_text}"
+    );
+    let (code, stdout, _) = check_repo(&site);
+    assert_eq!(code, 0, "migrated check failed with {stdout}");
+}

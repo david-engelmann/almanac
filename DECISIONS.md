@@ -301,3 +301,151 @@ The amendment approves the cross check, and the snippet is a
 permissive "can" in the design text, not a version 1
 commitment. agents.txt and agents.json are never generated,
 per Rule 6.
+
+## Generation roadmap, first slice: OpenAPI input (2026-11-23)
+
+Main ordered the generation roadmap opened the night v1
+closed, OpenAPI first. DESIGN.md section 4 names the OpenAPI
+document both a live probe source and a repo input, and Rule
+3 gives it ownership of paths, operations and the servers
+URL for an API entry. Section 6 already assigns its drift
+classes: an operation removed or renamed is Major, a new
+required parameter on an existing operation is Major, and a
+new OpenAPI operation is Critical, an unannounced capability.
+This slice builds exactly that surface, generate and check.
+
+Generate gains a repeatable --openapi flag naming a JSON
+OpenAPI document. A document outside the site is copied to
+the site root under its file name; a document inside the
+site is used in place. The entry's namespace segment is the
+document's file stem, validated as a plain name: the stem is
+stable under content edits, where a title derived segment
+would churn the identifier every time a title is touched.
+The entry type is application/openapi+json, display name
+and version come from the info block, capabilities are the
+operation identifiers sorted, representative queries are
+templated per Amendment E, and the digest binds the
+document bytes as served, per the dual path contract.
+Editorial Rule 4 makes the info description the entry
+description; a document with no info description generates
+with its title as the description and a warning on stderr,
+the least invention available, rather than refusing a
+spec-valid document.
+
+The core reduction records per operation: its identifier
+(the operationId, else METHOD path with the method upper
+case), its required parameter names sorted (operation
+parameters plus path item parameters, required true only),
+its description, and a hash of the whole operation object.
+The baseline gains an openapi list of these records beside
+the skills and artifacts lists, with serde default so
+baselines written before this slice still parse.
+
+Check compares the served document against the baseline
+operation by operation, never byte by byte. The published
+entry carries the digest for external readers, but this
+gate does not byte-bind the document: section 6 assigns
+operation level classes to this surface, and a byte binding
+would make every one of them unreachable, the same reason
+the MCP surface is compared fact by fact rather than as one
+blob. The classes: an operation in the baseline the
+document no longer serves is Major openapi-operation-
+removed (a rename lands here plus the addition below), an
+operation the document serves that the baseline never
+recorded is Critical openapi-operation-unannounced, a new
+required parameter on a surviving operation is Major
+openapi-required-parameter-added, an operation description
+change is Minor openapi-operation-description-changed, and
+any other change to an operation object is Major
+openapi-operation-changed, mirroring the tool schema hash
+class. A baselined document that is missing or no longer
+parses is Critical openapi-document-unreadable with the
+reason named. The catalog against baseline pass also
+compares an OpenAPI entry's announced capabilities against
+the baseline operation identifiers, so a hand edited
+catalog announcing an operation generation never recorded
+is Critical catalog-baseline-divergence, the phantom rule
+the MCP surface already lives under. A required parameter
+that is dropped is a relaxation and not drift, per section
+6 naming only additions.
+
+JSON documents only. YAML is the format half the world's
+OpenAPI files are written in, and it is recorded here as
+the slice's known limit rather than silently unsupported:
+a YAML document fails generation with its reason named.
+Generate still requires a surface target in this slice, so
+an OpenAPI document composes with an MCP surface the way a
+skill file does; generation for a REST only site, with no
+MCP surface at all, is a named question for the roadmap
+rather than a silent gap, because generate's probe first
+shape predates the roadmap and lifting it is its own
+slice. Migrate records no OpenAPI baseline for the entries
+it carries; its verification stays at the level the migrate
+record states, and deepening it rides the same roadmap.
+A2A cards, repo metadata, publisher config input and the
+full generation report remain on the roadmap behind this
+slice.
+
+### OpenAPI slice checkpoint fix pass (2026-11-23)
+
+The three checkpoint reviews (red team, spec fidelity,
+standards) landed with no Critical findings and five Major
+between the red team and spec axes, all fixed here, plus
+the standards axis's two Major test gaps. This section
+supersedes the slice text above wherever the two disagree.
+
+The operation comparison is three independent channels,
+not a precedence ladder. The reduction records, per
+operation, its required parameters, its description (else
+its summary, a fallback the original text omitted), and a
+contract hash of the operation object with its description,
+summary and parameters removed. A change in one channel
+fires its own class and can never mask a change in
+another; the first build let a description edit hide a
+contract change behind a minor finding, which the red team
+caught. A dropped required parameter is Minor
+openapi-required-parameter-dropped, a relaxation the
+publisher hears about without failing the gate; the
+original text called it not drift at all, which the
+catch-all contradicted, as the spec review caught.
+Parameters are identified by location and name ("in:name"),
+the identity the spec gives them, not by name alone.
+
+The baseline also records document level facts the first
+build dropped: the info version (compared as Major
+server-version-changed), the servers list (Major
+openapi-servers-changed; DESIGN section 4 Rule 3 gives the
+document ownership of the servers URL), the top level
+security posture (Major authentication-changed), and a
+hash of the components object (Major
+openapi-components-changed). A schema change inside
+components is reported at the entry, not attributed to one
+operation, because attribution without resolving
+references would be invented; unresolved $ref parameters
+and schemas are the reduction's named limits.
+
+The phantom rule now runs in both directions for this
+surface: a baselined entry the catalog dropped, and a
+catalog entry of this type with no baseline record of any
+kind, are both Critical catalog-baseline-divergence, where
+the first build only compared capabilities on a surviving
+entry.
+
+Generate plans every document before writing any of them.
+Reads, reductions, identifier checks and placement all
+happen first, so a refused run leaves the site untouched,
+and a document can no longer overwrite another document's
+source (or a pre-existing in-site document) before it is
+read. A document named baseline.json is refused for the
+name itself. Placement is resolved on canonical paths, so
+an in-site document is announced at the URL the checker
+will look for however its path was spelled.
+
+Migrate now records an OpenAPI baseline for the entries it
+carries, superseding the paragraph above: an entry of this
+type is verified as the surface it is (the document is
+reduced, its operation and version claims are judged the
+way the MCP entry's are, and the entry carries reconciled),
+so a migrated document lives under the same gate as a
+generated one instead of being byte-bound by the generic
+artifact path while generated documents are not.

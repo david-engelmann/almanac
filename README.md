@@ -31,7 +31,9 @@ Generation is the on-ramp. The gate is the product.
 - generate writes the dual path catalog and the baseline from repo
   artifacts and the live surface. A protected surface is generated
   from its server card instead, with the authentication metadata
-  recorded alongside.
+  recorded alongside. OpenAPI documents the site serves are
+  announced as API entries, and the baseline records their
+  operations so check can compare them fact by fact.
 - validate checks a catalog beyond schema, covering URN anchoring,
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.
@@ -60,8 +62,10 @@ validate command, and the first milestone has passed through three
 independent checkpoint reviews whose findings are fixed or recorded
 as named work in DECISIONS.md. All four commands are now built,
 migrate included, and the agents.json cross check completes the
-five design amendments. The design record lives in
-docs/DESIGN.md. No release exists yet.
+five design amendments. The generation roadmap is under way,
+with OpenAPI documents as its first input beyond the probe and
+skill files. The design record lives in docs/DESIGN.md. No
+release exists yet.
 
 ## License
 

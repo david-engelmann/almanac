@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::Severity;
 use crate::baseline::{AuthBaseline, Baseline};
 use crate::catalog::Catalog;
+use crate::openapi::OpenApiView;
 use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
 
 /// One divergence, classified.
@@ -108,6 +109,15 @@ pub struct CheckInputs<'a> {
     /// An entry whose endpoint cannot be determined is absent,
     /// and its direction of the cross check is skipped.
     pub catalog_endpoints: &'a [(String, String)],
+    /// The current reduction of each OpenAPI document the
+    /// baseline records, by entry identifier. A baselined
+    /// document that could not be read or reduced is absent
+    /// here and present in `openapi_broken` instead.
+    pub openapi_views: &'a [(String, OpenApiView)],
+    /// Baselined OpenAPI documents that are missing or no
+    /// longer read as OpenAPI documents, by entry identifier,
+    /// with the reason.
+    pub openapi_broken: &'a [(String, String)],
     pub suppressions: &'a [Suppression],
     /// Today's date, YYYY-MM-DD, for suppression expiry.
     pub today: &'a str,
@@ -322,6 +332,11 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     // neighbouring agents.json, and never touches the surface.
     check_agents_json(inputs, &mut findings);
 
+    // The OpenAPI comparison runs in every mode too. The
+    // document is a file surface, read in repo mode and live
+    // mode alike, and compared operation by operation.
+    check_openapi(inputs, &mut findings);
+
     apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
     findings.sort_by(|a, b| {
@@ -407,6 +422,235 @@ fn check_agents_json(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
                      which agents.json does not name"
                 ),
             ));
+        }
+    }
+}
+
+/// The OpenAPI documents against the baseline, fact by fact.
+/// The classes are the design record's: a removed operation
+/// is major, an unannounced operation is critical, a new
+/// required parameter is major, a dropped one is minor, a
+/// description change is minor, and a change to the rest of
+/// an operation object is major, the schema hash class in
+/// document form. The three channels are compared
+/// independently, so no change can mask another. At the
+/// document level the version, the servers list, the
+/// security posture and the components pool are compared
+/// too. The catalog itself is compared against the baseline
+/// in both directions: an entry announcing operations
+/// generation never recorded, an entry the baseline records
+/// that the catalog dropped, and a fabricated entry with no
+/// baseline record of any kind are all divergence, the
+/// phantom rule.
+fn check_openapi(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    let published = inputs.published;
+    let baseline = inputs.baseline;
+    for entry in &published.entries {
+        if entry.media_type == "application/openapi+json"
+            && !baseline
+                .openapi
+                .iter()
+                .any(|a| a.entry_id == entry.identifier)
+            && !baseline
+                .artifacts
+                .iter()
+                .any(|a| a.entry_id == entry.identifier)
+        {
+            findings.push(finding(
+                Severity::Critical,
+                "catalog-baseline-divergence",
+                Some(&entry.identifier),
+                "the catalog announces an OpenAPI entry the baseline does not record".into(),
+            ));
+        }
+    }
+    for api in &baseline.openapi {
+        match published
+            .entries
+            .iter()
+            .find(|e| e.identifier == api.entry_id)
+        {
+            Some(entry) => {
+                let announced: std::collections::BTreeSet<&str> =
+                    entry.capabilities.iter().map(|c| c.as_str()).collect();
+                let recorded: std::collections::BTreeSet<&str> =
+                    api.operations.iter().map(|op| op.id.as_str()).collect();
+                if announced != recorded {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&api.entry_id),
+                        "the catalog's announced operations differ from the baseline recorded at generation"
+                            .into(),
+                    ));
+                }
+            }
+            None => findings.push(finding(
+                Severity::Critical,
+                "catalog-baseline-divergence",
+                Some(&api.entry_id),
+                "the baseline records an OpenAPI entry the catalog no longer announces".into(),
+            )),
+        }
+        if let Some((_, reason)) = inputs
+            .openapi_broken
+            .iter()
+            .find(|(id, _)| id == &api.entry_id)
+        {
+            findings.push(finding(
+                Severity::Critical,
+                "openapi-document-unreadable",
+                Some(&api.entry_id),
+                format!(
+                    "the OpenAPI document at {} cannot be read as one, {reason}",
+                    api.url
+                ),
+            ));
+            continue;
+        }
+        let Some((_, view)) = inputs
+            .openapi_views
+            .iter()
+            .find(|(id, _)| id == &api.entry_id)
+        else {
+            continue;
+        };
+        if view.version != api.version {
+            findings.push(finding(
+                Severity::Major,
+                "server-version-changed",
+                Some(&api.entry_id),
+                format!(
+                    "the document's version changed from {} at generation to {}",
+                    api.version, view.version
+                ),
+            ));
+        }
+        if view.servers != api.servers {
+            findings.push(finding(
+                Severity::Major,
+                "openapi-servers-changed",
+                Some(&api.entry_id),
+                "the document's servers list differs from the baseline recorded at generation"
+                    .into(),
+            ));
+        }
+        if view.security_required != api.security_required {
+            findings.push(finding(
+                Severity::Major,
+                "authentication-changed",
+                Some(&api.entry_id),
+                "the document's security posture changed since generation".into(),
+            ));
+        }
+        if view.components_sha256 != api.components_sha256 {
+            findings.push(finding(
+                Severity::Major,
+                "openapi-components-changed",
+                Some(&api.entry_id),
+                "the document's components changed since generation, and the gate cannot attribute the change to one operation without resolving references"
+                    .into(),
+            ));
+        }
+        let current_ops: std::collections::HashMap<&str, &crate::openapi::OperationView> = view
+            .operations
+            .iter()
+            .map(|op| (op.id.as_str(), op))
+            .collect();
+        for recorded in &api.operations {
+            match current_ops.get(recorded.id.as_str()) {
+                None => findings.push(finding(
+                    Severity::Major,
+                    "openapi-operation-removed",
+                    Some(&api.entry_id),
+                    format!(
+                        "operation {} is recorded in the baseline and the document no longer serves it",
+                        recorded.id
+                    ),
+                )),
+                Some(current) => {
+                    // Three independent channels. A change in
+                    // one never suppresses a finding in another.
+                    let added: Vec<&String> = current
+                        .required
+                        .iter()
+                        .filter(|name| !recorded.required.contains(name))
+                        .collect();
+                    if !added.is_empty() {
+                        findings.push(finding(
+                            Severity::Major,
+                            "openapi-required-parameter-added",
+                            Some(&api.entry_id),
+                            format!(
+                                "operation {} now requires parameter {} that the baseline does not record",
+                                recorded.id,
+                                added
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                    let dropped: Vec<&String> = recorded
+                        .required
+                        .iter()
+                        .filter(|name| !current.required.contains(name))
+                        .collect();
+                    if !dropped.is_empty() {
+                        findings.push(finding(
+                            Severity::Minor,
+                            "openapi-required-parameter-dropped",
+                            Some(&api.entry_id),
+                            format!(
+                                "operation {} no longer requires parameter {} that the baseline records",
+                                recorded.id,
+                                dropped
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                    if crate::hash::sha256_str(&current.description) != recorded.description_sha256
+                    {
+                        findings.push(finding(
+                            Severity::Minor,
+                            "openapi-operation-description-changed",
+                            Some(&api.entry_id),
+                            format!(
+                                "operation {} changed its description since the baseline",
+                                recorded.id
+                            ),
+                        ));
+                    }
+                    if current.contract_sha256 != recorded.contract_sha256 {
+                        findings.push(finding(
+                            Severity::Major,
+                            "openapi-operation-changed",
+                            Some(&api.entry_id),
+                            format!(
+                                "operation {} changed its contract since the baseline, apart from its description and parameters",
+                                recorded.id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        for current in &view.operations {
+            if !api.operations.iter().any(|op| op.id == current.id) {
+                findings.push(finding(
+                    Severity::Critical,
+                    "openapi-operation-unannounced",
+                    Some(&api.entry_id),
+                    format!(
+                        "operation {} is served by the document and the catalog never announced it",
+                        current.id
+                    ),
+                ));
+            }
         }
     }
 }
@@ -779,6 +1023,8 @@ mod tests {
             agents_json_endpoints: None,
             agents_json_broken: false,
             catalog_endpoints: &[],
+            openapi_views: &[],
+            openapi_broken: &[],
             suppressions: &[],
             today: "2026-11-21",
         }
@@ -840,6 +1086,7 @@ mod tests {
             )),
             skills: vec![],
             artifacts: vec![],
+            openapi: vec![],
             provenance: vec![],
         }
     }
@@ -1038,5 +1285,263 @@ mod tests {
         let mut with = inputs(&cat, &base, None);
         with.agents_json_endpoints = Some(&agents);
         assert!(check(&with).is_empty());
+    }
+
+    // ------------------------------------------------------------
+    // The OpenAPI comparison. The baseline records one document
+    // with two operations; each test perturbs the current view.
+
+    const API_ID: &str = "urn:air:example.com:openapi:billing";
+
+    fn api_doc() -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {"title": "Billing", "version": "1.0.0", "description": "Charges."},
+            "paths": {
+                "/charges": {
+                    "post": {
+                        "operationId": "createCharge",
+                        "description": "Create a charge.",
+                        "parameters": [{"name": "key", "in": "header", "required": true}]
+                    },
+                    "get": {"operationId": "listCharges", "description": "List charges."}
+                }
+            }
+        })
+    }
+
+    fn api_setup() -> (Catalog, Baseline, crate::openapi::OpenApiView) {
+        let view = crate::openapi::reduce_openapi(&api_doc()).expect("reduces");
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.openapi = vec![crate::baseline::OpenApiBaseline::from_view(
+            API_ID,
+            "https://example.com/billing.json",
+            "00",
+            &view,
+        )];
+        let mut cat = catalog();
+        cat.entries.push(Entry {
+            identifier: API_ID.into(),
+            display_name: "Billing".into(),
+            media_type: "application/openapi+json".into(),
+            url: Some("https://example.com/billing.json".into()),
+            data: None,
+            description: "Charges.".into(),
+            capabilities: view.operations.iter().map(|op| op.id.clone()).collect(),
+            representative_queries: vec![],
+            tags: vec![],
+            version: Some("1.0.0".into()),
+            digest: None,
+            updated_at: None,
+            trust_manifest: None,
+        });
+        (cat, base, view)
+    }
+
+    fn kinds(findings: &[Finding]) -> Vec<&str> {
+        findings.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    #[test]
+    fn openapi_agreement_produces_no_findings() {
+        let (cat, base, view) = api_setup();
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        assert!(check(&with).is_empty());
+    }
+
+    #[test]
+    fn openapi_removed_and_unannounced_operations_fire() {
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["paths"]["/charges"]
+            .as_object_mut()
+            .expect("path item")
+            .remove("get");
+        doc["paths"]["/refunds"] = serde_json::json!({
+            "post": {"operationId": "createRefund", "description": "Refund."}
+        });
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert!(kinds(&findings).contains(&"openapi-operation-removed"));
+        assert!(kinds(&findings).contains(&"openapi-operation-unannounced"));
+        let removed = findings
+            .iter()
+            .find(|f| f.kind == "openapi-operation-removed")
+            .expect("removed finding");
+        assert_eq!(removed.severity, Severity::Major);
+        let added = findings
+            .iter()
+            .find(|f| f.kind == "openapi-operation-unannounced")
+            .expect("unannounced finding");
+        assert_eq!(added.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn openapi_required_parameter_and_description_changes_fire() {
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["paths"]["/charges"]["post"]["parameters"]
+            .as_array_mut()
+            .expect("params")
+            .push(serde_json::json!({"name": "tenant", "in": "header", "required": true}));
+        doc["paths"]["/charges"]["get"]["description"] =
+            serde_json::json!("List every charge ever.");
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert!(kinds(&findings).contains(&"openapi-required-parameter-added"));
+        assert!(
+            kinds(&findings).contains(&"openapi-operation-description-changed"),
+            "kinds were {:?}",
+            kinds(&findings)
+        );
+        // Neither edit touches the contract channel, which is
+        // recorded apart from descriptions and parameters, so
+        // the contract class stays silent on its own evidence.
+        assert!(!kinds(&findings).contains(&"openapi-operation-changed"));
+    }
+
+    #[test]
+    fn openapi_other_operation_change_and_broken_document_fire() {
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["paths"]["/charges"]["get"]["responses"] =
+            serde_json::json!({"200": {"description": "ok"}});
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert!(kinds(&findings).contains(&"openapi-operation-changed"));
+
+        let broken = vec![(API_ID.to_string(), "the file is missing".to_string())];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_broken = &broken;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "openapi-document-unreadable");
+        assert_eq!(findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn openapi_description_change_cannot_mask_a_contract_change() {
+        // The checkpoint red team's case: a wording tweak and a
+        // contract change in the same edit to the same
+        // operation. The channels are independent, so both
+        // findings fire and the major one fails the gate.
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["paths"]["/charges"]["post"]["description"] = serde_json::json!("Create one charge.");
+        doc["paths"]["/charges"]["post"]["responses"] =
+            serde_json::json!({"201": {"description": "made"}});
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert!(kinds(&findings).contains(&"openapi-operation-description-changed"));
+        assert!(kinds(&findings).contains(&"openapi-operation-changed"));
+    }
+
+    #[test]
+    fn openapi_dropped_required_parameter_is_minor_only() {
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["paths"]["/charges"]["post"]
+            .as_object_mut()
+            .expect("operation")
+            .remove("parameters");
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "openapi-required-parameter-dropped");
+        assert_eq!(findings[0].severity, Severity::Minor);
+    }
+
+    #[test]
+    fn openapi_document_level_changes_fire() {
+        let (cat, base, _) = api_setup();
+        let mut doc = api_doc();
+        doc["info"]["version"] = serde_json::json!("2.0.0");
+        doc["servers"] = serde_json::json!([{"url": "https://api.example.com/v2"}]);
+        doc["security"] = serde_json::json!([{"apiKey": []}]);
+        doc["components"] = serde_json::json!({"schemas": {"Charge": {"type": "object"}}});
+        let view = crate::openapi::reduce_openapi(&doc).expect("reduces");
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        for kind in [
+            "server-version-changed",
+            "openapi-servers-changed",
+            "authentication-changed",
+            "openapi-components-changed",
+        ] {
+            assert!(
+                kinds(&findings).contains(&kind),
+                "missing {kind} in {:?}",
+                kinds(&findings)
+            );
+        }
+    }
+
+    #[test]
+    fn openapi_deleted_and_fabricated_entries_are_divergence() {
+        let (mut cat, base, view) = api_setup();
+        cat.entries.retain(|e| e.identifier != API_ID);
+        let views = vec![(API_ID.to_string(), view.clone())];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "catalog-baseline-divergence");
+
+        let (mut cat, base, view) = api_setup();
+        let mut fabricated = cat
+            .entries
+            .iter()
+            .find(|e| e.identifier == API_ID)
+            .expect("api entry")
+            .clone();
+        fabricated.identifier = "urn:air:example.com:openapi:forged".into();
+        cat.entries.push(fabricated);
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "catalog-baseline-divergence");
+        assert_eq!(
+            findings[0].entry.as_deref(),
+            Some("urn:air:example.com:openapi:forged")
+        );
+    }
+
+    #[test]
+    fn openapi_phantom_capability_in_the_catalog_is_divergence() {
+        let (mut cat, base, view) = api_setup();
+        cat.entries
+            .iter_mut()
+            .find(|e| e.identifier == API_ID)
+            .expect("api entry")
+            .capabilities
+            .push("deleteEverything".into());
+        let views = vec![(API_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.openapi_views = &views;
+        let findings = check(&with);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "catalog-baseline-divergence");
+        assert_eq!(findings[0].severity, Severity::Critical);
     }
 }
