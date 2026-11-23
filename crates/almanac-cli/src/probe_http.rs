@@ -163,14 +163,33 @@ fn get_json(agent: &Agent, url: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Fetch the server card a surface serves, from the well known
-/// card path on the endpoint's origin. Generation for a
-/// protected surface reads the surface from this card, because
-/// the card is the declared surface the publisher already
-/// serves to clients.
+/// Fetch the server card a surface serves. SEP-2127 Final
+/// puts the card at the endpoint's own path with /server-card
+/// appended, so that location is tried first, and the well
+/// known path on the endpoint's origin is the fallback,
+/// because publishers who predate the Final text serve only
+/// that. A normative answer counts only when it parses as a
+/// JSON object, because a catch-all front end answering every
+/// unknown path with a 200 page would otherwise shadow a
+/// valid legacy card behind an unparseable body, the same
+/// reason the metadata ladder treats an unparseable document
+/// as absent. The legacy answer is returned as read, so a
+/// broken legacy card surfaces as a parse failure at the
+/// caller rather than as silence. Generation for a protected
+/// surface reads the surface from this card, because the card
+/// is the declared surface the publisher already serves to
+/// clients.
 pub fn fetch_server_card(endpoint_url: &str) -> Option<Vec<u8>> {
     let (origin, _) = origin_and_path(endpoint_url)?;
     let agent = build_agent();
+    let normative = crate::probe::normative_card_url(endpoint_url);
+    if let Some(bytes) = get_bytes(&agent, &normative)
+        && serde_json::from_slice::<Value>(&bytes)
+            .map(|value| value.is_object())
+            .unwrap_or(false)
+    {
+        return Some(bytes);
+    }
     get_bytes(
         &agent,
         &format!("{origin}/.well-known/mcp/server-card.json"),

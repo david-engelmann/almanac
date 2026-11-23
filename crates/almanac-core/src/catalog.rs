@@ -77,8 +77,14 @@ impl Entry {
     /// Almanac generates single publisher catalogs, so every entry
     /// it generates or baselines must anchor to the host domain.
     pub fn anchored_to(&self, domain: &str) -> bool {
-        let parts: Vec<&str> = self.identifier.split(':').collect();
-        parts.len() >= 3 && parts[0] == "urn" && parts[1] == "air" && parts[2] == domain
+        // The domain is matched as a prefix segment, not by
+        // splitting on every colon, because a domain carrying
+        // a port is itself colon bearing and a split would
+        // compare only its first half.
+        self.identifier
+            .strip_prefix("urn:air:")
+            .map(|rest| rest == domain || rest.starts_with(&format!("{domain}:")))
+            .unwrap_or(false)
     }
 }
 

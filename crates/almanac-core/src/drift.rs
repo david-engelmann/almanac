@@ -84,11 +84,15 @@ pub struct CheckInputs<'a> {
     pub snapshot: Option<&'a SurfaceSnapshot>,
     /// Current SKILL.md hashes by entry identifier, as served.
     pub skill_hashes: &'a [(String, String)],
-    /// Current artifact digests by entry identifier for artifacts
+    /// Current artifact digests by artifact URL for artifacts
     /// the checker can reach, sha256 hex without the catalog
-    /// field's prefix. A `None` digest means the artifact maps to
-    /// a place the checker reads and is not there. Artifacts with
-    /// no entry in this list are not checked.
+    /// field's prefix. The key is the URL, not the entry
+    /// identifier, because one entry can announce several
+    /// artifacts (the server card at two locations) and each is
+    /// checked at its own URL. A `None` digest means the
+    /// artifact maps to a place the checker reads and is not
+    /// there. Artifacts with no entry in this list are not
+    /// checked.
     pub artifact_digests: &'a [(String, Option<String>)],
     /// Entry identifiers of skill files present on the site now,
     /// whether or not the baseline knows them.
@@ -206,7 +210,7 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
         if let Some((_, current)) = inputs
             .artifact_digests
             .iter()
-            .find(|(id, _)| id == &artifact.entry_id)
+            .find(|(url, _)| url == &artifact.url)
         {
             match current {
                 None => findings.push(finding(
@@ -1001,7 +1005,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::McpBaseline;
+    use crate::baseline::{ArtifactBaseline, McpBaseline};
     use crate::catalog::{Catalog, Entry, Host};
     use crate::snapshot::ToolSurface;
 
@@ -1089,6 +1093,70 @@ mod tests {
             openapi: vec![],
             provenance: vec![],
         }
+    }
+
+    #[test]
+    fn each_artifact_is_checked_at_its_own_url() {
+        // One entry announcing two artifacts, the server card
+        // at its two locations. The digest loop must compare
+        // each artifact against the bytes at its own URL, so a
+        // change to the second copy alone fires at that URL and
+        // a healthy first copy is never accused in its place.
+        let mut cat = catalog();
+        cat.entries[0].digest = Some("sha256:aaaa".into());
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.artifacts = vec![
+            ArtifactBaseline {
+                entry_id: "urn:air:example.com:mcp:demo".into(),
+                url: "https://example.com/.well-known/mcp/server-card.json".into(),
+                sha256: "aaaa".into(),
+            },
+            ArtifactBaseline {
+                entry_id: "urn:air:example.com:mcp:demo".into(),
+                url: "https://example.com/mcp/server-card".into(),
+                sha256: "aaaa".into(),
+            },
+        ];
+        let digests = vec![
+            (
+                "https://example.com/.well-known/mcp/server-card.json".to_string(),
+                Some("aaaa".to_string()),
+            ),
+            (
+                "https://example.com/mcp/server-card".to_string(),
+                Some("bbbb".to_string()),
+            ),
+        ];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 2, "findings were {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.detail.contains("https://example.com/mcp/server-card")
+                    && !f.detail.contains(".well-known")),
+            "every finding must name the moved copy only, findings were {findings:?}"
+        );
+        // A missing second copy is a missing finding at its own
+        // URL, and the intact first copy stays silent.
+        let digests = vec![
+            (
+                "https://example.com/.well-known/mcp/server-card.json".to_string(),
+                Some("aaaa".to_string()),
+            ),
+            ("https://example.com/mcp/server-card".to_string(), None),
+        ];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert!(
+            findings[0]
+                .detail
+                .contains("https://example.com/mcp/server-card"),
+            "the missing finding must name the missing copy, findings were {findings:?}"
+        );
     }
 
     #[test]

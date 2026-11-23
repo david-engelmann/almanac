@@ -308,6 +308,19 @@ fn respond(
     let _ = stream.flush();
 }
 
+fn fixture_card() -> serde_json::Value {
+    serde_json::json!({
+        "name": "telorama",
+        "version": "0.1.0",
+        "protocolVersion": "2025-06-18",
+        "transport": "streamable-http",
+        "description": "The telorama MCP server, from its card.",
+        "tools": fixture_tools("open-clean"),
+        "resources": [{"uri": "ui://telorama/scene"}],
+        "prompts": []
+    })
+}
+
 fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
     let (method, path, headers, body) = read_request(stream);
     let mode = mode.lock().expect("mode lock").clone();
@@ -345,17 +358,36 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, port: u16) {
             respond(stream, 200, "application/json", "", &doc.to_string());
         }
         ("GET", "/.well-known/mcp/server-card.json") => {
-            let card = serde_json::json!({
-                "name": "telorama",
-                "version": "0.1.0",
-                "protocolVersion": "2025-06-18",
-                "transport": "streamable-http",
-                "description": "The telorama MCP server, from its card.",
-                "tools": fixture_tools("open-clean"),
-                "resources": [{"uri": "ui://telorama/scene"}],
-                "prompts": []
-            });
-            respond(stream, 200, "application/json", "", &card.to_string());
+            if mode == "auth-card-normative" {
+                respond(stream, 404, "text/plain", "", "not found");
+            } else if mode == "auth-card-both" {
+                // Both locations serve, with different cards, so
+                // the suite can pin which one the fetch prefers.
+                let mut card = fixture_card();
+                card["version"] = serde_json::json!("0.0.9");
+                respond(stream, 200, "application/json", "", &card.to_string());
+            } else {
+                respond(
+                    stream,
+                    200,
+                    "application/json",
+                    "",
+                    &fixture_card().to_string(),
+                );
+            }
+        }
+        ("GET", "/mcp/server-card") => {
+            if mode == "auth-card-normative" || mode == "auth-card-both" {
+                respond(
+                    stream,
+                    200,
+                    "application/json",
+                    "",
+                    &fixture_card().to_string(),
+                );
+            } else {
+                respond(stream, 404, "text/plain", "", "not found");
+            }
         }
         ("POST", "/mcp") => {
             if mode.starts_with("auth-") {
@@ -1859,4 +1891,169 @@ fn migrate_records_openapi_baselines() {
     );
     let (code, stdout, _) = check_repo(&site);
     assert_eq!(code, 0, "migrated check failed with {stdout}");
+}
+
+// ---------------------------------------------------------------------
+// Applicability audit charge 1 (2026-11-23): the server card at both
+// locations, the endpoint's /server-card path normative per SEP-2127
+// Final and the well known path beside it.
+// ---------------------------------------------------------------------
+
+#[test]
+fn card_published_at_both_locations() {
+    let (url, _mode) = start_http_fixture();
+    let site = temp_site("card-dual");
+    // The site's domain is the fixture's own authority, so the
+    // endpoint lives on the site's origin and the normative
+    // copy belongs in the site.
+    let authority = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .expect("authority")
+        .to_string();
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        &authority,
+        "--name",
+        "Example",
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let legacy_path = site.join(".well-known/mcp/server-card.json");
+    let normative_path = site.join("mcp/server-card");
+    let legacy = std::fs::read(&legacy_path).expect("legacy card");
+    let normative = std::fs::read(&normative_path).expect("normative card");
+    assert_eq!(legacy, normative, "the two card copies must be identical");
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    let artifacts = baseline["artifacts"].as_array().expect("artifacts");
+    assert_eq!(artifacts.len(), 2, "both copies are baseline artifacts");
+    let legacy_url = format!("https://{authority}/.well-known/mcp/server-card.json");
+    assert!(
+        artifacts
+            .iter()
+            .any(|a| a["url"].as_str() == Some(legacy_url.as_str())),
+        "the well known copy is a baseline artifact"
+    );
+    let normative_url = format!("{url}/server-card");
+    assert!(
+        artifacts
+            .iter()
+            .any(|a| a["url"].as_str() == Some(normative_url.as_str())),
+        "the normative copy is a baseline artifact"
+    );
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // Tampering with either copy alone is drift.
+    std::fs::write(&normative_path, b"{}").expect("tamper normative");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "a tampered normative copy must fail, {stdout}");
+    std::fs::write(&normative_path, &normative).expect("restore normative");
+    std::fs::write(&legacy_path, b"{}").expect("tamper legacy");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "a tampered legacy copy must fail, {stdout}");
+}
+
+#[test]
+fn protected_generation_reads_the_normative_card() {
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "auth-card-normative".to_string();
+    let site = temp_site("card-normative");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(
+        code, 0,
+        "protected generation must read the card at the normative location, {stderr}"
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("ard"))
+            .expect("ard json");
+    assert_eq!(catalog["entries"][0]["displayName"], "telorama");
+}
+
+#[test]
+fn protected_generation_prefers_the_normative_card() {
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "auth-card-both".to_string();
+    let site = temp_site("card-both");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "protected generation failed with {stderr}");
+    // The normative location serves version 0.1.0 and the
+    // legacy path serves 0.0.9 in this mode, so the recorded
+    // version says which card the fetch read.
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(
+        baseline["mcp"]["server_version"], "0.1.0",
+        "the normative card must win when both locations serve"
+    );
+}
+
+#[test]
+fn migrate_publishes_the_card_at_both_locations() {
+    let (url, _mode) = start_http_fixture();
+    let site = temp_site("mig-card-dual");
+    let authority = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .expect("authority")
+        .to_string();
+    let entry = serde_json::json!({
+        "identifier": format!("urn:air:{authority}:mcp:telorama"),
+        "displayName": "telorama",
+        "type": "application/mcp-server-card+json",
+        "url": format!("https://{authority}/.well-known/mcp/server-card.json"),
+        "description": "The telorama MCP server.",
+        "capabilities": SEVEN_TOOLS,
+        "representativeQueries": ["What can telorama do", "Use telorama to complete a task"],
+        "version": "0.1.0"
+    });
+    let catalog = serde_json::json!({
+        "host": {"displayName": "Example", "domain": authority},
+        "entries": [entry]
+    });
+    std::fs::create_dir_all(site.join(".well-known")).expect("well known");
+    std::fs::write(
+        site.join(".well-known/ai-catalog.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&catalog).expect("serialize")
+        ),
+    )
+    .expect("legacy catalog");
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "migrate failed with {stdout} {stderr}");
+    let legacy =
+        std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("legacy card written");
+    let normative = std::fs::read(site.join("mcp/server-card")).expect("normative card written");
+    assert_eq!(legacy, normative, "the two card copies must be identical");
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    let artifacts = baseline["artifacts"].as_array().expect("artifacts");
+    assert_eq!(artifacts.len(), 2, "both copies are baseline artifacts");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "check after migrate failed with {stdout}");
+    // Tampering with the migrated normative copy alone fails.
+    std::fs::write(site.join("mcp/server-card"), b"{}").expect("tamper normative");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(
+        code, 1,
+        "a tampered normative copy must fail, report was {stdout}"
+    );
 }

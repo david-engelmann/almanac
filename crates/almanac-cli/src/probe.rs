@@ -16,6 +16,22 @@ use almanac_core::snapshot::{AuthSurface, ProbeFailure, SurfaceSnapshot, ToolSur
 use serde_json::{Value, json};
 
 pub const OFFERED_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The normative server card URL for an MCP endpoint, per
+/// SEP-2127 Final: the endpoint URL with /server-card appended.
+/// Trailing slashes are trimmed, and a query string or fragment
+/// is cut first, because the card path appends to the path.
+/// One constructor serves both sides, the fetch that reads the
+/// card and the generation that publishes it, so the two can
+/// never drift apart on the path's shape.
+pub(crate) fn normative_card_url(endpoint_url: &str) -> String {
+    let base = endpoint_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(endpoint_url)
+        .trim_end_matches('/');
+    format!("{base}/server-card")
+}
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most pages one list call may span before the probe

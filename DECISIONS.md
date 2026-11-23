@@ -449,3 +449,117 @@ way the MCP entry's are, and the entry carries reconciled),
 so a migrated document lives under the same gate as a
 generated one instead of being byte-bound by the generic
 artifact path while generated documents are not.
+
+## Applicability audit charges (2026-11-23)
+
+David ordered an applicability audit of the fleet's format
+repos against the current standards landscape (audit at
+~/workspace/research/knowledge-formats-lane/applicability-audit-2026-11-23.md).
+Almanac took three charges. The first two are builds; the
+third is watch items only.
+
+### Charge 1: the server card at both locations
+
+SEP-2127 is Final, and its card location is
+<endpoint>/server-card, explicitly not the well known path
+this tool was built on. Major scanners still request
+/.well-known/mcp/server-card.json, so one location or the
+other alone loses a reader population, the same shape as
+the dual path catalog contract. Almanac now serves both,
+with the endpoint path normative:
+
+- Generate and migrate write the card bytes to both site
+  locations when the endpoint is an HTTP URL on the site's
+  own origin, the normative copy at the endpoint's path
+  plus /server-card, the legacy copy at the well known
+  path. A stdio target, or an endpoint on another origin,
+  gets the well known copy only, because the normative
+  location belongs to the server's own origin and this
+  site is not it.
+- The catalog entry keeps naming the well known path,
+  which exists for every transport. The baseline records
+  the normative copy as a second artifact of the same
+  entry with the same hash, so the existing digest binding
+  covers both copies and a divergence between them is
+  drift. The digest story is otherwise unchanged.
+- The card fetch behind protected generation tries the
+  normative location first and falls back to the well
+  known path, so a publisher who serves only the Final
+  location is read, and one who serves only the legacy
+  path still is.
+- The shared URL to path mapping accepts both URL
+  schemes for the publisher's own host. Check uses it to
+  resolve artifact URLs into the site, and generate and
+  migrate use the same mapping to place the normative
+  copy. It already bound the host; a local or staging
+  surface served over plain http is the same publisher's
+  site.
+
+One gap is recorded here rather than built: the Final
+card schema (a reverse-DNS name, a remotes list, a
+description of at most 100 characters, no tool list)
+differs from the card shape generate writes today, which
+carries the probed tool surface and an endpoint field.
+Reconciling the generated card with the Final schema is a
+named follow-up for the roadmap, not part of this charge,
+which was locations only.
+
+### Charge 3: watch items, no builds
+
+- The IETF DAWN discovery draft, draft-bu-dawn-ard-discovery,
+  one of three -00 individual drafts presenting ARD to the
+  DAWN working group on 2026-11-19. ARD itself is unchanged
+  at v0.91, the drafts are not adopted working group
+  documents, and the chairs kept catalog work out of DAWN
+  scope for now. Watch: if the discovery draft is adopted
+  or its manifest shape diverges from the v0.91 envelope,
+  the catalog model gets a second look. Until then the
+  baseline stands and nothing is rebuilt on a draft.
+- A2A 1.1, a release candidate at this writing, defines
+  the agent card media type application/a2a-agent-card+json.
+  When the generation roadmap's A2A slice is built, its
+  entries carry that media type (and the 1.0 card shape
+  stays readable). Recorded now so the slice opens with
+  the current type rather than the one current when the
+  roadmap was written.
+
+### Charge 1 checkpoint fix pass (2026-11-23)
+
+The three checkpoint reviews found one Critical, one
+Major and a set of Minors, all fixed before landing. The
+Critical mattered most, and it was in the gate itself:
+the digest binding keyed each artifact's current digest
+by entry identifier and matched the first entry with that
+identifier, so with two artifacts on one entry the second
+copy's bytes were read, hashed and silently discarded.
+Tampering with or deleting the normative copy alone would
+have passed check clean, and tampering with the legacy
+copy accused the normative one in its place. The binding
+is now keyed by artifact URL end to end, with a core test
+that checks each copy at its own URL, and the slice's
+integration tests now exercise the tamper in both
+directions for generate and for migrate. The reviews also
+found migrate's dual write untested (now covered, which
+needed the URN anchor check to match the domain as a
+prefix segment, because a domain carrying a port is colon
+bearing and the old split-on-colons comparison could
+never anchor it), the fetch's fallback keyed on transport
+failure only (a normative answer now counts only when it
+parses as a JSON object, so a catch-all front end's 200
+page cannot shadow a valid legacy card), the normative
+URL built twice in two files (one constructor in the
+probe module now serves fetch and publish, and it cuts a
+query string or fragment before appending the card path),
+a displaced doc comment (restored to the function it
+describes), and the fetch order unpinned when both
+locations serve (the fixture now serves different cards
+at the two locations in one mode, and a test records
+which one generation read). Two Minors stand as recorded
+limits: the host comparison in the URL mapping is case
+sensitive, as it was before this charge, so an endpoint
+spelled with a differently cased host gets the well known
+copy only, and generate and migrate now say so in their
+output when an HTTP endpoint does not map into the site;
+and the card copies are written before the baseline, the
+ordering the legacy card always had, so a run killed
+mid-write can leave a copy no baseline records yet.

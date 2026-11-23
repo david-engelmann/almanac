@@ -72,7 +72,9 @@ fn pretty_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
 /// catalog is input and the checker reads only inside the site.
 fn url_to_path(site: &Path, domain: &str, url: &str) -> Option<PathBuf> {
     let prefix = format!("https://{domain}");
-    let rest = url.strip_prefix(&prefix)?;
+    let rest = url
+        .strip_prefix(&prefix)
+        .or_else(|| url.strip_prefix(&format!("http://{domain}")))?;
     if !rest.is_empty() && !rest.starts_with('/') {
         return None;
     }
@@ -228,6 +230,18 @@ fn snapshot_from_card(
     ))
 }
 
+/// The normative server card location for a probe target, per
+/// SEP-2127 Final: the endpoint URL with /server-card appended.
+/// The well known path is the legacy location, still served
+/// beside it because major scanners still request it. A stdio
+/// target has no endpoint URL, so it has no normative location.
+fn normative_card_url_for(target: &ProbeTarget) -> Option<String> {
+    match target {
+        ProbeTarget::Http(url) => Some(crate::probe::normative_card_url(url)),
+        ProbeTarget::Stdio(_) => None,
+    }
+}
+
 /// The server card document for a probed surface, as a value.
 /// For an HTTP surface the card records the endpoint it was
 /// probed at, so a later check with no target named can resolve
@@ -296,6 +310,21 @@ pub fn generate(
     };
     let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
     write_file(&site.join(".well-known/mcp/server-card.json"), &card_bytes)?;
+    // The normative copy, at the endpoint's own path, when the
+    // endpoint lives on this site's origin. Identical bytes, so
+    // the one digest binds both locations, and the baseline
+    // records the copy below as a second artifact of the entry.
+    let normative_card: Option<(String, PathBuf)> = normative_card_url_for(target)
+        .and_then(|url| url_to_path(site, domain, &url).map(|path| (url, path)));
+    if let Some((_, path)) = &normative_card {
+        write_file(path, &card_bytes)?;
+    }
+    if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
+        eprintln!(
+            "warning, the endpoint is not on the site's origin, so the server card \
+             is published at the well known path only"
+        );
+    }
 
     let tool_names: Vec<String> = snapshot.tools.iter().map(|t| t.name.clone()).collect();
     let representative_queries = if queries.is_empty() {
@@ -332,6 +361,13 @@ pub fn generate(
         url: card_url,
         sha256: hash::sha256_hex(&card_bytes),
     }];
+    if let Some((url, _)) = &normative_card {
+        artifacts.push(ArtifactBaseline {
+            entry_id: entry_id.clone(),
+            url: url.clone(),
+            sha256: hash::sha256_hex(&card_bytes),
+        });
+    }
     let mut provenance = vec![EntryProvenance {
         entry_id: entry_id.clone(),
         produced_by: if card_source.is_some() {
@@ -846,7 +882,7 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
     for artifact in &baseline.artifacts {
         if let Some(path) = url_to_path(site, &published.host.domain, &artifact.url) {
             let digest = fs::read(&path).ok().map(|bytes| hash::sha256_hex(&bytes));
-            artifact_digests.push((artifact.entry_id.clone(), digest));
+            artifact_digests.push((artifact.url.clone(), digest));
         }
     }
     // Skill files present on the site now, announced or not. A
@@ -1145,6 +1181,7 @@ pub fn migrate_site(
         notes.push("the legacy catalog announces no MCP server, so no surface was probed".into());
     }
     let mut mcp_baseline: Option<McpBaseline> = None;
+    let mut normative_card_path: Option<PathBuf> = None;
     let mut mcp_seen = false;
     let mut skill_baselines: Vec<SkillBaseline> = Vec::new();
     let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
@@ -1295,6 +1332,28 @@ pub fn migrate_site(
                     url: card_url,
                     sha256: hash::sha256_hex(bytes),
                 });
+                // The normative card copy rides the same
+                // binding, when the probed endpoint lives on
+                // this site's origin.
+                if let Some(target) = probed_target
+                    && let Some(norm_url) = normative_card_url_for(target)
+                {
+                    match url_to_path(site, &domain, &norm_url) {
+                        Some(path) => {
+                            artifacts.push(ArtifactBaseline {
+                                entry_id: id.to_string(),
+                                url: norm_url,
+                                sha256: hash::sha256_hex(bytes),
+                            });
+                            normative_card_path = Some(path);
+                        }
+                        None => notes.push(
+                            "the endpoint is not on the site's origin, so the server card \
+                             was published at the well known path only"
+                                .into(),
+                        ),
+                    }
+                }
                 provenance.push(EntryProvenance {
                     entry_id: id.to_string(),
                     produced_by: if card_source.is_some() {
@@ -1506,6 +1565,9 @@ pub fn migrate_site(
                 );
             }
             write_file(&site.join(".well-known/mcp/server-card.json"), bytes)?;
+            if let Some(path) = &normative_card_path {
+                write_file(path, bytes)?;
+            }
         }
         if site.join("baseline.json").exists() {
             notes.push(

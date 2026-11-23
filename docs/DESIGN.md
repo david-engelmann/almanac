@@ -347,8 +347,9 @@ Inputs, in the order a publisher meets them.
 - A live surface probe. For an MCP server, an initialize handshake
   plus tools/list, resources/list and prompts/list where offered. For
   a REST API, the OpenAPI document the deployment actually serves.
-- An MCP server card, repo local or hosted at the well known path the
-  SEP-2127 extension defines.
+- An MCP server card, repo local or hosted at the locations the
+  SEP-2127 extension defines, the endpoint's /server-card path
+  first and the well known path behind it.
 - An OpenAPI specification file in the repo.
 - Skills directories. Each SKILL.md frontmatter block is read for name
   and description, and the file is hashed.
@@ -423,10 +424,26 @@ One internal model, two files, written in a single run.
   is no mode that writes one without the other. A check run fails on
   path divergence, defined as any difference between the two entries
   arrays, so the pair cannot quietly split after generation.
-- The server card, when the project has an MCP server, is written to
-  the well known MCP path and referenced by url from the catalog
-  entry, so both ARD readers and MCP card readers resolve the same
-  card.
+- The server card, when the project has an MCP server, lives at two
+  locations with identical content. The normative location is the
+  one SEP-2127 Final defines, the endpoint's own path with
+  /server-card appended, <endpoint>/server-card. The legacy
+  location is /.well-known/mcp/server-card.json, which the Final
+  text no longer names but major scanners still request, so a
+  publisher dropping it would vanish from tools that work today.
+  The tool writes the normative copy into the site when the
+  endpoint lives on the site's own origin. A stdio server has no
+  endpoint to append to, and an endpoint hosted on another origin
+  keeps its normative copy with the server's operator, so those
+  sites carry the well known copy alone and say so in the run's
+  output.
+  The catalog entry references the card by url at the well known
+  path, because that path exists for every transport, including
+  stdio servers that have no endpoint URL to append to. Both
+  copies carry the same bytes, the entry's one digest binds both,
+  and the baseline records both as artifacts of the entry, so a
+  copy that diverges or disappears is drift like any other
+  announced artifact.
 - Canonical form. Keys sorted, two space indent, LF line endings, one
   trailing newline. Same inputs produce the same bytes. This is what
   makes a catalog reviewable in a pull request diff.
