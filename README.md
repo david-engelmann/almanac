@@ -48,6 +48,9 @@ Generation is the on-ramp. The gate is the product.
   announced and which input produced each one, the files
   it wrote, the entries it suppressed with their
   reasons, and every note and warning the run produced.
+  A site with no MCP surface is generated REST only,
+  from its documents, agent cards, and skill alone,
+  with no MCP entry and no server card.
 - validate checks a catalog beyond schema, covering URN anchoring,
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.

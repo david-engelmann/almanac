@@ -3279,6 +3279,159 @@ fn generate_prints_the_full_report() {
 }
 
 #[test]
+fn generate_rest_only_from_documents() {
+    // A REST only site: no target at all, and the named
+    // documents are the catalog. No MCP entry, no server
+    // card, no MCP baseline, and check reads the result
+    // clean.
+    let site = temp_site("rest-only");
+    // A config block naming an MCP entry this run cannot
+    // generate is warned on by name, never matched and
+    // never invented.
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\ndescription = \"No server here.\"\n",
+    )
+    .expect("config written");
+    let docs = temp_site("rest-only-docs");
+    let doc_path = docs.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let card_path = docs.join("agent.json");
+    write_doc(&card_path, &agent_card());
+    let (code, stdout, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--openapi",
+        &doc_path.to_string_lossy(),
+        "--agent-card",
+        &card_path.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog json");
+    let types: Vec<&str> = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|e| e["type"].as_str().expect("type"))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "application/openapi+json",
+            "application/a2a-agent-card+json"
+        ],
+        "catalog was {catalog}"
+    );
+    assert!(
+        !site.join(".well-known/mcp/server-card.json").exists(),
+        "a REST only run writes no server card"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(
+        baseline["mcp"],
+        serde_json::Value::Null,
+        "baseline was {baseline}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert!(
+        report["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|f| !f.as_str().expect("file").contains("server-card")),
+        "report was {report}"
+    );
+    assert!(
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("mcp:telorama") && w.contains("had no effect"))),
+        "report was {report}"
+    );
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "check of the REST only site failed with {stdout}");
+}
+
+#[test]
+fn generate_rest_only_with_a_skill() {
+    // The skill input alone, with no target, is a complete
+    // REST only run: the refusal's skill arm accepts it, the
+    // skill is announced and served, and check reads the
+    // site clean. The --queries flag, which names the MCP
+    // entry's queries, warns that it had no effect.
+    let site = temp_site("rest-only-skill");
+    let skill_dir = temp_site("rest-only-skill-src");
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: guide\ndescription: A guide skill.\n---\n\nGuide the thing.\n",
+    )
+    .expect("skill file");
+    let (code, stdout, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--skill",
+        &skill_file.to_string_lossy(),
+        "--queries",
+        "Ask the guide",
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog json");
+    assert_eq!(
+        catalog["entries"][0]["type"], "text/markdown",
+        "catalog was {catalog}"
+    );
+    assert!(site.join("skills/guide/SKILL.md").exists());
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("--queries"))),
+        "report was {report}"
+    );
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "check of the skill only site failed with {stdout}");
+}
+
+#[test]
+fn generate_with_nothing_named_refuses() {
+    // No target and no inputs: an empty catalog is a
+    // mistake rather than a publication, so the run
+    // refuses and writes nothing.
+    let site = temp_site("rest-only-empty");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+    ]);
+    assert_eq!(code, 2, "stderr was {stderr}");
+    assert!(
+        stderr.contains("no surface to probe and no inputs"),
+        "stderr was {stderr}"
+    );
+    assert!(!site.join(".well-known/ard.json").exists());
+}
+
+#[test]
 fn generate_report_collects_the_config_warnings() {
     // The config validator's own warnings (a query count
     // outside the draft's two to five, here) are generation
