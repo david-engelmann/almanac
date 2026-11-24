@@ -177,7 +177,6 @@ fn run() -> Result<i32, String> {
                 &flags.queries,
                 token(&flags).as_deref(),
             )?;
-            println!("catalog and baseline written under {}", site.display());
             Ok(0)
         }
         "check" => {
