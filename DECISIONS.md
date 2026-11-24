@@ -1053,3 +1053,98 @@ without the title warning. The note text is built by
 one helper, the metadata imports follow the file's use
 convention, and the source labels are matched with
 their values rather than defaulted.
+
+## Generation roadmap, fourth slice: publisher config inputs (2026-11-24)
+
+DESIGN rule 4 puts publisher config first among the
+editorial sources: display name overrides, descriptions,
+tags, and representative queries come from config when
+present, and the other sources derive only what config
+does not say. Until this slice almanac.toml carried
+finding suppressions for check and nothing for generate.
+The file now also carries a [host] table with a
+display_name, and [[entries]] blocks keyed by the
+entry's identifier, each optionally naming display_name,
+description, tags, and queries. The parse is one loader
+shared with check, so a malformed file fails generate
+and check the same way, and every table in the file
+denies unknown fields, because a mistyped key silently
+doing nothing is the failure mode config exists to
+prevent. The editorial blocks' semantic validation is
+generate's own, since only generate consumes them.
+Duplicate identifiers, a block with no identifier, an
+empty queries list, empty configured words, and a
+block that both suppresses and overrides are
+configuration errors and the run does not start.
+
+Rule 1's other half lands with it: an entries block may
+carry suppress with a reason, and generate then does
+not announce that entry at all. A suppression without
+a reason is refused, the same discipline the finding
+suppressions already keep. The suppressed entry leaves
+no baseline records behind, so the gate never sees a
+phantom, and the run notes the suppression and its
+reason. Suppressing the MCP entry also skips writing
+its server card. A block naming an identifier the run
+does not generate is a warning naming it: config drift
+is surfaced, and an entry is never invented to satisfy
+config.
+
+### Publisher config checkpoint fix pass (2026-11-24)
+
+The checkpoint's red team found the slice's first form
+wanting in exactly the places its own discipline
+pointed: suppressions were applied in the post-pass,
+after the artifacts they govern were already written.
+Three closures, each moving a decision to the point of
+construction. A suppressed skill left its SKILL.md
+served in the site, and check's walk of the skills
+directory read it as an unannounced skill at Critical;
+skill suppression is now decided before the file is
+written, and a stale in-site copy an earlier run placed
+is removed (never the file the operator named, when
+that file is the in-site copy itself). A suppressed
+OpenAPI document or agent card was still copied into
+the site by the deferred copies; document suppression
+is now decided at the top of each apply loop, before
+the copy is queued. A mistyped key in a finding
+suppression block silently widened it from one entry
+to a whole kind; the Suppression struct and the outer
+AlmanacConfig now deny unknown fields alongside the
+new tables, closing the same hole one level up, where
+a top-level typo previously vanished without even the
+unmatched-block warning.
+
+Around those: configured words that are empty or
+whitespace are configuration errors, the trim
+discipline every other source already kept; the MCP
+entry's display name resolves config first and the
+generated card's title carries it, so the entry and
+its card cannot name the server differently; on a
+protected surface, configured editorial words for the
+MCP entry draw a warning that the existing card keeps
+its own words, and suppressing a protected server
+warns that its card remains published, while on an
+open surface suppression removes the card copies
+earlier runs wrote; document descriptions resolve
+config first inside their build loops, so no metadata
+note or title warning survives for words config
+replaced; query counts outside two to five and
+duplicate queries or tags warn at generation time
+rather than passing silently. The post-pass now
+applies overrides only.
+
+Application is one post-pass over the built entries for
+display name, description, tags, and queries, with two
+parts resolved earlier for cause. The host display name
+resolves flag, then config, then repo metadata, then
+the domain. The MCP entry's description resolves
+config first in its existing chain, before the card is
+written, so the generated card keeps carrying the
+entry's own words. Configured queries replace an
+entry's representative queries wholesale, including the
+MCP entry's: rule 4 names config first with no flag
+exception, and the --queries flag remains the source
+when config names no queries for the entry. Config use
+is not flagged low confidence; config is the
+publisher's own voice, not a fallback.

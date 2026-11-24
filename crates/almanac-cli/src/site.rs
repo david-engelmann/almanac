@@ -399,6 +399,7 @@ fn card_value(
     target: &ProbeTarget,
     domain: &str,
     description: Option<&str>,
+    title: Option<&str>,
 ) -> serde_json::Value {
     // The domain is a host name for this purpose: a port or a
     // trailing dot in it would land in the published name,
@@ -420,7 +421,7 @@ fn card_value(
     let mut card = serde_json::json!({
         "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
         "name": format!("{reversed}/{}", snapshot.server_name),
-        "title": snapshot.server_name,
+        "title": title.unwrap_or(&snapshot.server_name),
         "version": snapshot.server_version,
         "description": description,
     });
@@ -494,6 +495,12 @@ fn metadata_note(what: &str, source: &str) -> String {
     format!("note, {what} from repo metadata in {source}, the lowest confidence editorial source")
 }
 
+/// The note a suppressed entry leaves in the generation
+/// report, naming the entry and the recorded reason.
+fn suppression_note(identifier: &str, reason: &str) -> String {
+    format!("note, {identifier} is suppressed in almanac.toml and is not announced: {reason}")
+}
+
 /// The generate command. Probes the live surface, writes the dual
 /// path catalog, the server card and the baseline. A protected
 /// surface is generated from its server card instead.
@@ -508,6 +515,11 @@ pub fn generate(
     agent_card_paths: &[PathBuf],
     queries: &[String],
 ) -> Result<(), String> {
+    // Publisher config is the first editorial source, loaded
+    // and validated before the probe runs, so a configuration
+    // error refuses the run without spending a probe on it.
+    let config = load_config(site)?;
+    validate_entry_blocks(&config)?;
     let probe_snapshot = run_probe(target);
     if let Some(failure) = &probe_snapshot.failure {
         return Err(format!(
@@ -522,12 +534,19 @@ pub fn generate(
     let mut notes: Vec<String> = Vec::new();
     let display_name: String = match display_name {
         Some(name) => name.to_string(),
-        None => match (&metadata.name, &metadata.name_source) {
-            (Some(name), Some(source)) => {
-                notes.push(metadata_note("the host takes its display name", source));
-                name.clone()
-            }
-            _ => domain.to_string(),
+        None => match config
+            .host
+            .as_ref()
+            .and_then(|host| host.display_name.as_ref())
+        {
+            Some(name) => name.clone(),
+            None => match (&metadata.name, &metadata.name_source) {
+                (Some(name), Some(source)) => {
+                    notes.push(metadata_note("the host takes its display name", source));
+                    name.clone()
+                }
+                _ => domain.to_string(),
+            },
         },
     };
     // A protected surface cannot be probed live, so generation
@@ -543,48 +562,107 @@ pub fn generate(
     };
 
     let entry_id = format!("urn:air:{domain}:mcp:{}", snapshot.server_name);
+    let mut matched: std::collections::HashSet<String> =
+        std::collections::HashSet::from([entry_id.clone()]);
+    let mcp_block = entry_block(&config, &entry_id);
+    let mcp_suppressed = mcp_block.and_then(|block| block.suppress.as_deref());
+    if let Some(reason) = mcp_suppressed {
+        notes.push(suppression_note(&entry_id, reason));
+    }
+    if card_source.is_some()
+        && mcp_suppressed.is_none()
+        && mcp_block
+            .is_some_and(|block| block.description.is_some() || block.display_name.is_some())
+    {
+        eprintln!(
+            "warning, almanac.toml overrides the MCP entry's editorial fields, but the surface \
+             is protected and its existing server card is republished unchanged, so the card \
+             keeps its own words"
+        );
+    }
     // The entry's description is resolved before the card is
     // written, because the generated card carries the same
-    // words. A stronger source's whitespace-only description
-    // counts as no description, the trim discipline the
-    // metadata reduction itself applies.
-    let mcp_description = match &card_source {
-        Some((_, Some(description))) if !description.trim().is_empty() => description.clone(),
-        _ => match (&metadata.description, &metadata.description_source) {
-            (Some(description), Some(source)) => {
-                notes.push(metadata_note(
-                    &format!("{entry_id} takes its description"),
-                    source,
-                ));
-                description.clone()
-            }
-            _ => format!("The {} MCP server.", snapshot.server_name),
+    // words. Config speaks first, then the card, then repo
+    // metadata, then the template. A stronger source's
+    // whitespace-only description counts as no description,
+    // the trim discipline the metadata reduction itself
+    // applies.
+    let mcp_description = match mcp_block.and_then(|block| block.description.as_ref()) {
+        Some(description) => description.clone(),
+        None => match &card_source {
+            Some((_, Some(description))) if !description.trim().is_empty() => description.clone(),
+            _ => match (&metadata.description, &metadata.description_source) {
+                (Some(description), Some(source)) => {
+                    notes.push(metadata_note(
+                        &format!("{entry_id} takes its description"),
+                        source,
+                    ));
+                    description.clone()
+                }
+                _ => format!("The {} MCP server.", snapshot.server_name),
+            },
         },
     };
-    let card_bytes = match &card_source {
-        Some((bytes, _)) => bytes.clone(),
-        None => {
-            let card = card_value(&snapshot, target, domain, Some(&mcp_description));
-            warn_on_card_disagreement(site, &card, &snapshot);
-            pretty_bytes(&card)
+    // The entry's display name resolves with config first,
+    // like its description, and the generated card's title
+    // carries the same name.
+    let mcp_display_name = mcp_block
+        .and_then(|block| block.display_name.clone())
+        .unwrap_or_else(|| snapshot.server_name.clone());
+    let card_bytes = if mcp_suppressed.is_some() {
+        Vec::new()
+    } else {
+        match &card_source {
+            Some((bytes, _)) => bytes.clone(),
+            None => {
+                let card = card_value(
+                    &snapshot,
+                    target,
+                    domain,
+                    Some(&mcp_description),
+                    Some(&mcp_display_name),
+                );
+                warn_on_card_disagreement(site, &card, &snapshot);
+                pretty_bytes(&card)
+            }
         }
     };
     let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
-    write_file(&site.join(".well-known/mcp/server-card.json"), &card_bytes)?;
+    if mcp_suppressed.is_none() {
+        write_file(&site.join(".well-known/mcp/server-card.json"), &card_bytes)?;
+    }
     // The normative copy, at the endpoint's own path, when the
     // endpoint lives on this site's origin. Identical bytes, so
     // the one digest binds both locations, and the baseline
     // records the copy below as a second artifact of the entry.
     let normative_card: Option<(String, PathBuf)> = normative_card_url_for(target)
         .and_then(|url| url_to_path(site, domain, &url).map(|path| (url, path)));
-    if let Some((_, path)) = &normative_card {
-        write_file(path, &card_bytes)?;
+    if mcp_suppressed.is_none() {
+        if let Some((_, path)) = &normative_card {
+            write_file(path, &card_bytes)?;
+        }
+        if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
+            eprintln!(
+                "warning, the endpoint is not on the site's origin, so the server card \
+                 is published at the well known path only"
+            );
+        }
     }
-    if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
-        eprintln!(
-            "warning, the endpoint is not on the site's origin, so the server card \
-             is published at the well known path only"
-        );
+    if mcp_suppressed.is_some() {
+        if card_source.is_some() {
+            eprintln!(
+                "warning, the surface is protected, so its existing server card remains \
+                 published; suppressing the entry silences the catalog only"
+            );
+        } else {
+            // The card on an open surface is one almanac itself
+            // generated, so a suppressed server does not stay
+            // discoverable through copies an earlier run wrote.
+            let _ = fs::remove_file(site.join(".well-known/mcp/server-card.json"));
+            if let Some((_, path)) = &normative_card {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 
     let tool_names: Vec<String> = snapshot.tools.iter().map(|t| t.name.clone()).collect();
@@ -597,45 +675,50 @@ pub fn generate(
     } else {
         queries.to_vec()
     };
-    let mut entries = vec![Entry {
-        identifier: entry_id.clone(),
-        display_name: snapshot.server_name.clone(),
-        media_type: "application/mcp-server-card+json".into(),
-        url: Some(card_url.clone()),
-        data: None,
-        description: mcp_description,
-        capabilities: tool_names,
-        representative_queries,
-        tags: vec![],
-        version: Some(snapshot.server_version.clone()),
-        digest: Some(hash::digest_field(&card_bytes)),
-        updated_at: None,
-        trust_manifest: None,
-    }];
-
-    let mcp_baseline = McpBaseline::from_snapshot(&entry_id, &snapshot);
-    let mut artifacts = vec![ArtifactBaseline {
-        entry_id: entry_id.clone(),
-        url: card_url,
-        sha256: hash::sha256_hex(&card_bytes),
-    }];
-    if let Some((url, _)) = &normative_card {
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut mcp_baseline: Option<McpBaseline> = None;
+    let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
+    let mut provenance: Vec<EntryProvenance> = Vec::new();
+    if mcp_suppressed.is_none() {
+        entries.push(Entry {
+            identifier: entry_id.clone(),
+            display_name: mcp_display_name,
+            media_type: "application/mcp-server-card+json".into(),
+            url: Some(card_url.clone()),
+            data: None,
+            description: mcp_description,
+            capabilities: tool_names,
+            representative_queries,
+            tags: vec![],
+            version: Some(snapshot.server_version.clone()),
+            digest: Some(hash::digest_field(&card_bytes)),
+            updated_at: None,
+            trust_manifest: None,
+        });
+        mcp_baseline = Some(McpBaseline::from_snapshot(&entry_id, &snapshot));
         artifacts.push(ArtifactBaseline {
             entry_id: entry_id.clone(),
-            url: url.clone(),
+            url: card_url,
             sha256: hash::sha256_hex(&card_bytes),
         });
-    }
-    let mut provenance = vec![EntryProvenance {
-        entry_id: entry_id.clone(),
-        produced_by: if card_source.is_some() {
-            "server-card"
-        } else {
-            "live-probe"
+        if let Some((url, _)) = &normative_card {
+            artifacts.push(ArtifactBaseline {
+                entry_id: entry_id.clone(),
+                url: url.clone(),
+                sha256: hash::sha256_hex(&card_bytes),
+            });
         }
-        .into(),
-        overruled: vec![],
-    }];
+        provenance.push(EntryProvenance {
+            entry_id: entry_id.clone(),
+            produced_by: if card_source.is_some() {
+                "server-card"
+            } else {
+                "live-probe"
+            }
+            .into(),
+            overruled: vec![],
+        });
+    }
     let mut skills = Vec::new();
 
     if let Some(skill_path) = skill_path {
@@ -650,39 +733,57 @@ pub fn generate(
         }
         let skill_id = format!("urn:air:{domain}:skill:{name}");
         let skill_url = format!("https://{domain}/skills/{name}/SKILL.md");
-        write_file(&site.join(format!("skills/{name}/SKILL.md")), &bytes)?;
-        entries.push(Entry {
-            identifier: skill_id.clone(),
-            display_name: name.clone(),
-            media_type: "text/markdown".into(),
-            url: Some(skill_url.clone()),
-            data: None,
-            description,
-            capabilities: vec![],
-            representative_queries: vec![
-                format!("How do I use the {name} skill"),
-                format!("Follow the {name} skill instructions"),
-            ],
-            tags: vec![],
-            version: None,
-            digest: Some(hash::digest_field(&bytes)),
-            updated_at: None,
-            trust_manifest: None,
-        });
-        skills.push(SkillBaseline {
-            entry_id: skill_id.clone(),
-            sha256: hash::sha256_hex(&bytes),
-        });
-        provenance.push(EntryProvenance {
-            entry_id: skill_id.clone(),
-            produced_by: "skill-file".into(),
-            overruled: vec![],
-        });
-        artifacts.push(ArtifactBaseline {
-            entry_id: skill_id,
-            url: skill_url,
-            sha256: hash::sha256_hex(&bytes),
-        });
+        // A suppressed skill is decided here, before its file
+        // is written: check walks the site's skills directory,
+        // so a served file with no baseline record would read
+        // as an unannounced skill at Critical. A stale copy an
+        // earlier run placed is removed, unless the file given
+        // is that copy itself.
+        let skill_suppressed =
+            entry_block(&config, &skill_id).and_then(|block| block.suppress.as_deref());
+        if let Some(reason) = skill_suppressed {
+            notes.push(suppression_note(&skill_id, reason));
+            matched.insert(skill_id.clone());
+            let dest = site.join(format!("skills/{name}/SKILL.md"));
+            if skill_path.canonicalize().ok() != dest.canonicalize().ok() {
+                let _ = fs::remove_file(&dest);
+            }
+        }
+        if skill_suppressed.is_none() {
+            write_file(&site.join(format!("skills/{name}/SKILL.md")), &bytes)?;
+            entries.push(Entry {
+                identifier: skill_id.clone(),
+                display_name: name.clone(),
+                media_type: "text/markdown".into(),
+                url: Some(skill_url.clone()),
+                data: None,
+                description,
+                capabilities: vec![],
+                representative_queries: vec![
+                    format!("How do I use the {name} skill"),
+                    format!("Follow the {name} skill instructions"),
+                ],
+                tags: vec![],
+                version: None,
+                digest: Some(hash::digest_field(&bytes)),
+                updated_at: None,
+                trust_manifest: None,
+            });
+            skills.push(SkillBaseline {
+                entry_id: skill_id.clone(),
+                sha256: hash::sha256_hex(&bytes),
+            });
+            provenance.push(EntryProvenance {
+                entry_id: skill_id.clone(),
+                produced_by: "skill-file".into(),
+                overruled: vec![],
+            });
+            artifacts.push(ArtifactBaseline {
+                entry_id: skill_id,
+                url: skill_url,
+                sha256: hash::sha256_hex(&bytes),
+            });
+        }
     }
 
     // The generation roadmap's first input. An OpenAPI document
@@ -792,26 +893,41 @@ pub fn generate(
     }
     let mut openapi: Vec<OpenApiBaseline> = Vec::new();
     for plan in planned {
+        // A suppressed document is decided here, before its
+        // copy is even queued: suppression silences the
+        // announcement and the artifact alike.
+        if let Some(reason) =
+            entry_block(&config, &plan.api_id).and_then(|block| block.suppress.as_deref())
+        {
+            notes.push(suppression_note(&plan.api_id, reason));
+            matched.insert(plan.api_id.clone());
+            continue;
+        }
         if let Some(dest) = &plan.copy_to {
             pending_copies.push((dest.clone(), plan.bytes.clone()));
         }
-        let description = match &plan.view.description {
-            Some(description) if !description.trim().is_empty() => description.clone(),
-            _ => match (&metadata.description, &metadata.description_source) {
-                (Some(description), Some(source)) => {
-                    notes.push(metadata_note(
-                        &format!("{} takes its description", plan.api_id),
-                        source,
-                    ));
-                    description.clone()
-                }
-                _ => {
-                    eprintln!(
-                        "warning, {} carries no info description, so the entry announces its title as its description",
-                        plan.source
-                    );
-                    plan.view.title.clone()
-                }
+        let description = match entry_block(&config, &plan.api_id)
+            .and_then(|block| block.description.as_ref())
+        {
+            Some(description) => description.clone(),
+            None => match &plan.view.description {
+                Some(description) if !description.trim().is_empty() => description.clone(),
+                _ => match (&metadata.description, &metadata.description_source) {
+                    (Some(description), Some(source)) => {
+                        notes.push(metadata_note(
+                            &format!("{} takes its description", plan.api_id),
+                            source,
+                        ));
+                        description.clone()
+                    }
+                    _ => {
+                        eprintln!(
+                            "warning, {} carries no info description, so the entry announces its title as its description",
+                            plan.source
+                        );
+                        plan.view.title.clone()
+                    }
+                },
             },
         };
         entries.push(Entry {
@@ -945,26 +1061,41 @@ pub fn generate(
     }
     let mut a2a: Vec<A2aBaseline> = Vec::new();
     for plan in planned_cards {
+        // A suppressed card is decided here, before its copy
+        // is even queued, the same discipline as the OpenAPI
+        // documents.
+        if let Some(reason) =
+            entry_block(&config, &plan.card_id).and_then(|block| block.suppress.as_deref())
+        {
+            notes.push(suppression_note(&plan.card_id, reason));
+            matched.insert(plan.card_id.clone());
+            continue;
+        }
         if let Some(dest) = &plan.copy_to {
             pending_copies.push((dest.clone(), plan.bytes.clone()));
         }
-        let description = match &plan.view.description {
-            Some(description) if !description.trim().is_empty() => description.clone(),
-            _ => match (&metadata.description, &metadata.description_source) {
-                (Some(description), Some(source)) => {
-                    notes.push(metadata_note(
-                        &format!("{} takes its description", plan.card_id),
-                        source,
-                    ));
-                    description.clone()
-                }
-                _ => {
-                    eprintln!(
-                        "warning, {} carries no description, so the entry announces its name as its description",
-                        plan.source
-                    );
-                    plan.view.name.clone()
-                }
+        let description = match entry_block(&config, &plan.card_id)
+            .and_then(|block| block.description.as_ref())
+        {
+            Some(description) => description.clone(),
+            None => match &plan.view.description {
+                Some(description) if !description.trim().is_empty() => description.clone(),
+                _ => match (&metadata.description, &metadata.description_source) {
+                    (Some(description), Some(source)) => {
+                        notes.push(metadata_note(
+                            &format!("{} takes its description", plan.card_id),
+                            source,
+                        ));
+                        description.clone()
+                    }
+                    _ => {
+                        eprintln!(
+                            "warning, {} carries no description, so the entry announces its name as its description",
+                            plan.source
+                        );
+                        plan.view.name.clone()
+                    }
+                },
             },
         };
         let mut queries = plan.examples.clone();
@@ -1007,6 +1138,44 @@ pub fn generate(
         });
     }
 
+    // The publisher config post-pass, DESIGN rule 4.
+    // Overrides replace the editorial fields they name on
+    // the entries the run actually generated (descriptions
+    // were already resolved config first in each build loop
+    // and in the MCP chain, so reapplying them here is the
+    // same words; the skill entry's description is applied
+    // only here, its frontmatter having no rival note to
+    // retract). Suppressions were decided at each entry's
+    // construction, so nothing is removed here. A block
+    // whose identifier the run did not generate is warned
+    // on by name: config drift is surfaced, and an entry is
+    // never invented to satisfy config.
+    for entry in &mut entries {
+        if let Some(block) = entry_block(&config, &entry.identifier) {
+            matched.insert(block.identifier.clone());
+            if let Some(name) = &block.display_name {
+                entry.display_name = name.clone();
+            }
+            if let Some(description) = &block.description {
+                entry.description = description.clone();
+            }
+            if let Some(tags) = &block.tags {
+                entry.tags = tags.clone();
+            }
+            if let Some(queries) = &block.queries {
+                entry.representative_queries = queries.clone();
+            }
+        }
+    }
+    for block in &config.entries {
+        if !matched.contains(block.identifier.as_str()) {
+            eprintln!(
+                "warning, almanac.toml configures {}, which this run did not generate, so the block had no effect",
+                block.identifier
+            );
+        }
+    }
+
     let catalog = Catalog {
         host: Host {
             display_name: display_name.clone(),
@@ -1027,7 +1196,7 @@ pub fn generate(
 
     let baseline = Baseline {
         spec_version: SPEC_VERSION.into(),
-        mcp: Some(mcp_baseline),
+        mcp: mcp_baseline,
         skills,
         artifacts,
         openapi,
@@ -1103,11 +1272,45 @@ fn warn_on_card_disagreement(
 }
 
 /// The publisher's configuration file, almanac.toml at the site
-/// root. Today it carries suppressions and nothing else.
+/// root. It carries finding suppressions for check and the
+/// publisher's editorial choices for generate: a host display
+/// name and per entry overrides and suppressions, DESIGN rule
+/// 4's first source and rule 1's recorded suppression.
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct AlmanacConfig {
     #[serde(default)]
     suppress: Vec<Suppression>,
+    #[serde(default)]
+    host: Option<HostConfig>,
+    #[serde(default)]
+    entries: Vec<EntryConfig>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostConfig {
+    display_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryConfig {
+    identifier: String,
+    display_name: Option<String>,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+    queries: Option<Vec<String>>,
+    suppress: Option<String>,
+}
+
+/// The entry block a configuration carries for one identifier,
+/// if it carries one.
+fn entry_block<'a>(config: &'a AlmanacConfig, identifier: &str) -> Option<&'a EntryConfig> {
+    config
+        .entries
+        .iter()
+        .find(|block| block.identifier == identifier)
 }
 
 /// Read the site's agents.json, the structured companion of
@@ -1148,14 +1351,14 @@ fn read_agents_json(site: &Path) -> (Option<Vec<String>>, bool) {
     (Some(urls), false)
 }
 
-/// Load and validate the suppressions. A suppression without a
+/// Load the publisher's configuration. A suppression without a
 /// reason, or with a malformed expiry, is a configuration error
-/// and the check does not run, because a silent misreading here
-/// would hold real findings back.
-fn load_suppressions(site: &Path) -> Result<Vec<Suppression>, String> {
+/// and the command does not run, because a silent misreading
+/// here would hold real findings back.
+fn load_config(site: &Path) -> Result<AlmanacConfig, String> {
     let path = site.join("almanac.toml");
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(AlmanacConfig::default());
     }
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("could not read {} with {e}", path.display()))?;
@@ -1175,7 +1378,102 @@ fn load_suppressions(site: &Path) -> Result<Vec<Suppression>, String> {
             ));
         }
     }
-    Ok(config.suppress)
+    Ok(config)
+}
+
+fn load_suppressions(site: &Path) -> Result<Vec<Suppression>, String> {
+    Ok(load_config(site)?.suppress)
+}
+
+/// Validate the editorial entry blocks before a generation
+/// run relies on them. A duplicate identifier, a block with
+/// no identifier, an empty queries list, a suppression
+/// without a reason, and a block that both suppresses and
+/// overrides are configuration errors, because each can only
+/// be a mistake about what the run will do.
+fn validate_entry_blocks(config: &AlmanacConfig) -> Result<(), String> {
+    if let Some(name) = config
+        .host
+        .as_ref()
+        .and_then(|host| host.display_name.as_ref())
+        && name.trim().is_empty()
+    {
+        return Err(
+            "the host display name in almanac.toml is empty, and an empty name configures nothing"
+                .into(),
+        );
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for block in &config.entries {
+        if block.identifier.trim().is_empty() {
+            return Err(
+                "an entries block in almanac.toml carries no identifier, and a block without an identifier configures nothing"
+                    .into(),
+            );
+        }
+        if !seen.insert(block.identifier.as_str()) {
+            return Err(format!(
+                "almanac.toml configures {} twice, and duplicate blocks are not merged",
+                block.identifier
+            ));
+        }
+        for (field, value) in [
+            ("display name", &block.display_name),
+            ("description", &block.description),
+        ] {
+            if matches!(value, Some(word) if word.trim().is_empty()) {
+                return Err(format!(
+                    "almanac.toml configures an empty {field} for {}, and an empty word configures nothing",
+                    block.identifier
+                ));
+            }
+        }
+        if let Some(reason) = &block.suppress {
+            if reason.trim().is_empty() {
+                return Err(format!(
+                    "the suppression of {} in almanac.toml carries no reason, and a suppression without a reason is not accepted",
+                    block.identifier
+                ));
+            }
+            if block.display_name.is_some()
+                || block.description.is_some()
+                || block.tags.is_some()
+                || block.queries.is_some()
+            {
+                return Err(format!(
+                    "almanac.toml both suppresses and overrides {}, and a block must do one or the other",
+                    block.identifier
+                ));
+            }
+        }
+        if matches!(&block.queries, Some(queries) if queries.is_empty()) {
+            return Err(format!(
+                "almanac.toml configures an empty queries list for {}, which would announce the entry with no representative queries",
+                block.identifier
+            ));
+        }
+        if let Some(queries) = &block.queries
+            && !(2..=5).contains(&queries.len())
+        {
+            eprintln!(
+                "warning, almanac.toml configures {} representative queries for {}, and the draft asks for two to five",
+                queries.len(),
+                block.identifier
+            );
+        }
+        for (field, values) in [("queries", &block.queries), ("tags", &block.tags)] {
+            if let Some(values) = values {
+                let mut unique: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                if values.iter().any(|value| !unique.insert(value.as_str())) {
+                    eprintln!(
+                        "warning, almanac.toml configures duplicate {field} for {}, and the duplicates are published as written",
+                        block.identifier
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn valid_iso_date(text: &str) -> bool {
@@ -1658,6 +1956,7 @@ pub fn migrate_site(
             probed_target.expect("a snapshot implies a target"),
             &domain,
             None,
+            None,
         )),
     });
 
@@ -1760,7 +2059,11 @@ pub fn migrate_site(
                 if card_source.is_none()
                     && let Some(named) = probed_target
                 {
-                    warn_on_card_disagreement(site, &card_value(snap, named, &domain, None), snap);
+                    warn_on_card_disagreement(
+                        site,
+                        &card_value(snap, named, &domain, None, None),
+                        snap,
+                    );
                 }
                 // The capability and version claims are judged,
                 // not just noted. Each one that fails is a
@@ -2277,6 +2580,7 @@ mod tests {
             &snapshot,
             &ProbeTarget::Stdio(vec!["server".into()]),
             "example.com",
+            None,
             None,
         );
         let description = card["description"].as_str().expect("description");
