@@ -21,7 +21,7 @@ use crate::Severity;
 use crate::baseline::{AuthBaseline, Baseline, McpBaseline};
 use crate::catalog::Catalog;
 use crate::openapi::OpenApiView;
-use crate::snapshot::{AuthSurface, CredentialOutcome, MetadataRecord, SurfaceSnapshot};
+use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
 
 /// One divergence, classified.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1345,7 +1345,7 @@ mod tests {
     use super::*;
     use crate::baseline::{ArtifactBaseline, McpBaseline};
     use crate::catalog::{Catalog, Entry, Host};
-    use crate::snapshot::ToolSurface;
+    use crate::snapshot::{CredentialOutcome, ToolSurface};
 
     fn inputs<'a>(
         published: &'a Catalog,
