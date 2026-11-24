@@ -38,8 +38,9 @@ Commands
 
 Target a surface with --url https://host/mcp or with --command and
 the server command last. Sites are directories, --site DIR.
-Generate also takes --skill PATH for one SKILL.md and a repeatable
---openapi PATH for each JSON OpenAPI document the site announces.
+Generate also takes --skill PATH for one SKILL.md, a repeatable
+--openapi PATH for each JSON OpenAPI document the site announces,
+and a repeatable --agent-card PATH for each A2A agent card.
 Validate reads a whole site, or one catalog file with --file PATH.
 Migrate writes CI wiring to --ci PATH when it migrates a site.";
 
@@ -51,6 +52,7 @@ struct Flags {
     name: Option<String>,
     skill: Option<String>,
     openapi: Vec<String>,
+    agent_card: Vec<String>,
     file: Option<String>,
     ci: Option<String>,
     fail_at: Option<String>,
@@ -84,6 +86,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--name" => flags.name = Some(value(i)?),
             "--skill" => flags.skill = Some(value(i)?),
             "--openapi" => flags.openapi.push(value(i)?),
+            "--agent-card" => flags.agent_card.push(value(i)?),
             "--file" => flags.file = Some(value(i)?),
             "--ci" => flags.ci = Some(value(i)?),
             "--fail-at" => flags.fail_at = Some(value(i)?),
@@ -141,6 +144,7 @@ fn run() -> Result<i32, String> {
                 target(&flags)?.ok_or("generate needs a surface target, --url or --command")?;
             let skill = flags.skill.as_deref().map(PathBuf::from);
             let openapi: Vec<PathBuf> = flags.openapi.iter().map(PathBuf::from).collect();
+            let agent_cards: Vec<PathBuf> = flags.agent_card.iter().map(PathBuf::from).collect();
             site::generate(
                 &site,
                 domain,
@@ -148,6 +152,7 @@ fn run() -> Result<i32, String> {
                 &target,
                 skill.as_deref(),
                 &openapi,
+                &agent_cards,
                 &flags.queries,
             )?;
             println!("catalog and baseline written under {}", site.display());
