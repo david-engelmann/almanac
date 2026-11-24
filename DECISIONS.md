@@ -951,3 +951,105 @@ covering agreement, both skill directions, the channel
 split, the document-level classes, the unreadable class,
 and the phantom rule in both directions including the
 entry url and version claims.
+
+### A2A hosted gate fix pass (2026-11-24)
+
+PR #3's hosted gate failed two core tests that the local
+combined tree had reported green, on a stale test binary
+the write fault had left behind; the pushed tree was the
+verdict, as with the card slice. Both failures were in
+the tests, not the code. The duplicate skill test set
+the second skill's identifier to the value it already
+carried, a no-op since this slice's fix pass reordered
+the fixture skills so the sort assertion discriminates;
+it now sets the first skill's identifier, and the
+duplicate exists by construction. The masking test
+expected the two findings in emission order, where the
+recorded contract is the report sort, severity then
+kind then entry then detail (DESIGN section 6, and the
+check function's own doc comment); its expectation now
+stands in sorted order, the major channel first, with
+the test's intent, that a description edit cannot mask
+a contract change, unchanged.
+
+## Generation roadmap, third slice: repo metadata input (2026-11-24)
+
+Repo metadata is the last editorial source in DESIGN
+rule 4's order, after config, the server card, the
+OpenAPI info block, and SKILL.md, and it never wins a
+capability fact (rule 2). This slice wires it into
+generate as a fallback only: it creates no entries,
+changes no versions, and touches neither check nor
+migrate, because migration reconciles a catalog's own
+announced claims and metadata is a generation input.
+
+The sources are the three manifest files a repo carries
+its name and description in: package.json (top-level
+name and description), Cargo.toml (package.name and
+package.description), and pyproject.toml (the PEP 621
+project table's name and description; the older poetry
+table is not read). The search order is the site
+directory, then its parent, because the web root is
+commonly a child of the repo root; within a directory
+the order above holds. Fields resolve per field, the
+first source carrying a non-empty value wins it, and the
+reduction records which file supplied each field. A
+manifest that cannot be read or parsed is skipped
+without noise: a fallback source must never be able to
+kill a generation run. The manifest version fields are
+deliberately not read; versions are capability facts
+and come from the surfaces and artifacts themselves.
+
+Consumption in generate, each use flagged in the
+generation report (the run's stderr notes, in the
+existing note form) as low confidence, naming the entry
+and the file the words came from. The host display name
+resolves operator flag first, then the metadata name,
+then the domain, as it resolved flag then domain before.
+The MCP entry's description resolves server card
+description, then metadata description, then the
+standing template. An OpenAPI entry's description
+resolves its info description, then metadata, then the
+title with its warning. An A2A entry's resolves its card
+description, then metadata, then the name with its
+warning. Skill entries never take metadata words: the
+frontmatter parser requires a description, and rule 5
+makes the file the truth. The reduction lives in the
+core as metadata.rs over parsed documents, so the field
+paths are unit tested; the CLI reads and parses the
+files (JSON directly, TOML through the toml crate it
+already carries) and presents them in search order.
+
+### Repo metadata checkpoint fix pass (2026-11-24)
+
+The three reviews landed with no Criticals. The
+standards axis found one Major: the helper had been
+inserted between generate's doc comment and its clippy
+allow attribute and generate itself, leaving the
+eight-parameter generate without the allow its lint
+needs; the helper now sits above the doc comment, which
+decorates generate again. The red team found four
+Minors, all closed. A stronger source's whitespace-only
+description now counts as no description at all three
+entry resolutions, the trim discipline the metadata
+reduction already applied to its own source. The
+generated server card takes the description resolved
+for the catalog entry, so the two artifacts a run
+writes describe the server in the same words; migrate
+passes no description and keeps the standing template.
+The metadata read only opens regular files of at most
+one mebibyte, so a pipe or a huge file carrying a
+manifest's name can neither hang nor exhaust a run.
+And the low confidence notes are collected during the
+run and printed only when the catalog is about to be
+written, so a run that refuses never claims words for
+a catalog that does not exist; the fallback warnings
+still print where they fire. Two integration tests
+join the slice: a parent Cargo.toml supplies the host
+name and the entry and card descriptions end to end
+through the TOML path, and an OpenAPI document with no
+info description takes the metadata description
+without the title warning. The note text is built by
+one helper, the metadata imports follow the file's use
+convention, and the source labels are matched with
+their values rather than defaulted.

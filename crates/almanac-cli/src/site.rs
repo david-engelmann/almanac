@@ -23,6 +23,7 @@ use almanac_core::baseline::{
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
 use almanac_core::hash;
+use almanac_core::metadata::{RepoMetadata, reduce_repo_metadata};
 use almanac_core::openapi::{OpenApiView, reduce_openapi};
 use almanac_core::snapshot::{AuthSurface, SurfaceSnapshot, ToolSurface};
 use serde::Serialize;
@@ -393,17 +394,29 @@ fn card_fields(card: &serde_json::Value) -> CardFields {
 /// the way docs/HTTP-TRANSPORT.md asks, instead of guessing.
 /// The card lists no tools, because the Final leaves
 /// primitives to the live surface on purpose.
-fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget, domain: &str) -> serde_json::Value {
+fn card_value(
+    snapshot: &SurfaceSnapshot,
+    target: &ProbeTarget,
+    domain: &str,
+    description: Option<&str>,
+) -> serde_json::Value {
     // The domain is a host name for this purpose: a port or a
     // trailing dot in it would land in the published name,
     // which must be a reverse DNS form and nothing else.
     let host = domain.trim_end_matches('.');
     let host = host.split(':').next().unwrap_or(host);
     let reversed = host.split('.').rev().collect::<Vec<_>>().join(".");
-    let description: String = format!("The {} MCP server.", snapshot.server_name)
-        .chars()
-        .take(100)
-        .collect();
+    // The card and the catalog entry describe the server in
+    // the same words: the caller passes the description it
+    // resolved for the entry, and the standing template is
+    // only the default when it passes none.
+    let description: String = match description {
+        Some(description) => description.chars().take(100).collect(),
+        None => format!("The {} MCP server.", snapshot.server_name)
+            .chars()
+            .take(100)
+            .collect(),
+    };
     let mut card = serde_json::json!({
         "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
         "name": format!("{reversed}/{}", snapshot.server_name),
@@ -424,6 +437,63 @@ fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget, domain: &str) ->
     card
 }
 
+/// Read the repo metadata generate may fall back on for
+/// editorial words: the manifest files in the site
+/// directory, then in its parent, in the order package.json,
+/// Cargo.toml, pyproject.toml. A manifest that cannot be
+/// read or parsed is skipped without noise, because a
+/// fallback source must never kill a generation run.
+fn read_repo_metadata(site: &Path) -> RepoMetadata {
+    let mut dirs: Vec<(PathBuf, &str)> = vec![(site.to_path_buf(), "in the site directory")];
+    if let Some(parent) = site.parent() {
+        dirs.push((parent.to_path_buf(), "in the parent directory"));
+    }
+    let mut docs: Vec<(String, String, serde_json::Value)> = Vec::new();
+    for (dir, whereabouts) in &dirs {
+        for kind in ["package.json", "Cargo.toml", "pyproject.toml"] {
+            let path = dir.join(kind);
+            // Only a regular file of a plausible manifest size
+            // is read: a fallback source must not be able to
+            // hang the run on a pipe or exhaust it on a huge
+            // file that happens to carry a manifest's name.
+            let Ok(facts) = fs::metadata(&path) else {
+                continue;
+            };
+            if !facts.is_file() || facts.len() > 1_048_576 {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let doc = if kind == "package.json" {
+                serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+            } else {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| text.parse::<toml::Value>().ok())
+                    .and_then(|value| serde_json::to_value(value).ok())
+            };
+            if let Some(doc) = doc {
+                docs.push((kind.to_string(), format!("{kind} {whereabouts}"), doc));
+            }
+        }
+    }
+    let sources: Vec<(&str, &str, &serde_json::Value)> = docs
+        .iter()
+        .map(|(kind, label, doc)| (kind.as_str(), label.as_str(), doc))
+        .collect();
+    reduce_repo_metadata(&sources)
+}
+
+/// The low confidence flag for one use of repo metadata
+/// words, in the generation report's note form. The notes
+/// are collected during the run and printed only once the
+/// catalog is about to be written, so a run that refuses
+/// never claims words for a catalog that does not exist.
+fn metadata_note(what: &str, source: &str) -> String {
+    format!("note, {what} from repo metadata in {source}, the lowest confidence editorial source")
+}
+
 /// The generate command. Probes the live surface, writes the dual
 /// path catalog, the server card and the baseline. A protected
 /// surface is generated from its server card instead.
@@ -431,7 +501,7 @@ fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget, domain: &str) ->
 pub fn generate(
     site: &Path,
     domain: &str,
-    display_name: &str,
+    display_name: Option<&str>,
     target: &ProbeTarget,
     skill_path: Option<&Path>,
     openapi_paths: &[PathBuf],
@@ -445,6 +515,21 @@ pub fn generate(
             failure.step, failure.detail
         ));
     }
+    // Repo metadata is the last editorial source, read once
+    // for the whole run: the host's display name and any
+    // entry description no stronger source supplies.
+    let metadata = read_repo_metadata(site);
+    let mut notes: Vec<String> = Vec::new();
+    let display_name: String = match display_name {
+        Some(name) => name.to_string(),
+        None => match (&metadata.name, &metadata.name_source) {
+            (Some(name), Some(source)) => {
+                notes.push(metadata_note("the host takes its display name", source));
+                name.clone()
+            }
+            _ => domain.to_string(),
+        },
+    };
     // A protected surface cannot be probed live, so generation
     // reads it from its server card instead, and the baseline
     // records the auth metadata the ladder fetched alongside.
@@ -458,10 +543,28 @@ pub fn generate(
     };
 
     let entry_id = format!("urn:air:{domain}:mcp:{}", snapshot.server_name);
+    // The entry's description is resolved before the card is
+    // written, because the generated card carries the same
+    // words. A stronger source's whitespace-only description
+    // counts as no description, the trim discipline the
+    // metadata reduction itself applies.
+    let mcp_description = match &card_source {
+        Some((_, Some(description))) if !description.trim().is_empty() => description.clone(),
+        _ => match (&metadata.description, &metadata.description_source) {
+            (Some(description), Some(source)) => {
+                notes.push(metadata_note(
+                    &format!("{entry_id} takes its description"),
+                    source,
+                ));
+                description.clone()
+            }
+            _ => format!("The {} MCP server.", snapshot.server_name),
+        },
+    };
     let card_bytes = match &card_source {
         Some((bytes, _)) => bytes.clone(),
         None => {
-            let card = card_value(&snapshot, target, domain);
+            let card = card_value(&snapshot, target, domain, Some(&mcp_description));
             warn_on_card_disagreement(site, &card, &snapshot);
             pretty_bytes(&card)
         }
@@ -500,10 +603,7 @@ pub fn generate(
         media_type: "application/mcp-server-card+json".into(),
         url: Some(card_url.clone()),
         data: None,
-        description: match &card_source {
-            Some((_, Some(description))) => description.clone(),
-            _ => format!("The {} MCP server.", snapshot.server_name),
-        },
+        description: mcp_description,
         capabilities: tool_names,
         representative_queries,
         tags: vec![],
@@ -696,14 +796,23 @@ pub fn generate(
             pending_copies.push((dest.clone(), plan.bytes.clone()));
         }
         let description = match &plan.view.description {
-            Some(description) => description.clone(),
-            None => {
-                eprintln!(
-                    "warning, {} carries no info description, so the entry announces its title as its description",
-                    plan.source
-                );
-                plan.view.title.clone()
-            }
+            Some(description) if !description.trim().is_empty() => description.clone(),
+            _ => match (&metadata.description, &metadata.description_source) {
+                (Some(description), Some(source)) => {
+                    notes.push(metadata_note(
+                        &format!("{} takes its description", plan.api_id),
+                        source,
+                    ));
+                    description.clone()
+                }
+                _ => {
+                    eprintln!(
+                        "warning, {} carries no info description, so the entry announces its title as its description",
+                        plan.source
+                    );
+                    plan.view.title.clone()
+                }
+            },
         };
         entries.push(Entry {
             identifier: plan.api_id.clone(),
@@ -840,14 +949,23 @@ pub fn generate(
             pending_copies.push((dest.clone(), plan.bytes.clone()));
         }
         let description = match &plan.view.description {
-            Some(description) => description.clone(),
-            None => {
-                eprintln!(
-                    "warning, {} carries no description, so the entry announces its name as its description",
-                    plan.source
-                );
-                plan.view.name.clone()
-            }
+            Some(description) if !description.trim().is_empty() => description.clone(),
+            _ => match (&metadata.description, &metadata.description_source) {
+                (Some(description), Some(source)) => {
+                    notes.push(metadata_note(
+                        &format!("{} takes its description", plan.card_id),
+                        source,
+                    ));
+                    description.clone()
+                }
+                _ => {
+                    eprintln!(
+                        "warning, {} carries no description, so the entry announces its name as its description",
+                        plan.source
+                    );
+                    plan.view.name.clone()
+                }
+            },
         };
         let mut queries = plan.examples.clone();
         for template in [
@@ -891,11 +1009,14 @@ pub fn generate(
 
     let catalog = Catalog {
         host: Host {
-            display_name: display_name.to_string(),
+            display_name: display_name.clone(),
             domain: domain.to_string(),
         },
         entries,
     };
+    for note in &notes {
+        eprintln!("{note}");
+    }
     let catalog_bytes = catalog.canonical_bytes();
     write_file(&site.join(".well-known/ard.json"), &catalog_bytes)?;
     write_file(&site.join(".well-known/ai-catalog.json"), &catalog_bytes)?;
@@ -1536,6 +1657,7 @@ pub fn migrate_site(
             snap,
             probed_target.expect("a snapshot implies a target"),
             &domain,
+            None,
         )),
     });
 
@@ -1638,7 +1760,7 @@ pub fn migrate_site(
                 if card_source.is_none()
                     && let Some(named) = probed_target
                 {
-                    warn_on_card_disagreement(site, &card_value(snap, named, &domain), snap);
+                    warn_on_card_disagreement(site, &card_value(snap, named, &domain, None), snap);
                 }
                 // The capability and version claims are judged,
                 // not just noted. Each one that fails is a
@@ -2155,6 +2277,7 @@ mod tests {
             &snapshot,
             &ProbeTarget::Stdio(vec!["server".into()]),
             "example.com",
+            None,
         );
         let description = card["description"].as_str().expect("description");
         assert_eq!(

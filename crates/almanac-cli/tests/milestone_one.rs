@@ -2383,6 +2383,164 @@ fn generate_refuses_an_openapi_and_agent_card_name_collision() {
 }
 
 #[test]
+fn repo_metadata_supplies_the_editorial_fallbacks() {
+    // The site is a child of the repo root, which carries a
+    // package.json. With no --name flag and no stronger
+    // editorial source, the host takes its display name and
+    // the MCP entry its description from the repo metadata,
+    // each flagged low confidence in the run's notes.
+    let root = temp_site("metadata-root");
+    write_doc(
+        &root.join("package.json"),
+        &serde_json::json!({
+            "name": "Parent Project",
+            "description": "Words from the repo itself.",
+            "version": "9.9.9"
+        }),
+    );
+    let site = root.join("public");
+    std::fs::create_dir_all(&site).expect("site dir");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(stderr.contains("lowest confidence"), "stderr was {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    assert_eq!(
+        catalog["host"]["displayName"].as_str(),
+        Some("Parent Project"),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        catalog["entries"][0]["description"].as_str(),
+        Some("Words from the repo itself."),
+        "catalog was {catalog}"
+    );
+    // The manifest's version is not read: the entry keeps
+    // the probed server's own version.
+    assert_eq!(
+        catalog["entries"][0]["version"].as_str(),
+        Some("0.1.0"),
+        "catalog was {catalog}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn repo_metadata_reads_a_cargo_manifest() {
+    // The TOML path end to end: the parent directory carries
+    // a Cargo.toml, and its package words fill the host name
+    // and the MCP entry description through the toml crate's
+    // conversion, not only through the core reduction.
+    let root = temp_site("metadata-cargo-root");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"cargo-project\"\ndescription = \"Words from the crate.\"\nversion = \"3.2.1\"\n",
+    )
+    .expect("manifest written");
+    let site = root.join("public");
+    std::fs::create_dir_all(&site).expect("site dir");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    assert_eq!(
+        catalog["host"]["displayName"].as_str(),
+        Some("cargo-project"),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        catalog["entries"][0]["description"].as_str(),
+        Some("Words from the crate."),
+        "catalog was {catalog}"
+    );
+    // The generated server card carries the same words as
+    // the entry, not the standing template.
+    let card: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card"),
+    )
+    .expect("card parses");
+    assert_eq!(
+        card["description"].as_str(),
+        Some("Words from the crate."),
+        "card was {card}"
+    );
+}
+
+#[test]
+fn repo_metadata_fills_an_openapi_description() {
+    // An OpenAPI document with no info description takes
+    // the repo metadata description before the title
+    // fallback, so the title warning never fires.
+    let root = temp_site("metadata-openapi-root");
+    write_doc(
+        &root.join("package.json"),
+        &serde_json::json!({"description": "The repo describes the API."}),
+    );
+    let site = root.join("public");
+    std::fs::create_dir_all(&site).expect("site dir");
+    let doc = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Billing", "version": "1.0.0"},
+        "paths": {"/charges": {"get": {"operationId": "listCharges"}}}
+    });
+    write_doc(&site.join("billing.json"), &doc);
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &site.join("billing.json").to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(
+        !stderr.contains("carries no info description"),
+        "stderr was {stderr}"
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    let api = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["type"] == "application/openapi+json")
+        .expect("api entry");
+    assert_eq!(
+        api["description"].as_str(),
+        Some("The repo describes the API."),
+        "catalog was {catalog}"
+    );
+}
+
+#[test]
 fn migrate_records_a2a_baselines_and_judges_claims() {
     let site = temp_site("mig-a2a");
     std::fs::create_dir_all(site.join(".well-known")).expect("well known");
