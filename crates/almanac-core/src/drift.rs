@@ -21,7 +21,7 @@ use crate::Severity;
 use crate::baseline::{AuthBaseline, Baseline, McpBaseline};
 use crate::catalog::Catalog;
 use crate::openapi::OpenApiView;
-use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
+use crate::snapshot::{AuthSurface, CredentialOutcome, MetadataRecord, SurfaceSnapshot};
 
 /// One divergence, classified.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -341,7 +341,18 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
                     check_auth(&mcp.auth, &snapshot.auth, &mut findings);
                     match &snapshot.auth {
                         AuthSurface::Protected(_) => {
-                            if let Some(card) = inputs.card {
+                            // A protected surface the run walked
+                            // live, on a credential the surface
+                            // accepted, gives live evidence, and
+                            // the live comparison runs on it. The
+                            // auth comparison above has already
+                            // read the declared posture the
+                            // snapshot carries. Any other protected
+                            // snapshot is declared evidence, and
+                            // the card is its comparison.
+                            if snapshot.walked_live() {
+                                check_live_surface(baseline, snapshot, &mut findings);
+                            } else if let Some(card) = inputs.card {
                                 check_card(card, published, baseline, &mut findings);
                             }
                         }
@@ -1080,14 +1091,27 @@ fn check_live_surface(
     // shape card holds no tool, resource or prompt record,
     // and a live surface's sets cannot diverge from a
     // record that was never made. Identity and auth are
-    // recorded either way and always compare.
+    // recorded either way; the name and version always
+    // compare, and the protocol version compares between
+    // live records, for the reason given below.
     if mcp.capabilities_enumerated {
         check_live_primitive_sets(mcp, snapshot, &live, findings);
     }
 
+    // A baseline recorded from a server card holds the
+    // card's declared protocol version, the first of its
+    // supported list, not a negotiation, so a live walk's
+    // negotiated version cannot diverge from it. The card
+    // comparison never compared it either. Protocol
+    // compares only between two live records, which the
+    // entry's provenance distinguishes.
+    let card_recorded = baseline
+        .provenance
+        .iter()
+        .any(|record| record.entry_id == mcp.entry_id && record.produced_by == "server-card");
     if snapshot.server_name != mcp.server_name
         || snapshot.server_version != mcp.server_version
-        || snapshot.protocol_version != mcp.protocol_version
+        || (!card_recorded && snapshot.protocol_version != mcp.protocol_version)
     {
         findings.push(finding(
             Severity::Major,
@@ -1386,6 +1410,7 @@ mod tests {
             resources: vec![],
             prompts: vec![],
             auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
             failure: None,
         }
     }
@@ -2178,6 +2203,84 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.kind == "card-divergence"),
             "an enumerated card with no tools must diverge from the recorded tool, findings were {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_credentialed_snapshot_is_compared_live() {
+        // A protected surface walked live on an accepted
+        // credential: the baseline recorded the tool, the
+        // walked surface no longer serves it, and the live
+        // comparison must run on the walked lists even though
+        // the snapshot's auth is Protected. The same snapshot
+        // without the accepted credential is declared
+        // evidence, and with no card in the inputs it compares
+        // nothing, so the credential is what this test pins.
+        let cat = catalog();
+        let mut recorded = snapshot(vec![ping()]);
+        recorded.auth = AuthSurface::Protected(Box::new(crate::snapshot::ProtectedMetadata {
+            resource_metadata: None,
+            authorization_servers: vec![],
+        }));
+        let base = baseline_for(&recorded);
+
+        let mut walked = snapshot(vec![]);
+        walked.auth = recorded.auth.clone();
+        walked.credential = CredentialOutcome::Accepted;
+        let with = inputs(&cat, &base, Some(&walked));
+        let findings = check(&with);
+        assert!(
+            findings.iter().any(|f| f.kind == "announced-tool-missing"),
+            "a credentialed walk must be compared live, findings were {findings:?}"
+        );
+
+        walked.credential = CredentialOutcome::NotPresented;
+        let with = inputs(&cat, &base, Some(&walked));
+        let findings = check(&with);
+        assert!(
+            findings.iter().all(|f| f.kind != "announced-tool-missing"),
+            "an uncredentialed protected snapshot must not be compared live, findings were {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_card_recorded_protocol_version_is_not_compared() {
+        // A baseline recorded from a server card holds the
+        // card's declared protocol version, not a
+        // negotiation. A credentialed walk negotiating a
+        // different version must not read as identity
+        // drift. The same pair recorded live must, so the
+        // provenance gate is what this test pins.
+        let cat = catalog();
+        let mut recorded = snapshot(vec![ping()]);
+        recorded.protocol_version = "2025-06-18".into();
+        recorded.auth = AuthSurface::Protected(Box::new(crate::snapshot::ProtectedMetadata {
+            resource_metadata: None,
+            authorization_servers: vec![],
+        }));
+        let mut base = baseline_for(&recorded);
+        base.provenance = vec![crate::baseline::EntryProvenance {
+            entry_id: "urn:air:example.com:mcp:demo".into(),
+            produced_by: "server-card".into(),
+            overruled: vec![],
+        }];
+        let mut walked = snapshot(vec![ping()]);
+        walked.protocol_version = "2026-07-28".into();
+        walked.auth = recorded.auth.clone();
+        walked.credential = CredentialOutcome::Accepted;
+        let with = inputs(&cat, &base, Some(&walked));
+        let findings = check(&with);
+        assert!(
+            findings.iter().all(|f| f.kind != "server-version-changed"),
+            "a declared protocol version must not compare against a negotiated one, findings were {findings:?}"
+        );
+
+        base.provenance[0].produced_by = "live-probe".into();
+        let with = inputs(&cat, &base, Some(&walked));
+        let findings = check(&with);
+        assert!(
+            findings.iter().any(|f| f.kind == "server-version-changed"),
+            "two live records with different protocol versions must compare, findings were {findings:?}"
         );
     }
 

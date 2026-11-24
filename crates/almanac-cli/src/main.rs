@@ -42,7 +42,12 @@ Generate also takes --skill PATH for one SKILL.md, a repeatable
 --openapi PATH for each JSON OpenAPI document the site announces,
 and a repeatable --agent-card PATH for each A2A agent card.
 Validate reads a whole site, or one catalog file with --file PATH.
-Migrate writes CI wiring to --ci PATH when it migrates a site.";
+Migrate writes CI wiring to --ci PATH when it migrates a site.
+A protected surface is probed live when a publisher credential
+is available. The token is read from the environment variable
+ALMANAC_TOKEN, or from the variable --token-env NAME names. It
+is never taken from an argument or a file, and it is presented
+only to the MCP endpoint itself.";
 
 #[derive(Default)]
 struct Flags {
@@ -57,6 +62,7 @@ struct Flags {
     ci: Option<String>,
     fail_at: Option<String>,
     queries: Vec<String>,
+    token_env: Option<String>,
     command: Vec<String>,
 }
 
@@ -90,6 +96,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--file" => flags.file = Some(value(i)?),
             "--ci" => flags.ci = Some(value(i)?),
             "--fail-at" => flags.fail_at = Some(value(i)?),
+            "--token-env" => flags.token_env = Some(value(i)?),
             "--queries" => {
                 flags.queries = value(i)?.split(',').map(|q| q.trim().to_string()).collect()
             }
@@ -110,6 +117,21 @@ fn target(flags: &Flags) -> Result<Option<ProbeTarget>, String> {
         (Some(_), false) => Err("give either --url or --command, not both".into()),
         (None, true) => Ok(None),
     }
+}
+
+/// The publisher credential for this run, read from the
+/// environment: the variable --token-env names, or
+/// ALMANAC_TOKEN. An unset or empty variable means no
+/// credential, and the run is the unauthenticated one.
+/// The value is trimmed, because a secret store value
+/// carrying a trailing newline is the classic CI
+/// accident, and the newline is not part of the token.
+fn token(flags: &Flags) -> Option<String> {
+    let name = flags.token_env.as_deref().unwrap_or("ALMANAC_TOKEN");
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn fail_at(flags: &Flags) -> Result<Severity, String> {
@@ -153,6 +175,7 @@ fn run() -> Result<i32, String> {
                 &openapi,
                 &agent_cards,
                 &flags.queries,
+                token(&flags).as_deref(),
             )?;
             println!("catalog and baseline written under {}", site.display());
             Ok(0)
@@ -161,7 +184,12 @@ fn run() -> Result<i32, String> {
             let flags = parse_flags(&args[1..])?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let target = target(&flags)?;
-            site::check(&site, target.as_ref(), fail_at(&flags)?)
+            site::check(
+                &site,
+                target.as_ref(),
+                fail_at(&flags)?,
+                token(&flags).as_deref(),
+            )
         }
         "validate" => {
             let flags = parse_flags(&args[1..])?;
@@ -184,7 +212,13 @@ fn run() -> Result<i32, String> {
                     .unwrap_or(".github/workflows/almanac.yml"),
             );
             let site_arg = flags.site.as_deref().unwrap_or(".").to_string();
-            site::migrate_site(&site, target.as_ref(), &ci, &site_arg)
+            site::migrate_site(
+                &site,
+                target.as_ref(),
+                &ci,
+                &site_arg,
+                token(&flags).as_deref(),
+            )
         }
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     }

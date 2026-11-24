@@ -328,7 +328,7 @@ impl McpBaseline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::ToolSurface;
+    use crate::snapshot::{CredentialOutcome, ToolSurface};
 
     #[test]
     fn baseline_records_tool_hashes() {
@@ -347,6 +347,7 @@ mod tests {
             resources: vec![],
             prompts: vec![],
             auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
             failure: None,
         };
         let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);

@@ -35,12 +35,20 @@ fn fixture_binary(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> (i32, String, String) {
+    run_with_env(args, &[])
+}
+
+/// Run the binary with extra environment variables, the
+/// credential tests' shape: the token reaches the probe
+/// through the environment and nowhere else.
+fn run_with_env(args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     let Output {
         status,
         stdout,
         stderr,
     } = Command::new(almanac())
         .args(args)
+        .envs(env.iter().copied())
         .output()
         .expect("almanac runs");
     (
@@ -428,7 +436,12 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             }
         }
         ("POST", "/mcp") => {
-            if mode.starts_with("auth-") {
+            // The credential mode serves the walk only to the
+            // request carrying the fixture's token, and
+            // challenges everything else.
+            if mode == "auth-token" && headers.contains("authorization: bearer test-token") {
+                // Fall through to the open serving path below.
+            } else if mode.starts_with("auth-") {
                 let header = format!(
                     "WWW-Authenticate: Bearer resource_metadata=\"{origin}/.well-known/oauth-protected-resource\"\r\n"
                 );
@@ -3138,4 +3151,96 @@ fn stdio_discover_first_stateless() {
     assert_eq!(baseline["mcp"]["protocol_version"], "2026-07-28");
     let (code, stdout, _) = check_stdio(&site, &server);
     assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn credentialed_probe_walks_a_protected_surface() {
+    // The credential-aware probe. The fixture's auth-token
+    // mode challenges every request that does not carry the
+    // token and serves the walk to the one that does. A
+    // credentialed generate records the live surface, tools
+    // and all, where an unauthenticated one would record
+    // the card. A credentialed check is a live pass. A
+    // refused credential degrades to declared evidence with
+    // the refusal named, and no credential is the declared
+    // run it always was.
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "auth-token".to_string();
+    let site = temp_site("credentialed");
+    let (code, _, stderr) = run_with_env(
+        &[
+            "generate",
+            "--site",
+            &site_arg(&site),
+            "--domain",
+            "example.com",
+            "--url",
+            &url,
+        ],
+        &[("ALMANAC_TOKEN", "test-token")],
+    );
+    assert_eq!(code, 0, "credentialed generate failed with {stderr}");
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["mcp"]["tools"]
+            .as_object()
+            .expect("tools recorded")
+            .len(),
+        7,
+        "the credentialed generate records the walked tools, baseline was {baseline}"
+    );
+    let provenance = baseline["provenance"]
+        .as_array()
+        .expect("provenance records")
+        .iter()
+        .find(|record| record["entry_id"] == "urn:air:example.com:mcp:telorama")
+        .expect("the MCP entry's provenance");
+    assert_eq!(
+        provenance["produced_by"].as_str(),
+        Some("live-probe"),
+        "baseline was {baseline}"
+    );
+
+    // The credentialed check is a live pass, not declared
+    // evidence.
+    let (code, stdout, _) = run_with_env(
+        &["check", "--site", &site_arg(&site), "--url", &url],
+        &[("ALMANAC_TOKEN", "test-token")],
+    );
+    assert_eq!(code, 0, "credentialed check failed with {stdout}");
+    assert!(stdout.contains("\"mode\": \"live\""), "report was {stdout}");
+
+    // No credential: the declared run, unchanged.
+    let (code, stdout, stderr) = run(&["check", "--site", &site_arg(&site), "--url", &url]);
+    assert_eq!(code, 0, "declared check failed with {stdout}");
+    assert!(
+        stdout.contains("declared-evidence-only"),
+        "report was {stdout}"
+    );
+    assert!(
+        stderr.contains("was not probed live"),
+        "stderr was {stderr}"
+    );
+    assert!(
+        !stderr.contains("refused"),
+        "a tokenless run must not report a refusal, stderr was {stderr}"
+    );
+
+    // A refused credential degrades the same way, with the
+    // refusal named rather than silent.
+    let (code, stdout, stderr) = run_with_env(
+        &["check", "--site", &site_arg(&site), "--url", &url],
+        &[("ALMANAC_TOKEN", "wrong-token")],
+    );
+    assert_eq!(code, 0, "refused check failed with {stdout}");
+    assert!(
+        stdout.contains("declared-evidence-only"),
+        "report was {stdout}"
+    );
+    assert!(
+        stderr.contains("the presented credential was refused"),
+        "stderr was {stderr}"
+    );
 }

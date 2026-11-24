@@ -25,7 +25,7 @@ use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
 use almanac_core::hash;
 use almanac_core::metadata::{RepoMetadata, reduce_repo_metadata};
 use almanac_core::openapi::{OpenApiView, reduce_openapi};
-use almanac_core::snapshot::{AuthSurface, SurfaceSnapshot, ToolSurface};
+use almanac_core::snapshot::{AuthSurface, CredentialOutcome, SurfaceSnapshot, ToolSurface};
 use serde::Serialize;
 
 use crate::probe;
@@ -37,10 +37,10 @@ pub enum ProbeTarget {
     Http(String),
 }
 
-pub fn run_probe(target: &ProbeTarget) -> SurfaceSnapshot {
+pub fn run_probe(target: &ProbeTarget, token: Option<&str>) -> SurfaceSnapshot {
     match target {
         ProbeTarget::Stdio(command) => probe::probe_stdio(command),
-        ProbeTarget::Http(url) => probe_http::probe_http(url),
+        ProbeTarget::Http(url) => probe_http::probe_http(url, token),
     }
 }
 
@@ -166,6 +166,7 @@ fn snapshot_from_card(
         resources: fields.resources,
         prompts: fields.prompts,
         auth: probe_snapshot.auth.clone(),
+        credential: probe_snapshot.credential.clone(),
         failure: None,
     };
     // A card that names no endpoint leaves a later check with
@@ -514,13 +515,14 @@ pub fn generate(
     openapi_paths: &[PathBuf],
     agent_card_paths: &[PathBuf],
     queries: &[String],
+    token: Option<&str>,
 ) -> Result<(), String> {
     // Publisher config is the first editorial source, loaded
     // and validated before the probe runs, so a configuration
     // error refuses the run without spending a probe on it.
     let config = load_config(site)?;
     validate_entry_blocks(&config)?;
-    let probe_snapshot = run_probe(target);
+    let probe_snapshot = run_probe(target, token);
     if let Some(failure) = &probe_snapshot.failure {
         return Err(format!(
             "the probe failed at {} with {}, and generation needs a surface it can read",
@@ -549,11 +551,20 @@ pub fn generate(
             },
         },
     };
-    // A protected surface cannot be probed live, so generation
-    // reads it from its server card instead, and the baseline
-    // records the auth metadata the ladder fetched alongside.
+    // A protected surface that was not walked live cannot be
+    // probed, so generation reads it from its server card
+    // instead, and the baseline records the auth metadata the
+    // ladder fetched alongside. A protected surface the
+    // credentialed probe walked keeps its live snapshot.
     let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
-    let snapshot = if matches!(probe_snapshot.auth, AuthSurface::Protected(_)) {
+    let snapshot = if matches!(probe_snapshot.auth, AuthSurface::Protected(_))
+        && !probe_snapshot.walked_live()
+    {
+        if let CredentialOutcome::Refused(step) = &probe_snapshot.credential {
+            notes.push(format!(
+                "the presented credential was refused at {step}, so generation read the surface from its server card"
+            ));
+        }
         let (built, bytes, description) = snapshot_from_card(site, target, &probe_snapshot)?;
         card_source = Some((bytes, description));
         built
@@ -1573,7 +1584,12 @@ struct PrintedReport<'a> {
 /// catalog, the run is repo mode and every offline comparison
 /// still runs. An Err is a check that could not run, exit 2 at
 /// the caller.
-pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Result<i32, String> {
+pub fn check(
+    site: &Path,
+    target: Option<&ProbeTarget>,
+    fail_at: Severity,
+    token: Option<&str>,
+) -> Result<i32, String> {
     let ard_path = site.join(".well-known/ard.json");
     let legacy_path = site.join(".well-known/ai-catalog.json");
     let legacy_catalog: Option<Catalog> = if legacy_path.exists() {
@@ -1607,9 +1623,11 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
             resolved.as_ref()
         }
     };
-    let snapshot = target.map(run_probe);
+    let snapshot = target.map(|target| run_probe(target, token));
     let card = match &snapshot {
-        Some(snapshot) if matches!(snapshot.auth, AuthSurface::Protected(_)) => {
+        Some(snapshot)
+            if matches!(snapshot.auth, AuthSurface::Protected(_)) && !snapshot.walked_live() =>
+        {
             read_card_view(site, &published)
         }
         _ => None,
@@ -1755,6 +1773,7 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
     let mode = match &snapshot {
         None => "repo",
         Some(snapshot) => match &snapshot.auth {
+            AuthSurface::Protected(_) if snapshot.walked_live() => "live",
             AuthSurface::Protected(_) => "declared-evidence-only",
             AuthSurface::Open => "live",
         },
@@ -1769,7 +1788,16 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
         serde_json::to_string_pretty(&printed).expect("the report always serializes")
     );
     if mode == "declared-evidence-only" {
-        eprintln!("declared evidence only, the surface is protected and was not probed live");
+        match snapshot.as_ref().map(|snapshot| &snapshot.credential) {
+            Some(CredentialOutcome::Refused(step)) => eprintln!(
+                "declared evidence only, the presented credential was refused at {step} and the surface was not probed live"
+            ),
+            _ => {
+                eprintln!(
+                    "declared evidence only, the surface is protected and was not probed live"
+                )
+            }
+        }
     }
     Ok(drift::exit_code(&report.findings, fail_at))
 }
@@ -1863,6 +1891,7 @@ pub fn migrate_site(
     target: Option<&ProbeTarget>,
     ci_path: &Path,
     site_arg: &str,
+    token: Option<&str>,
 ) -> Result<i32, String> {
     let legacy_path = site.join(".well-known/ai-catalog.json");
     if !legacy_path.exists() {
@@ -1919,20 +1948,28 @@ pub fn migrate_site(
     let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
     let mut probed_target: Option<&ProbeTarget> = None;
     let mut probe_failure: Option<String> = None;
+    let mut refusal_note: Option<String> = None;
     let snapshot = if has_mcp {
         let named = target.ok_or(
             "the legacy catalog announces an MCP server, and migration verifies it \
              against the live surface. Name the surface with --url or --command",
         )?;
         probed_target = Some(named);
-        let probe_snapshot = run_probe(named);
+        let probe_snapshot = run_probe(named, token);
         if let Some(failure) = &probe_snapshot.failure {
             probe_failure = Some(format!(
                 "the probe failed at {} with {}",
                 failure.step, failure.detail
             ));
             None
-        } else if matches!(probe_snapshot.auth, AuthSurface::Protected(_)) {
+        } else if matches!(probe_snapshot.auth, AuthSurface::Protected(_))
+            && !probe_snapshot.walked_live()
+        {
+            if let CredentialOutcome::Refused(step) = &probe_snapshot.credential {
+                refusal_note = Some(format!(
+                    "the presented credential was refused at {step}, so the MCP entry was verified from its server card"
+                ));
+            }
             match snapshot_from_card(site, named, &probe_snapshot) {
                 Ok((built, bytes, description)) => {
                     card_source = Some((bytes, description));
@@ -1962,6 +1999,9 @@ pub fn migrate_site(
 
     let mut carried: Vec<Entry> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    if let Some(note) = refusal_note {
+        notes.push(note);
+    }
     if !has_mcp {
         notes.push("the legacy catalog announces no MCP server, so no surface was probed".into());
     }
@@ -2574,6 +2614,7 @@ mod tests {
             resources: vec![],
             prompts: vec![],
             auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
             failure: None,
         };
         let card = card_value(

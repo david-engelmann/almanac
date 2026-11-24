@@ -209,13 +209,17 @@ redirects, because a metadata document behind a redirect would
 otherwise read as absent, and absence is a fact the drift model
 acts on.
 
-What the probe never does in this milestone. It holds no
-credential, runs no authorization flow and presents no token. The
-credential aware probe, using a publisher supplied token from the
-CI secret store, is the first post launch enhancement DESIGN.md
-section 11 already flags. Until then, an authenticated surface
-gives the gate its card, its catalog, its baseline and its auth
-metadata, and the report says exactly that.
+What the probe never does. It runs no authorization flow:
+no client registration, no code exchange, no refresh. Since
+the credential aware probe landed, it presents a publisher
+supplied token when one is provided through the environment
+(the CI secret store's shape), and only then: the walk runs
+unauthenticated first, a challenge retries it once with the
+token, and the header rides only on requests to the MCP
+endpoint itself, never on the metadata fetches, which may
+live on another origin. Without a token, an authenticated
+surface gives the gate its card, its catalog, its baseline
+and its auth metadata, and the report says exactly that.
 
 ## Where the code lives
 
