@@ -61,6 +61,45 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
         .map_err(|e| format!("could not parse {} with {e}", path.display()))
 }
 
+/// Read an OpenAPI document's bytes as a JSON value, in
+/// whichever of its two published forms it arrives: JSON
+/// first, then YAML, converted to the same value either
+/// way, so the reduction and everything downstream of it
+/// never see a format. Detection is by content, never by
+/// file name. A document that parses as neither is
+/// refused with both reasons named. Two bounds ride with
+/// the YAML form, which has neither of JSON's built in
+/// limits: the bytes are capped at the probe's own 16 MiB
+/// response limit, and a file holding more than one YAML
+/// document is refused rather than read as its first
+/// document alone.
+fn parse_api_document(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    if bytes.len() > LIMIT {
+        return Err("over the 16 MiB reading limit".to_string());
+    }
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(doc) => Ok(doc),
+        Err(json_error) => {
+            let mut documents = serde_yaml::Deserializer::from_slice(bytes);
+            let Some(first) = documents.next() else {
+                return Err(format!(
+                    "not JSON ({json_error}) and not YAML (the document is empty)"
+                ));
+            };
+            let value = serde::Deserialize::deserialize(first).map_err(|yaml_error| {
+                format!("not JSON ({json_error}) and not YAML ({yaml_error})")
+            })?;
+            if documents.next().is_some() {
+                return Err(format!(
+                    "not JSON ({json_error}) and not YAML (the file holds more than one document)"
+                ));
+            }
+            Ok(value)
+        }
+    }
+}
+
 fn pretty_bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut text = serde_json::to_string_pretty(value).expect("the model always serializes");
     text.push('\n');
@@ -927,9 +966,9 @@ pub fn generate(
     for openapi_path in openapi_paths {
         let bytes = fs::read(openapi_path)
             .map_err(|e| format!("could not read {} with {e}", openapi_path.display()))?;
-        let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        let doc: serde_json::Value = parse_api_document(&bytes).map_err(|reason| {
             format!(
-                "{} is not a JSON document ({e}), and generate reads OpenAPI documents in JSON only, never YAML",
+                "{} is {reason}, and an OpenAPI document must be one of the two",
                 openapi_path.display()
             )
         })?;
@@ -946,7 +985,14 @@ pub fn generate(
                     .into(),
             );
         }
-        let stem = file_name.strip_suffix(".json").unwrap_or(file_name);
+        // The stem drops whichever document suffix the file
+        // carries, so a document's identifier is the same in
+        // either format: billing.json and billing.yaml are
+        // one API, announced once.
+        let stem = [".json", ".yaml", ".yml"]
+            .iter()
+            .find_map(|suffix| file_name.strip_suffix(suffix))
+            .unwrap_or(file_name);
         if !valid_plain_name(stem) {
             return Err(format!(
                 "the file stem {stem} is not a plain name, and generation will not build an identifier from it"
@@ -1834,9 +1880,9 @@ pub fn check(
     let (agents_json_endpoints, agents_json_broken) = read_agents_json(site);
 
     // The OpenAPI documents the baseline records, reduced now.
-    // A document that is missing, not JSON, or no longer reads
-    // as an OpenAPI document is reported broken with its
-    // reason, never silently compared against.
+    // A document that is missing, unreadable in either format,
+    // or no longer reads as an OpenAPI document is reported
+    // broken with its reason, never silently compared against.
     let mut openapi_views: Vec<(String, OpenApiView)> = Vec::new();
     let mut openapi_broken: Vec<(String, String)> = Vec::new();
     for api in &baseline.openapi {
@@ -1852,10 +1898,10 @@ pub fn check(
                 api.entry_id.clone(),
                 "the document is missing where its catalog entry points".into(),
             )),
-            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Err(e) => openapi_broken.push((
+            Ok(bytes) => match parse_api_document(&bytes) {
+                Err(reason) => openapi_broken.push((
                     api.entry_id.clone(),
-                    format!("the document no longer parses as JSON ({e})"),
+                    format!("the document no longer reads: it is {reason}"),
                 )),
                 Ok(doc) => match reduce_openapi(&doc) {
                     Ok(view) => openapi_views.push((api.entry_id.clone(), view)),
@@ -2472,8 +2518,8 @@ pub fn migrate_site(
                     // reduced, its operation and version claims
                     // are judged the way the MCP entry's are,
                     // and the baseline records the reduction.
-                    let view = match serde_json::from_slice::<serde_json::Value>(&bytes)
-                        .map_err(|e| format!("the document does not parse as JSON with {e}"))
+                    let view = match parse_api_document(&bytes)
+                        .map_err(|reason| format!("the document is {reason}"))
                         .and_then(|doc| reduce_openapi(&doc))
                     {
                         Ok(view) => view,

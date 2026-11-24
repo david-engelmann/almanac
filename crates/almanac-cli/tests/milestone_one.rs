@@ -1885,6 +1885,17 @@ fn billing_doc() -> serde_json::Value {
     })
 }
 
+/// The billing document in YAML, carrying the two shapes
+/// real YAML OpenAPI documents have and JSON ones cannot:
+/// an unquoted numeric response key, and a shared
+/// parameter written once as an anchor and aliased into
+/// the second operation.
+fn billing_yaml() -> &'static str {
+    "openapi: 3.1.0\n\
+     info:\n  title: Billing\n  version: 1.0.0\n  description: Charges cards.\n\
+     paths:\n  /charges:\n    post:\n      operationId: createCharge\n      description: Create a charge.\n      parameters:\n        - &key\n          name: key\n          in: header\n          required: true\n      responses:\n        200:\n          description: Charged.\n    get:\n      operationId: listCharges\n      description: List charges.\n      parameters:\n        - *key\n"
+}
+
 fn write_doc(path: &Path, doc: &serde_json::Value) {
     std::fs::write(
         path,
@@ -2067,13 +2078,32 @@ fn openapi_input_and_operation_drift() {
         "report was {stdout}"
     );
 
-    // A YAML document and a non OpenAPI document are refused
-    // at generation, with the reason named, exit 2.
-    let yaml = src.join("api.yaml");
+    // A document in neither format is refused at
+    // generation with both reasons named, and a YAML
+    // document that parses but is not an OpenAPI document
+    // is refused by the reduction, exit 2 either way.
+    let neither = src.join("api.yaml");
+    std::fs::write(&neither, b"\x80\x81 not a document").expect("bytes");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &neither);
+    assert_eq!(
+        code, 2,
+        "an unreadable document must refuse, stderr was {stderr}"
+    );
+    assert!(
+        stderr.contains("not JSON") && stderr.contains("not YAML"),
+        "stderr was {stderr}"
+    );
+    let yaml = src.join("partial.yaml");
     std::fs::write(&yaml, "openapi: 3.1.0\ninfo:\n  title: Billing\n").expect("yaml");
     let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &yaml);
-    assert_eq!(code, 2, "YAML must refuse, stderr was {stderr}");
-    assert!(stderr.contains("YAML"), "stderr was {stderr}");
+    assert_eq!(
+        code, 2,
+        "a partial document must refuse, stderr was {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot be announced"),
+        "stderr was {stderr}"
+    );
     let not_api = src.join("notes.json");
     write_doc(&not_api, &serde_json::json!({"hello": "world"}));
     let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &not_api);
@@ -2082,6 +2112,52 @@ fn openapi_input_and_operation_drift() {
         "a non OpenAPI document must refuse, stderr was {stderr}"
     );
     assert!(stderr.contains("openapi"), "stderr was {stderr}");
+}
+
+#[test]
+fn yaml_openapi_documents_generate_and_drift() {
+    // A YAML OpenAPI document generates exactly as its
+    // JSON twin would: same entry, same capabilities,
+    // and the drift pass reads the YAML surface back.
+    let clean = fixture_binary("fixture_server");
+    let src = temp_site("yaml-openapi-src");
+    let yaml = src.join("billing.yaml");
+    std::fs::write(&yaml, billing_yaml()).expect("yaml written");
+    let site = temp_site("yaml-openapi");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &yaml);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog json");
+    let api = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["type"] == "application/openapi+json")
+        .expect("api entry");
+    assert_eq!(api["identifier"], "urn:air:example.com:openapi:billing");
+    assert_eq!(
+        api["capabilities"],
+        serde_json::json!(["createCharge", "listCharges"]),
+        "catalog was {catalog}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // Removing an operation from the served YAML is
+    // drift at Major, read back through the YAML parse.
+    let without_get = billing_yaml().replace(
+        "    get:\n      operationId: listCharges\n      description: List charges.\n      parameters:\n        - *key\n",
+        "",
+    );
+    assert_ne!(without_get, billing_yaml(), "the get block must be cut");
+    std::fs::write(site.join("billing.yaml"), without_get).expect("yaml rewritten");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "removed operation must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-operation-removed"),
+        "report was {stdout}"
+    );
 }
 
 #[test]
