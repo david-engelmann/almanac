@@ -545,15 +545,19 @@ struct GenerationReport {
     warnings: Vec<String>,
 }
 
-/// The generate command. Probes the live surface, writes the dual
-/// path catalog, the server card and the baseline. A protected
-/// surface is generated from its server card instead.
+/// The generate command. Probes the live surface when a
+/// target is named, writes the dual path catalog, the
+/// server card and the baseline. A protected surface is
+/// generated from its server card instead. With no target
+/// the run is REST only: the named documents, agent cards
+/// and skill are announced, and no MCP entry or card is
+/// written. A run naming no target and no inputs refuses.
 #[allow(clippy::too_many_arguments)]
 pub fn generate(
     site: &Path,
     domain: &str,
     display_name: Option<&str>,
-    target: &ProbeTarget,
+    target: Option<&ProbeTarget>,
     skill_path: Option<&Path>,
     openapi_paths: &[PathBuf],
     agent_card_paths: &[PathBuf],
@@ -565,12 +569,15 @@ pub fn generate(
     // error refuses the run without spending a probe on it.
     let config = load_config(site)?;
     let config_warnings = validate_entry_blocks(&config)?;
-    let probe_snapshot = run_probe(target, token);
-    if let Some(failure) = &probe_snapshot.failure {
-        return Err(format!(
-            "the probe failed at {} with {}, and generation needs a surface it can read",
-            failure.step, failure.detail
-        ));
+    if target.is_none()
+        && skill_path.is_none()
+        && openapi_paths.is_empty()
+        && agent_card_paths.is_empty()
+    {
+        return Err(
+            "generate names no surface to probe and no inputs to announce, and an empty catalog is a mistake rather than a publication"
+                .into(),
+        );
     }
     // Repo metadata is the last editorial source, read once
     // for the whole run: the host's display name and any
@@ -598,198 +605,222 @@ pub fn generate(
             },
         },
     };
-    // A protected surface that was not walked live cannot be
-    // probed, so generation reads it from its server card
-    // instead, and the baseline records the auth metadata the
-    // ladder fetched alongside. A protected surface the
-    // credentialed probe walked keeps its live snapshot.
-    let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
-    let snapshot = if matches!(probe_snapshot.auth, AuthSurface::Protected(_))
-        && !probe_snapshot.walked_live()
-    {
-        if let CredentialOutcome::Refused(step) = &probe_snapshot.credential {
-            notes.push(format!(
-                "the presented credential was refused at {step}, so generation read the surface from its server card"
-            ));
-        }
-        let (built, bytes, description) = snapshot_from_card(site, target, &probe_snapshot)?;
-        card_source = Some((bytes, description));
-        built
-    } else {
-        probe_snapshot
-    };
-
-    let entry_id = format!("urn:air:{domain}:mcp:{}", snapshot.server_name);
-    let mut matched: std::collections::HashSet<String> =
-        std::collections::HashSet::from([entry_id.clone()]);
-    let mcp_block = entry_block(&config, &entry_id);
-    let mcp_suppressed = mcp_block.and_then(|block| block.suppress.as_deref());
-    if let Some(reason) = mcp_suppressed {
-        suppressed.push(SuppressedEntry {
-            entry: entry_id.clone(),
-            reason: reason.to_string(),
-        });
-    }
-    if card_source.is_some()
-        && mcp_suppressed.is_none()
-        && mcp_block
-            .is_some_and(|block| block.description.is_some() || block.display_name.is_some())
-    {
+    if target.is_none() && !queries.is_empty() {
+        // The --queries flag names the MCP entry's queries,
+        // and a REST only run has no MCP entry for them to
+        // land on. Configured queries for the entries the
+        // run does generate still apply, through the post-pass.
         warnings.push(
-            "almanac.toml overrides the MCP entry's editorial fields, but the surface \
-             is protected and its existing server card is republished unchanged, so the card \
-             keeps its own words"
+            "the --queries flag names the MCP entry's representative queries, and this run has no MCP surface, so they had no effect"
                 .into(),
         );
     }
-    // The entry's description is resolved before the card is
-    // written, because the generated card carries the same
-    // words. Config speaks first, then the card, then repo
-    // metadata, then the template. A stronger source's
-    // whitespace-only description counts as no description,
-    // the trim discipline the metadata reduction itself
-    // applies.
-    let mcp_description = match mcp_block.and_then(|block| block.description.as_ref()) {
-        Some(description) => description.clone(),
-        None => match &card_source {
-            Some((_, Some(description))) if !description.trim().is_empty() => description.clone(),
-            _ => match (&metadata.description, &metadata.description_source) {
-                (Some(description), Some(source)) => {
-                    notes.push(metadata_note(
-                        &format!("{entry_id} takes its description"),
-                        source,
-                    ));
-                    description.clone()
-                }
-                _ => format!("The {} MCP server.", snapshot.server_name),
-            },
-        },
-    };
-    // The entry's display name resolves with config first,
-    // like its description, and the generated card's title
-    // carries the same name.
-    let mcp_display_name = mcp_block
-        .and_then(|block| block.display_name.clone())
-        .unwrap_or_else(|| snapshot.server_name.clone());
-    let card_bytes = if mcp_suppressed.is_some() {
-        Vec::new()
-    } else {
-        match &card_source {
-            Some((bytes, _)) => bytes.clone(),
-            None => {
-                let card = card_value(
-                    &snapshot,
-                    target,
-                    domain,
-                    Some(&mcp_description),
-                    Some(&mcp_display_name),
-                );
-                warnings.extend(warn_on_card_disagreement(site, &card, &snapshot));
-                pretty_bytes(&card)
-            }
-        }
-    };
-    let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
-    if mcp_suppressed.is_none() {
-        let card_path = site.join(".well-known/mcp/server-card.json");
-        write_file(&card_path, &card_bytes)?;
-        written.push(relative_to_site(site, &card_path));
-    }
-    // The normative copy, at the endpoint's own path, when the
-    // endpoint lives on this site's origin. Identical bytes, so
-    // the one digest binds both locations, and the baseline
-    // records the copy below as a second artifact of the entry.
-    let normative_card: Option<(String, PathBuf)> = normative_card_url_for(target)
-        .and_then(|url| url_to_path(site, domain, &url).map(|path| (url, path)));
-    if mcp_suppressed.is_none() {
-        if let Some((_, path)) = &normative_card {
-            write_file(path, &card_bytes)?;
-            written.push(relative_to_site(site, path));
-        }
-        if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
-            warnings.push(
-                "the endpoint is not on the site's origin, so the server card \
-                 is published at the well known path only"
-                    .into(),
-            );
-        }
-    }
-    if mcp_suppressed.is_some() {
-        if card_source.is_some() {
-            warnings.push(
-                "the surface is protected, so its existing server card remains \
-                 published; suppressing the entry silences the catalog only"
-                    .into(),
-            );
-        } else {
-            // The card on an open surface is one almanac itself
-            // generated, so a suppressed server does not stay
-            // discoverable through copies an earlier run wrote.
-            let card_path = site.join(".well-known/mcp/server-card.json");
-            if fs::remove_file(&card_path).is_ok() {
-                removed.push(relative_to_site(site, &card_path));
-            }
-            if let Some((_, path)) = &normative_card
-                && fs::remove_file(path).is_ok()
-            {
-                removed.push(relative_to_site(site, path));
-            }
-        }
-    }
-
-    let tool_names: Vec<String> = snapshot.tools.iter().map(|t| t.name.clone()).collect();
-    let representative_queries = if queries.is_empty() {
-        vec![
-            format!("What can {} do", snapshot.server_name),
-            format!("Use {} to complete a task", snapshot.server_name),
-            format!("Show the tools {} offers", snapshot.server_name),
-        ]
-    } else {
-        queries.to_vec()
-    };
     let mut entries: Vec<Entry> = Vec::new();
     let mut mcp_baseline: Option<McpBaseline> = None;
     let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
     let mut provenance: Vec<EntryProvenance> = Vec::new();
-    if mcp_suppressed.is_none() {
-        entries.push(Entry {
-            identifier: entry_id.clone(),
-            display_name: mcp_display_name,
-            media_type: "application/mcp-server-card+json".into(),
-            url: Some(card_url.clone()),
-            data: None,
-            description: mcp_description,
-            capabilities: tool_names,
-            representative_queries,
-            tags: vec![],
-            version: Some(snapshot.server_version.clone()),
-            digest: Some(hash::digest_field(&card_bytes)),
-            updated_at: None,
-            trust_manifest: None,
-        });
-        mcp_baseline = Some(McpBaseline::from_snapshot(&entry_id, &snapshot));
-        artifacts.push(ArtifactBaseline {
-            entry_id: entry_id.clone(),
-            url: card_url,
-            sha256: hash::sha256_hex(&card_bytes),
-        });
-        if let Some((url, _)) = &normative_card {
-            artifacts.push(ArtifactBaseline {
-                entry_id: entry_id.clone(),
-                url: url.clone(),
-                sha256: hash::sha256_hex(&card_bytes),
+    let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The MCP part of the run, present only when a target is
+    // named. A REST only run skips it whole: no probe, no
+    // entry, no card, and the baseline records no MCP surface.
+    if let Some(target) = target {
+        let probe_snapshot = run_probe(target, token);
+        if let Some(failure) = &probe_snapshot.failure {
+            return Err(format!(
+                "the probe failed at {} with {}, and generation needs a surface it can read",
+                failure.step, failure.detail
+            ));
+        }
+        // A protected surface that was not walked live cannot be
+        // probed, so generation reads it from its server card
+        // instead, and the baseline records the auth metadata the
+        // ladder fetched alongside. A protected surface the
+        // credentialed probe walked keeps its live snapshot.
+        let mut card_source: Option<(Vec<u8>, Option<String>)> = None;
+        let snapshot = if matches!(probe_snapshot.auth, AuthSurface::Protected(_))
+            && !probe_snapshot.walked_live()
+        {
+            if let CredentialOutcome::Refused(step) = &probe_snapshot.credential {
+                notes.push(format!(
+                    "the presented credential was refused at {step}, so generation read the surface from its server card"
+                ));
+            }
+            let (built, bytes, description) = snapshot_from_card(site, target, &probe_snapshot)?;
+            card_source = Some((bytes, description));
+            built
+        } else {
+            probe_snapshot
+        };
+
+        let entry_id = format!("urn:air:{domain}:mcp:{}", snapshot.server_name);
+        matched.insert(entry_id.clone());
+        let mcp_block = entry_block(&config, &entry_id);
+        let mcp_suppressed = mcp_block.and_then(|block| block.suppress.as_deref());
+        if let Some(reason) = mcp_suppressed {
+            suppressed.push(SuppressedEntry {
+                entry: entry_id.clone(),
+                reason: reason.to_string(),
             });
         }
-        provenance.push(EntryProvenance {
-            entry_id: entry_id.clone(),
-            produced_by: if card_source.is_some() {
-                "server-card"
-            } else {
-                "live-probe"
+        if card_source.is_some()
+            && mcp_suppressed.is_none()
+            && mcp_block
+                .is_some_and(|block| block.description.is_some() || block.display_name.is_some())
+        {
+            warnings.push(
+                "almanac.toml overrides the MCP entry's editorial fields, but the surface \
+                 is protected and its existing server card is republished unchanged, so the card \
+                 keeps its own words"
+                    .into(),
+            );
+        }
+        // The entry's description is resolved before the card is
+        // written, because the generated card carries the same
+        // words. Config speaks first, then the card, then repo
+        // metadata, then the template. A stronger source's
+        // whitespace-only description counts as no description,
+        // the trim discipline the metadata reduction itself
+        // applies.
+        let mcp_description = match mcp_block.and_then(|block| block.description.as_ref()) {
+            Some(description) => description.clone(),
+            None => match &card_source {
+                Some((_, Some(description))) if !description.trim().is_empty() => {
+                    description.clone()
+                }
+                _ => match (&metadata.description, &metadata.description_source) {
+                    (Some(description), Some(source)) => {
+                        notes.push(metadata_note(
+                            &format!("{entry_id} takes its description"),
+                            source,
+                        ));
+                        description.clone()
+                    }
+                    _ => format!("The {} MCP server.", snapshot.server_name),
+                },
+            },
+        };
+        // The entry's display name resolves with config first,
+        // like its description, and the generated card's title
+        // carries the same name.
+        let mcp_display_name = mcp_block
+            .and_then(|block| block.display_name.clone())
+            .unwrap_or_else(|| snapshot.server_name.clone());
+        let card_bytes = if mcp_suppressed.is_some() {
+            Vec::new()
+        } else {
+            match &card_source {
+                Some((bytes, _)) => bytes.clone(),
+                None => {
+                    let card = card_value(
+                        &snapshot,
+                        target,
+                        domain,
+                        Some(&mcp_description),
+                        Some(&mcp_display_name),
+                    );
+                    warnings.extend(warn_on_card_disagreement(site, &card, &snapshot));
+                    pretty_bytes(&card)
+                }
             }
-            .into(),
-            overruled: vec![],
-        });
+        };
+        let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
+        if mcp_suppressed.is_none() {
+            let card_path = site.join(".well-known/mcp/server-card.json");
+            write_file(&card_path, &card_bytes)?;
+            written.push(relative_to_site(site, &card_path));
+        }
+        // The normative copy, at the endpoint's own path, when the
+        // endpoint lives on this site's origin. Identical bytes, so
+        // the one digest binds both locations, and the baseline
+        // records the copy below as a second artifact of the entry.
+        let normative_card: Option<(String, PathBuf)> = normative_card_url_for(target)
+            .and_then(|url| url_to_path(site, domain, &url).map(|path| (url, path)));
+        if mcp_suppressed.is_none() {
+            if let Some((_, path)) = &normative_card {
+                write_file(path, &card_bytes)?;
+                written.push(relative_to_site(site, path));
+            }
+            if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
+                warnings.push(
+                    "the endpoint is not on the site's origin, so the server card \
+                     is published at the well known path only"
+                        .into(),
+                );
+            }
+        }
+        if mcp_suppressed.is_some() {
+            if card_source.is_some() {
+                warnings.push(
+                    "the surface is protected, so its existing server card remains \
+                     published; suppressing the entry silences the catalog only"
+                        .into(),
+                );
+            } else {
+                // The card on an open surface is one almanac itself
+                // generated, so a suppressed server does not stay
+                // discoverable through copies an earlier run wrote.
+                let card_path = site.join(".well-known/mcp/server-card.json");
+                if fs::remove_file(&card_path).is_ok() {
+                    removed.push(relative_to_site(site, &card_path));
+                }
+                if let Some((_, path)) = &normative_card
+                    && fs::remove_file(path).is_ok()
+                {
+                    removed.push(relative_to_site(site, path));
+                }
+            }
+        }
+
+        let tool_names: Vec<String> = snapshot.tools.iter().map(|t| t.name.clone()).collect();
+        let representative_queries = if queries.is_empty() {
+            vec![
+                format!("What can {} do", snapshot.server_name),
+                format!("Use {} to complete a task", snapshot.server_name),
+                format!("Show the tools {} offers", snapshot.server_name),
+            ]
+        } else {
+            queries.to_vec()
+        };
+        if mcp_suppressed.is_none() {
+            entries.push(Entry {
+                identifier: entry_id.clone(),
+                display_name: mcp_display_name,
+                media_type: "application/mcp-server-card+json".into(),
+                url: Some(card_url.clone()),
+                data: None,
+                description: mcp_description,
+                capabilities: tool_names,
+                representative_queries,
+                tags: vec![],
+                version: Some(snapshot.server_version.clone()),
+                digest: Some(hash::digest_field(&card_bytes)),
+                updated_at: None,
+                trust_manifest: None,
+            });
+            mcp_baseline = Some(McpBaseline::from_snapshot(&entry_id, &snapshot));
+            artifacts.push(ArtifactBaseline {
+                entry_id: entry_id.clone(),
+                url: card_url,
+                sha256: hash::sha256_hex(&card_bytes),
+            });
+            if let Some((url, _)) = &normative_card {
+                artifacts.push(ArtifactBaseline {
+                    entry_id: entry_id.clone(),
+                    url: url.clone(),
+                    sha256: hash::sha256_hex(&card_bytes),
+                });
+            }
+            provenance.push(EntryProvenance {
+                entry_id: entry_id.clone(),
+                produced_by: if card_source.is_some() {
+                    "server-card"
+                } else {
+                    "live-probe"
+                }
+                .into(),
+                overruled: vec![],
+            });
+        }
     }
     let mut skills = Vec::new();
 

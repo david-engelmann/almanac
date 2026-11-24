@@ -41,6 +41,10 @@ the server command last. Sites are directories, --site DIR.
 Generate also takes --skill PATH for one SKILL.md, a repeatable
 --openapi PATH for each JSON OpenAPI document the site announces,
 and a repeatable --agent-card PATH for each A2A agent card.
+Generate needs no target when it names documents, agent cards,
+or a skill instead: a REST only site is generated from those
+inputs alone, with no MCP entry and no server card. A generate
+run that names no target and no inputs at all refuses.
 Validate reads a whole site, or one catalog file with --file PATH.
 Migrate writes CI wiring to --ci PATH when it migrates a site.
 A protected surface is probed live when a publisher credential
@@ -109,7 +113,9 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
 
 /// The target the operator named, when they named one. Check
 /// runs without one, resolving the endpoint from the catalog or
-/// falling back to repo mode. Generate requires one.
+/// falling back to repo mode. Generate runs without one too,
+/// REST only, and owns its refusal of a run that names nothing
+/// at all.
 fn target(flags: &Flags) -> Result<Option<ProbeTarget>, String> {
     match (&flags.url, flags.command.is_empty()) {
         (Some(url), true) => Ok(Some(ProbeTarget::Http(url.clone()))),
@@ -161,8 +167,7 @@ fn run() -> Result<i32, String> {
                 .domain
                 .as_deref()
                 .ok_or("--domain is required for generate")?;
-            let target =
-                target(&flags)?.ok_or("generate needs a surface target, --url or --command")?;
+            let target = target(&flags)?;
             let skill = flags.skill.as_deref().map(PathBuf::from);
             let openapi: Vec<PathBuf> = flags.openapi.iter().map(PathBuf::from).collect();
             let agent_cards: Vec<PathBuf> = flags.agent_card.iter().map(PathBuf::from).collect();
@@ -170,7 +175,7 @@ fn run() -> Result<i32, String> {
                 &site,
                 domain,
                 flags.name.as_deref(),
-                &target,
+                target.as_ref(),
                 skill.as_deref(),
                 &openapi,
                 &agent_cards,

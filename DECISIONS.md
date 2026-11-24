@@ -1432,3 +1432,56 @@ host and the exact files list in write order; a
 missing provenance record would read "unrecorded"
 rather than an empty string; and the report's print
 follows the sibling reports' serialization idiom.
+
+## Generation roadmap, sixth slice: REST-only generation (2026-11-24)
+
+The OpenAPI slice recorded the named question: generate
+required a surface target, so an OpenAPI document could
+only compose with an MCP surface the way a skill file
+does, and a REST only site, with no MCP surface at all,
+could not be generated for. This slice lifts it.
+Generate's target becomes optional. With neither --url
+nor --command, the run probes nothing: no MCP entry, no
+server card, and the baseline records no MCP surface.
+The documents, agent cards, and skill a run names are
+announced exactly as before, under the same editorial
+precedence, and the generation report describes the run
+the same way.
+
+One refusal stands in place of the target requirement:
+a run that names no target and no inputs at all refuses,
+because a catalog with nothing behind it is a mistake
+rather than a publication. The refusal covers naming
+nothing, not announcing nothing: a run that names
+inputs and suppresses every one publishes an empty
+catalog with each absence reasoned in the report, as a
+targeted run suppressing its only entry already did.
+The refusal comes after config validation, so a broken
+config still refuses first, as it does today. Check
+needs no change: a baseline with no MCP surface is a
+shape migrate already produces for a catalog that
+announced none, and check reads it today.
+
+As built: the MCP part of generate sits in one
+conditional region and the run's collections are
+declared before it, so a REST only run and a targeted
+run share every line after it. The local gate over
+this slice and the generation report slice together
+ran green firsthand (clippy clean, 107 tests), in a
+window the write fault opened; the two new tests pin
+the REST only catalog's shape and the refusal.
+
+### REST-only checkpoint fix pass (2026-11-24)
+
+The three reviews landed with no Critical and no
+Major findings. Closures: the target helper's doc
+comment no longer says generate requires a target;
+generate's doc comment and the usage text state the
+nothing-named refusal; the --queries flag in a REST
+only run warns that it had no effect, since it names
+the MCP entry's queries and the run has none (its
+silence was newly reachable with this slice); the
+refusal's record is narrowed to what the code
+enforces (naming nothing, not announcing nothing);
+and two test pins were added, a skill only REST run
+and the unmatched MCP block warning in a REST run.
