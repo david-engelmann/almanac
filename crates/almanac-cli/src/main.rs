@@ -39,7 +39,8 @@ Commands
 Target a surface with --url https://host/mcp or with --command and
 the server command last. Sites are directories, --site DIR.
 Generate also takes --skill PATH for one SKILL.md, a repeatable
---openapi PATH for each JSON OpenAPI document the site announces,
+--openapi PATH for each OpenAPI document (JSON or YAML) the
+site announces,
 and a repeatable --agent-card PATH for each A2A agent card.
 Generate needs no target when it names documents, agent cards,
 or a skill instead: a REST only site is generated from those

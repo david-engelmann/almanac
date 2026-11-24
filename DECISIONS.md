@@ -1485,3 +1485,92 @@ refusal's record is narrowed to what the code
 enforces (naming nothing, not announcing nothing);
 and two test pins were added, a skill only REST run
 and the unmatched MCP block warning in a REST run.
+
+## Generation roadmap, seventh slice: YAML OpenAPI documents (design, 2026-11-24)
+
+The OpenAPI slice recorded its known limit: JSON
+documents only, though YAML is the format half the
+world's OpenAPI files are written in, and a YAML
+document failed generation with its reason named.
+This slice removes the limit. One parse helper reads
+a document as JSON first and then as YAML, converting
+YAML to the same JSON value the reduction consumes,
+so every downstream fact (operations, contract
+hashes, the baseline, the drift classes) is format
+blind. A document that parses as neither refuses with
+both reasons named. Detection is by content, not by
+file name: a YAML document named .json and a JSON
+document named .yaml both read as what they are.
+
+Three boundaries. The comparison story is unchanged
+from the first slice: the gate compares an OpenAPI
+document operation by operation, never byte by byte,
+and that is the whole promise for these documents.
+The entry digest and the baseline record the
+document's bytes as served at generation, in either
+format, but no check path compares them, so replacing
+a YAML document with its JSON twin (or any byte
+change the reduction does not cover) passes check
+silently, exactly as a reduction preserving edit to a
+JSON document always has. The entry's media type
+stays application/openapi+json: the catalog announces
+one API entry kind for one surface kind, and the
+format is a parse detail. And A2A agent cards stay
+JSON only: the agent card is a JSON document by its
+own specification, with no YAML form in circulation.
+The parse dependency is serde_yaml, in the CLI crate
+beside the other format readers, because YAML's
+anchors, aliases and scalar rules make a hand rolled
+parser a quiet source of misread documents, the same
+reasoning that put a real TOML parser in the tree;
+the core reduction stays untouched.
+
+As built: the one helper, parse_api_document, serves
+all three OpenAPI parse points (generate's planning,
+check's surface read, migrate's typed arm), and each
+site phrases the shared neither-format reason in its
+own sentence. The identifier stem drops whichever
+document suffix the file carries (.json, .yaml,
+.yml), so a document's identifier is format blind
+too: billing.json and billing.yaml are one API,
+announced once. A test generates from a YAML billing
+document (carrying an unquoted numeric response key
+and an anchored, aliased parameter, the two shapes
+real YAML documents have) and reads an operation
+removal back through the YAML parse at Major.
+
+### YAML checkpoint fix pass (2026-11-24)
+
+The three reviews landed clean on the plumbing (no
+Critical on any axis; the helper, its three routings
+and the A2A boundary verified) and found the record
+and two bounds wanting. The spec axis and the red
+team independently found the Major: the slice's
+digest boundary sentence claimed a gate report on a
+format swap that no check path delivers, because
+OpenAPI documents are deliberately not artifacts and
+their recorded hash is compared nowhere. The code is
+continuous with the first slice's recorded design, so
+the sentence is corrected above rather than the
+comparison wired. Also closed: the identifier stem
+now drops the YAML suffixes as well as .json (the
+spec axis caught the slice's own test asserting the
+format blind identifier the code did not yet
+produce); the helper caps the bytes at the probe's
+16 MiB and refuses a file holding more than one YAML
+document instead of reading its first document alone
+(the red team's truncation and expansion findings);
+the stale "not JSON" narration at check's read site
+is corrected. Recorded limits, accepted plainly:
+serde_yaml reads YAML 1.2 core scalars, so the YAML
+1.1 boolean spellings (yes, no, on, off) arrive as
+strings, and a parameter marked required: yes records
+as optional until the document is corrected to true,
+which the gate then reports as a required parameter
+added; unquoted numeric versions (openapi: 3.1,
+version: 1.0) refuse as unreadable fields rather than
+versions, so YAML authors quote version strings; and
+deeply nested YAML can still exhaust the reader
+inside the byte cap, a robustness limit that must be
+settled before remote artifact fetching makes these
+bytes network supplied.
