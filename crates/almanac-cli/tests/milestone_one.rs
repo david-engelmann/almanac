@@ -1011,7 +1011,7 @@ fn card_divergence_in_declared_mode() {
     // the diverging card is an enumerating one in the earlier
     // shape, missing its last tool.
     let card_path = site.join(".well-known/mcp/server-card.json");
-    let mut card = fixture_card(&url);
+    let mut card = fixture_card();
     card["tools"].as_array_mut().expect("tools").pop();
     std::fs::write(
         &card_path,
