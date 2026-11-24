@@ -31,6 +31,17 @@ pub struct SurfaceSnapshot {
     /// a later addition, named in docs/HTTP-TRANSPORT.md so its
     /// absence is a decision and not a surprise.
     pub stateless_shape: bool,
+    /// True when this snapshot's tool, resource and prompt
+    /// lists are the surface's own enumeration. A completed
+    /// live walk enumerates; a probe that stopped early, or
+    /// one answered with an authorization challenge, does
+    /// not. A snapshot built from a server card enumerates
+    /// only when the card carries a tools field, because a
+    /// card in the SEP-2127 Final shape lists no primitives
+    /// at all, and an unenumerated list is a different fact
+    /// from an empty one: comparisons that would read
+    /// absence as removal must not run on it.
+    pub capabilities_enumerated: bool,
     pub tools: Vec<ToolSurface>,
     /// Resource URIs, sorted by the probe.
     pub resources: Vec<String>,

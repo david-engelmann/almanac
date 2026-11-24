@@ -212,6 +212,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities_enumerated: true,
             tools: vec![ToolSurface {
                 name: "ping".into(),
                 description: "Ping the server.".into(),

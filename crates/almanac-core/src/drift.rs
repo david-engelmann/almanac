@@ -67,6 +67,12 @@ pub struct CardView {
     pub server_name: String,
     pub server_version: String,
     pub tools: Vec<String>,
+    /// False when the card carries no tools array, the
+    /// SEP-2127 Final shape. An unenumerated card is compared
+    /// at identity level only, because it never claimed to
+    /// list tools and reading the absence as an empty list
+    /// would report every recorded tool as vanished.
+    pub tools_enumerated: bool,
 }
 
 /// Everything a check run compares, gathered by the CLI.
@@ -737,31 +743,38 @@ fn check_card(
     findings: &mut Vec<Finding>,
 ) {
     let mcp = baseline.mcp.as_ref().expect("checked by caller");
-    let card_tools: std::collections::BTreeSet<&str> =
-        card.tools.iter().map(|t| t.as_str()).collect();
-    let recorded: std::collections::BTreeSet<&str> = mcp.tools.keys().map(|k| k.as_str()).collect();
-    if card_tools != recorded {
-        findings.push(finding(
-            Severity::Critical,
-            "card-divergence",
-            Some(&mcp.entry_id),
-            "the server card's tools differ from the baseline recorded at generation".into(),
-        ));
-    }
-    if let Some(entry) = published
-        .entries
-        .iter()
-        .find(|e| e.identifier == mcp.entry_id)
-    {
-        let announced: std::collections::BTreeSet<&str> =
-            entry.capabilities.iter().map(|c| c.as_str()).collect();
-        if card_tools != announced {
+    // The tool comparisons run only on a card that enumerates.
+    // A Final shape card carries no tools array, and comparing
+    // its silence against the recorded set would manufacture
+    // a divergence the card never stated.
+    if card.tools_enumerated {
+        let card_tools: std::collections::BTreeSet<&str> =
+            card.tools.iter().map(|t| t.as_str()).collect();
+        let recorded: std::collections::BTreeSet<&str> =
+            mcp.tools.keys().map(|k| k.as_str()).collect();
+        if card_tools != recorded {
             findings.push(finding(
                 Severity::Critical,
                 "card-divergence",
                 Some(&mcp.entry_id),
-                "the server card's tools differ from the tools the catalog announces".into(),
+                "the server card's tools differ from the baseline recorded at generation".into(),
             ));
+        }
+        if let Some(entry) = published
+            .entries
+            .iter()
+            .find(|e| e.identifier == mcp.entry_id)
+        {
+            let announced: std::collections::BTreeSet<&str> =
+                entry.capabilities.iter().map(|c| c.as_str()).collect();
+            if card_tools != announced {
+                findings.push(finding(
+                    Severity::Critical,
+                    "card-divergence",
+                    Some(&mcp.entry_id),
+                    "the server card's tools differ from the tools the catalog announces".into(),
+                ));
+            }
         }
     }
     if card.server_name != mcp.server_name || card.server_version != mcp.server_version {
@@ -1072,6 +1085,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities_enumerated: true,
             tools,
             resources: vec![],
             prompts: vec![],
@@ -1618,5 +1632,47 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "catalog-baseline-divergence");
         assert_eq!(findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn an_unenumerated_card_is_compared_at_identity_level_only() {
+        // The baseline records a tool the catalog announces.
+        // The card view names the same server and version but
+        // enumerates nothing, the SEP-2127 Final shape. Read
+        // as an empty tool list, it would diverge from both
+        // the baseline and the catalog; read as unenumerated,
+        // it must say nothing about tools at all. The same
+        // view marked enumerated must diverge, so the guard
+        // itself is what this test pins.
+        let cat = catalog();
+        let mut snap = snapshot(vec![ping()]);
+        snap.auth = AuthSurface::Protected(Box::new(crate::snapshot::ProtectedMetadata {
+            resource_metadata: None,
+            authorization_servers: vec![],
+        }));
+        let base = baseline_for(&snap);
+        let view = |enumerated: bool| CardView {
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            tools: vec![],
+            tools_enumerated: enumerated,
+        };
+        let card = view(false);
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&card);
+        let findings = check(&with);
+        assert!(
+            findings.iter().all(|f| f.kind != "card-divergence"),
+            "an unenumerated card must not diverge on tools, findings were {findings:?}"
+        );
+
+        let enumerated = view(true);
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&enumerated);
+        let findings = check(&with);
+        assert!(
+            findings.iter().any(|f| f.kind == "card-divergence"),
+            "an enumerated card with no tools must diverge from the recorded tool, findings were {findings:?}"
+        );
     }
 }

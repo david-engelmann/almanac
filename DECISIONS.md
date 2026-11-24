@@ -670,3 +670,114 @@ implement is answered method not found whatever the
 session state, the way a real framework dispatches; the
 list calls it exists to police are guarded exactly as
 before.
+
+## Card schema reconciliation (2026-11-24)
+
+Charge 1 put the card at both locations and recorded the
+shape as a follow-up. This slice closes it: the card
+almanac writes is now the SEP-2127 Final document, and
+every reader takes both shapes, because the cards already
+published across the ecosystem, including almanac's own
+earlier output, predate the Final.
+
+The Final shape, from the extension's schema and the
+cards publishers serve today: a $schema field naming
+https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json,
+a name in reverse DNS form with exactly one slash (the
+publisher's domain reversed, a slash, the server's name),
+a title, a version, a description of at most 100
+characters, and for a remote server a remotes array whose
+entries carry a type (streamable-http or sse), a url, and
+the supported protocol versions. No tools, no resources,
+no prompts: the Final leaves primitives out on purpose,
+because a static document cannot represent a set that
+changes with the caller. The schema leaves additional
+properties open, so a card could carry the old fields
+beside the new ones and still validate, but the text's
+must not is normative even where the schema is permissive,
+so almanac does not smuggle its legacy fields into a Final
+card.
+
+What generate and migrate write: the Final shape, from
+the probed snapshot. The name is the site domain reversed
+plus the server name, the description is the synthesized
+"The <name> MCP server." cut at 100 characters, and an
+HTTP target adds one remote naming the endpoint and the
+one protocol version the probe negotiated, because the
+card claims only what the probe observed. A stdio target
+has no remote to name, so its card carries identity alone.
+
+What the readers accept, in one shared reduction: a card
+is read as Final shaped when it carries the Final's own
+fields, a $schema field or a remotes array. The server
+name is the card's name field: for a Final card, what
+follows the first slash, since the form is a reversed
+domain, one slash, and then the server's name with any
+slashes of its own kept; for an earlier card, the name
+plainly, exactly as written. One remote is primary, the
+first streamable-http remote that names a url, else the
+first remote that names one, so the endpoint and the
+protocol version come from the same statement: the
+endpoint is the primary remote's url on a Final card,
+where remotes are authoritative, and the legacy endpoint
+field on an earlier one, each falling back to the other;
+the protocol version is the legacy protocolVersion field,
+or the primary remote's first supported version. Tools
+are read only when the card carries a tools field, and
+their absence is a fact of a different kind than an
+empty list.
+
+That last distinction is the slice's real consequence,
+and it is recorded plainly: a Final card declares identity
+and endpoints, never capabilities. Declared evidence mode
+therefore compares a Final card at identity level only;
+its tool comparisons are skipped, not run against an
+empty set, because running them would report every
+baselined tool as vanished from a card that never claimed
+to list tools. Protected generation from a Final card
+records the server's identity and announces no
+capabilities, and migration carries a protected entry's
+tool claims unverified, saying so, when the only card is
+a Final one. Capability evidence for protected surfaces
+is live evidence, which is the credential-aware probe's
+job, already named as the first post-launch enhancement.
+Legacy cards keep the full declared comparison, so
+publishers whose cards predate the Final lose nothing.
+
+### Card schema reconciliation checkpoint fix pass (2026-11-24)
+
+The three checkpoint reviews found no Critical and three
+Majors, all in the reduction's edges, all fixed before
+landing. The largest was in migration: an earlier gate
+that fails an MCP entry whose surface serves no tools ran
+before the gated judgment and was itself ungated, so a
+Final card's empty list failed the entry outright and
+dropped it, the exact outcome this slice exists to
+prevent; the gate now asks whether the surface was
+enumerated first. Beside it, enumeration itself was
+redefined on the field's presence rather than its shape:
+a tools field present but not an array is a corrupted
+statement and reduces to an empty list the comparisons
+fire on, where only a card with no tools field at all is
+unenumerated. The name reduction is keyed on the card's
+shape, because a legacy plain name containing a slash is
+the server's whole name while a Final name's first slash
+is the separator; the endpoint and protocol version now
+come from one primary remote, the first streamable-http
+remote naming a url, so a card listing an sse remote
+first no longer sends the probe to the wrong transport;
+the endpoint injection appends its remote instead of
+replacing the publisher's array; the card-versus-card
+disagreement warning compares tools against the live
+snapshot again, its original subject, since the new card
+lists none; and the writer strips a port or a trailing
+dot from the domain before reversing it into the
+published name. The guard the slice stands on is now
+pinned where it lives: a core test holds a baseline and
+a catalog that record a tool against an unenumerated
+card view and requires silence, then requires divergence
+from the same view marked enumerated, and the
+integration suite migrates against a Final card and
+regenerates a declared check over a tool-recording
+baseline, so deleting the guard or the migrate gate
+fails the suite.

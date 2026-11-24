@@ -146,39 +146,206 @@ fn snapshot_from_card(
     };
     let mut card: serde_json::Value = serde_json::from_slice(&raw)
         .map_err(|e| format!("the server card did not parse with {e}"))?;
+    let fields = card_fields(&card);
+    if fields.server_name.is_empty() {
+        return Err(
+            "the server card carries no name, so generation cannot record the surface".into(),
+        );
+    }
+    let snapshot = SurfaceSnapshot {
+        transport: probe_snapshot.transport.clone(),
+        server_name: fields.server_name,
+        server_version: fields.server_version,
+        stateless_shape: fields.protocol_version == "2026-07-28",
+        protocol_version: fields.protocol_version,
+        capabilities_enumerated: fields.tools.is_some(),
+        tools: fields.tools.unwrap_or_default(),
+        resources: fields.resources,
+        prompts: fields.prompts,
+        auth: probe_snapshot.auth.clone(),
+        failure: None,
+    };
+    // A card that names no endpoint leaves a later check with
+    // nothing to resolve, so the target the card was fetched
+    // for is written into the published copy, in the card's
+    // own shape: a remotes entry appended for a Final card,
+    // the endpoint field for an earlier one. Appending, never
+    // replacing, because a Final card's existing remotes are
+    // the publisher's own statements and the injection adds
+    // the one fact the card was missing.
+    let bytes = if fields.endpoint.is_none()
+        && let ProbeTarget::Http(url) = target
+    {
+        if final_shaped(&card) {
+            let remote = serde_json::json!({
+                "type": "streamable-http",
+                "url": url,
+            });
+            match card.get_mut("remotes") {
+                Some(serde_json::Value::Array(items)) => items.push(remote),
+                _ => card["remotes"] = serde_json::json!([remote]),
+            }
+        } else {
+            card["endpoint"] = serde_json::json!(url);
+        }
+        pretty_bytes(&card)
+    } else {
+        raw
+    };
+    Ok((snapshot, bytes, fields.description))
+}
+
+/// The normative server card location for a probe target, per
+/// SEP-2127 Final: the endpoint URL with /server-card appended.
+/// The well known path is the legacy location, still served
+/// beside it because major scanners still request it. A stdio
+/// target has no endpoint URL, so it has no normative location.
+fn normative_card_url_for(target: &ProbeTarget) -> Option<String> {
+    match target {
+        ProbeTarget::Http(url) => Some(crate::probe::normative_card_url(url)),
+        ProbeTarget::Stdio(_) => None,
+    }
+}
+
+/// A server card reduced to the fields the tool reads, from
+/// either shape a publisher may serve. The SEP-2127 Final
+/// shape names the server in reverse DNS form, carries its
+/// protocol versions and endpoint in a remotes array, and
+/// lists no tools. The earlier shape, which this tool's first
+/// versions wrote and publishers still serve, names the
+/// server plainly and carries its endpoint, protocol version
+/// and tools as top level fields. One reduction serves both,
+/// because dropping the earlier shape would blind the tool
+/// to the cards already published.
+struct CardFields {
+    server_name: String,
+    server_version: String,
+    protocol_version: String,
+    endpoint: Option<String>,
+    description: Option<String>,
+    /// The card's tools, when it carries a tools array. A
+    /// Final shape card carries none, and the absence is
+    /// recorded as such, never as an empty list.
+    tools: Option<Vec<ToolSurface>>,
+    resources: Vec<String>,
+    prompts: Vec<String>,
+}
+
+/// Whether a card is written in the SEP-2127 Final shape.
+/// The Final's own fields are the tell: a card carrying a
+/// $schema field or a remotes array speaks the Final, and a
+/// card carrying neither speaks the earlier shape.
+fn final_shaped(card: &serde_json::Value) -> bool {
+    card.get("$schema").is_some() || card.get("remotes").is_some()
+}
+
+fn card_fields(card: &serde_json::Value) -> CardFields {
     let text = |key: &str| {
         card.get(key)
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string()
     };
-    let server_name = text("name");
-    if server_name.is_empty() {
-        return Err(
-            "the server card carries no name, so generation cannot record the surface".into(),
-        );
-    }
-    let mut tools = Vec::new();
-    if let Some(items) = card.get("tools").and_then(|v| v.as_array()) {
-        for item in items {
-            tools.push(ToolSurface {
-                name: item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                description: item
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                input_schema: item
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({})),
-            });
+    // A Final name is the publisher's domain reversed, a
+    // slash, and the server's name, so the server's own name
+    // is what follows the first slash, slashes inside the
+    // server's name included. An earlier card's name is the
+    // server's name plainly, slashes and all, and reduces to
+    // itself. A Final name whose remainder is empty names no
+    // server, and reduces to empty so the caller hears it.
+    let raw_name = text("name");
+    let server_name = if final_shaped(card) {
+        match raw_name.split_once('/') {
+            Some((_, rest)) => rest.trim_end_matches('/').to_string(),
+            None => raw_name.clone(),
         }
-    }
+    } else {
+        raw_name.clone()
+    };
+    let remotes: Vec<serde_json::Value> = card
+        .get("remotes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // One remote is primary, so the endpoint and the protocol
+    // version come from the same statement: the first
+    // streamable-http remote that names a url, because that
+    // is the transport the probe speaks, else the first
+    // remote that names one, else the first remote.
+    let remote_url =
+        |r: &serde_json::Value| r.get("url").and_then(|v| v.as_str()).map(String::from);
+    let primary = remotes
+        .iter()
+        .find(|r| {
+            r.get("type").and_then(|v| v.as_str()) == Some("streamable-http")
+                && remote_url(r).is_some()
+        })
+        .or_else(|| remotes.iter().find(|r| remote_url(r).is_some()))
+        .or_else(|| remotes.first());
+    let first_remote_version = |r: &serde_json::Value| {
+        r.get("supportedProtocolVersions")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.first())
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    let remote_version = primary
+        .and_then(first_remote_version)
+        .or_else(|| remotes.iter().find_map(first_remote_version));
+    // A Final card's remotes are its authoritative endpoint
+    // statement, so they win over a stale legacy field the
+    // same document may still carry. An earlier card's own
+    // endpoint field wins, as it always has.
+    let legacy_endpoint = card
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let remote_endpoint = primary.and_then(remote_url);
+    let endpoint = if final_shaped(card) {
+        remote_endpoint.or(legacy_endpoint)
+    } else {
+        legacy_endpoint.or(remote_endpoint)
+    };
+    let protocol_version = {
+        let legacy = text("protocolVersion");
+        if !legacy.is_empty() {
+            legacy
+        } else {
+            remote_version.unwrap_or_default()
+        }
+    };
+    // Enumeration turns on the field's presence, not on its
+    // shape. A tools field that is present but not an array
+    // is a corrupted statement of the surface, and it reduces
+    // to an empty list so the comparisons fire on it, the way
+    // they did before this reduction existed. Only a card
+    // with no tools field at all is unenumerated.
+    let tools = card.get("tools").map(|value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| ToolSurface {
+                        name: item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        description: item
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        input_schema: item
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     let names = |key: &str, field: &str| -> Vec<String> {
         let mut out: Vec<String> = card
             .get(key)
@@ -197,72 +364,60 @@ fn snapshot_from_card(
         out.sort();
         out
     };
-    let protocol_version = text("protocolVersion");
     let description = text("description");
-    let snapshot = SurfaceSnapshot {
-        transport: probe_snapshot.transport.clone(),
+    CardFields {
         server_name,
         server_version: text("version"),
-        stateless_shape: protocol_version == "2026-07-28",
         protocol_version,
-        tools,
-        resources: names("resources", "uri"),
-        prompts: names("prompts", "name"),
-        auth: probe_snapshot.auth.clone(),
-        failure: None,
-    };
-    let bytes = if card.get("endpoint").is_none()
-        && let ProbeTarget::Http(url) = target
-    {
-        card["endpoint"] = serde_json::json!(url);
-        pretty_bytes(&card)
-    } else {
-        raw
-    };
-    Ok((
-        snapshot,
-        bytes,
-        if description.is_empty() {
+        endpoint,
+        description: if description.is_empty() {
             None
         } else {
             Some(description)
         },
-    ))
-}
-
-/// The normative server card location for a probe target, per
-/// SEP-2127 Final: the endpoint URL with /server-card appended.
-/// The well known path is the legacy location, still served
-/// beside it because major scanners still request it. A stdio
-/// target has no endpoint URL, so it has no normative location.
-fn normative_card_url_for(target: &ProbeTarget) -> Option<String> {
-    match target {
-        ProbeTarget::Http(url) => Some(crate::probe::normative_card_url(url)),
-        ProbeTarget::Stdio(_) => None,
+        tools,
+        resources: names("resources", "uri"),
+        prompts: names("prompts", "name"),
     }
 }
 
-/// The server card document for a probed surface, as a value.
-/// For an HTTP surface the card records the endpoint it was
-/// probed at, so a later check with no target named can resolve
-/// the endpoint from the catalog entry's card, the way
-/// docs/HTTP-TRANSPORT.md asks, instead of guessing.
-fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget) -> serde_json::Value {
+/// The server card document for a probed surface, as a value,
+/// in the SEP-2127 Final shape. The name is the site's domain
+/// reversed, a slash, and the server's name, the form the
+/// Final requires. An HTTP surface adds one remote naming the
+/// endpoint it was probed at and the protocol version the
+/// probe negotiated, so a later check with no target named
+/// can resolve the endpoint from the catalog entry's card,
+/// the way docs/HTTP-TRANSPORT.md asks, instead of guessing.
+/// The card lists no tools, because the Final leaves
+/// primitives to the live surface on purpose.
+fn card_value(snapshot: &SurfaceSnapshot, target: &ProbeTarget, domain: &str) -> serde_json::Value {
+    // The domain is a host name for this purpose: a port or a
+    // trailing dot in it would land in the published name,
+    // which must be a reverse DNS form and nothing else.
+    let host = domain.trim_end_matches('.');
+    let host = host.split(':').next().unwrap_or(host);
+    let reversed = host.split('.').rev().collect::<Vec<_>>().join(".");
+    let description: String = format!("The {} MCP server.", snapshot.server_name)
+        .chars()
+        .take(100)
+        .collect();
     let mut card = serde_json::json!({
-        "name": snapshot.server_name,
+        "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
+        "name": format!("{reversed}/{}", snapshot.server_name),
+        "title": snapshot.server_name,
         "version": snapshot.server_version,
-        "protocolVersion": snapshot.protocol_version,
-        "transport": snapshot.transport,
-        "tools": snapshot.tools.iter().map(|tool| serde_json::json!({
-            "name": tool.name,
-            "description": tool.description,
-            "inputSchema": tool.input_schema,
-        })).collect::<Vec<_>>(),
-        "resources": snapshot.resources,
-        "prompts": snapshot.prompts,
+        "description": description,
     });
     if let ProbeTarget::Http(url) = target {
-        card["endpoint"] = serde_json::json!(url);
+        let mut remote = serde_json::json!({
+            "type": "streamable-http",
+            "url": url,
+        });
+        if !snapshot.protocol_version.is_empty() {
+            remote["supportedProtocolVersions"] = serde_json::json!([snapshot.protocol_version]);
+        }
+        card["remotes"] = serde_json::json!([remote]);
     }
     card
 }
@@ -303,8 +458,8 @@ pub fn generate(
     let card_bytes = match &card_source {
         Some((bytes, _)) => bytes.clone(),
         None => {
-            let card = card_value(&snapshot, target);
-            warn_on_card_disagreement(site, &card);
+            let card = card_value(&snapshot, target, domain);
+            warn_on_card_disagreement(site, &card, &snapshot);
             pretty_bytes(&card)
         }
     };
@@ -601,44 +756,49 @@ fn valid_plain_name(name: &str) -> bool {
 /// already exists and disagrees with the surface on a shared
 /// field, the design record's precedence rules ask for a warning
 /// naming both values, not a silent overwrite.
-fn warn_on_card_disagreement(site: &Path, new_card: &serde_json::Value) {
+fn warn_on_card_disagreement(
+    site: &Path,
+    new_card: &serde_json::Value,
+    snapshot: &SurfaceSnapshot,
+) {
     let path = site.join(".well-known/mcp/server-card.json");
     let Ok(existing) = read_json::<serde_json::Value>(&path) else {
         return;
     };
-    for field in ["name", "version", "protocolVersion"] {
-        let old = existing
-            .get(field)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let new = new_card
-            .get(field)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if old != new {
+    // Identity is compared through the shared reduction, so an
+    // existing card in the earlier shape and the new card in
+    // the Final shape disagree only when the surface they
+    // describe actually differs, never on the shape itself.
+    // Tools are compared against the live snapshot, because
+    // the new card no longer lists any: the warning's subject
+    // was always the existing card against the live surface.
+    let old = card_fields(&existing);
+    let new = card_fields(new_card);
+    for (field, old_value, new_value) in [
+        ("name", &old.server_name, &new.server_name),
+        ("version", &old.server_version, &new.server_version),
+        (
+            "protocolVersion",
+            &old.protocol_version,
+            &new.protocol_version,
+        ),
+    ] {
+        if old_value != new_value {
             eprintln!(
-                "warning, the existing server card says {field} is {old}, the live surface says {new}"
+                "warning, the existing server card says {field} is {old_value}, the live surface says {new_value}"
             );
         }
     }
-    let names = |card: &serde_json::Value| -> Vec<String> {
-        card.get("tools")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let (old_tools, new_tools) = (names(&existing), names(new_card));
-    if old_tools != new_tools {
-        eprintln!(
-            "warning, the existing server card lists tools {}, the live surface serves {}",
-            old_tools.join(", "),
-            new_tools.join(", ")
-        );
+    if let Some(old_tools) = &old.tools {
+        let old_names: Vec<&str> = old_tools.iter().map(|t| t.name.as_str()).collect();
+        let new_names: Vec<&str> = snapshot.tools.iter().map(|t| t.name.as_str()).collect();
+        if old_names != new_names {
+            eprintln!(
+                "warning, the existing server card lists tools {}, the live surface serves {}",
+                old_names.join(", "),
+                new_names.join(", ")
+            );
+        }
     }
 }
 
@@ -768,8 +928,8 @@ fn resolve_target(site: &Path, published: &Catalog) -> Option<ProbeTarget> {
         .find(|e| e.media_type == "application/mcp-server-card+json")?;
     let card_path = url_to_path(site, &published.host.domain, entry.url.as_deref()?)?;
     let card = read_json::<serde_json::Value>(&card_path).ok()?;
-    let endpoint = card.get("endpoint")?.as_str()?;
-    Some(ProbeTarget::Http(endpoint.to_string()))
+    let endpoint = card_fields(&card).endpoint?;
+    Some(ProbeTarget::Http(endpoint))
 }
 
 /// Read the server card as the drift engine's declared evidence
@@ -781,28 +941,21 @@ fn read_card_view(site: &Path, published: &Catalog) -> Option<CardView> {
         .find(|e| e.media_type == "application/mcp-server-card+json")?;
     let card_path = url_to_path(site, &published.host.domain, entry.url.as_deref()?)?;
     let card = read_json::<serde_json::Value>(&card_path).ok()?;
-    let tools = card
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let fields = card_fields(&card);
     Some(CardView {
-        server_name: card
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        server_version: card
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        tools,
+        server_name: fields.server_name,
+        server_version: fields.server_version,
+        tools_enumerated: fields.tools.is_some(),
+        tools: fields
+            .tools
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -912,9 +1065,9 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
             && let Some(path) = url_to_path(site, &published.host.domain, url)
             && let Ok(bytes) = fs::read(&path)
             && let Ok(card) = serde_json::from_slice::<serde_json::Value>(&bytes)
-            && let Some(endpoint) = card.get("endpoint").and_then(|v| v.as_str())
+            && let Some(endpoint) = card_fields(&card).endpoint
         {
-            catalog_endpoints.push((entry.identifier.clone(), endpoint.to_string()));
+            catalog_endpoints.push((entry.identifier.clone(), endpoint));
         }
     }
     let (agents_json_endpoints, agents_json_broken) = read_agents_json(site);
@@ -1172,6 +1325,7 @@ pub fn migrate_site(
         None => pretty_bytes(&card_value(
             snap,
             probed_target.expect("a snapshot implies a target"),
+            &domain,
         )),
     });
 
@@ -1248,7 +1402,7 @@ pub fn migrate_site(
                     failed.push(migration_failure(id, &reason));
                     continue;
                 }
-                if snap.tools.is_empty() {
+                if snap.capabilities_enumerated && snap.tools.is_empty() {
                     failed.push(migration_failure(
                         id,
                         "the live surface serves no tools, so the announced server claim does not verify",
@@ -1273,7 +1427,7 @@ pub fn migrate_site(
                 if card_source.is_none()
                     && let Some(named) = probed_target
                 {
-                    warn_on_card_disagreement(site, &card_value(snap, named));
+                    warn_on_card_disagreement(site, &card_value(snap, named, &domain), snap);
                 }
                 // The capability and version claims are judged,
                 // not just noted. Each one that fails is a
@@ -1283,20 +1437,33 @@ pub fn migrate_site(
                 // real and dropping its entry would lose the
                 // publisher's listing entirely.
                 let live_names: Vec<String> = snap.tools.iter().map(|t| t.name.clone()).collect();
-                for name in &entry.capabilities {
-                    if !live_names.contains(name) {
-                        let reason = format!(
-                            "the entry announced {name}, which the surface no longer serves"
-                        );
-                        failed.push(migration_failure(id, &reason));
+                // The capability claims are judged only when the
+                // surface was enumerated. A protected surface read
+                // from a Final shape card declares identity alone,
+                // so its entry's tool claims have nothing to be
+                // judged against and carry unverified, noted here,
+                // rather than failing against an empty list.
+                if snap.capabilities_enumerated {
+                    for name in &entry.capabilities {
+                        if !live_names.contains(name) {
+                            let reason = format!(
+                                "the entry announced {name}, which the surface no longer serves"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                        }
                     }
-                }
-                for name in &live_names {
-                    if !entry.capabilities.contains(name) {
-                        let reason =
-                            format!("the surface serves {name}, which the entry never announced");
-                        failed.push(migration_failure(id, &reason));
+                    for name in &live_names {
+                        if !entry.capabilities.contains(name) {
+                            let reason = format!(
+                                "the surface serves {name}, which the entry never announced"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                        }
                     }
+                } else {
+                    notes.push(format!(
+                        "{id} announced tools the server card does not enumerate, so its tool claims were carried unverified"
+                    ));
                 }
                 if let Some(announced) = &entry.version
                     && *announced != snap.server_version
@@ -1310,7 +1477,11 @@ pub fn migrate_site(
                 let bytes = card_bytes.as_ref().expect("card bytes for the MCP entry");
                 let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
                 let mut kept = entry.clone();
-                kept.capabilities = live_names;
+                kept.capabilities = if snap.capabilities_enumerated {
+                    live_names
+                } else {
+                    entry.capabilities.clone()
+                };
                 if kept.url.as_deref() != Some(card_url.as_str()) {
                     notes.push(format!(
                         "{id} pointed at {}, and the migrated entry points at the server card the pair publishes",
@@ -1680,4 +1851,45 @@ fn report_validation(published: &Catalog, legacy: Option<&Catalog>) -> i32 {
         serde_json::to_string_pretty(&printed).expect("the report always serializes")
     );
     drift::exit_code(&report.findings, Severity::Major)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_generated_cards_description_is_cut_at_one_hundred_characters() {
+        // The Final caps a card description at 100 characters.
+        // A server with a long name must still produce a card
+        // inside the cap, so the synthesized description is
+        // cut, and this test fails if the cut is removed.
+        let snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "a".repeat(150),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec![],
+            prompts: vec![],
+            auth: AuthSurface::Open,
+            failure: None,
+        };
+        let card = card_value(
+            &snapshot,
+            &ProbeTarget::Stdio(vec!["server".into()]),
+            "example.com",
+        );
+        let description = card["description"].as_str().expect("description");
+        assert_eq!(
+            description.chars().count(),
+            100,
+            "description was {description}"
+        );
+        assert_eq!(
+            card["name"].as_str(),
+            Some(format!("com.example/{}", "a".repeat(150)).as_str())
+        );
+    }
 }
