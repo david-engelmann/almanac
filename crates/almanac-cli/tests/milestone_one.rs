@@ -2541,6 +2541,266 @@ fn repo_metadata_fills_an_openapi_description() {
 }
 
 #[test]
+fn publisher_config_overrides_editorial_fields() {
+    // Rule 4's first source: the host name, the MCP entry's
+    // display name, description, tags, and queries all come
+    // from almanac.toml when it names them, the generated
+    // card carries the configured title and description, a
+    // document entry takes its configured description and
+    // display name over its own document's words, and a
+    // block for an entry the run does not generate is warned
+    // on by name.
+    let src = temp_site("config-overrides-src");
+    let doc_path = src.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let site = temp_site("config-overrides");
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[host]\ndisplay_name = \"Configured Host\"\n\n[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\ndisplay_name = \"Configured Server\"\ndescription = \"Configured words.\"\ntags = [\"music\", \"booking\"]\nqueries = [\"Configured question one\", \"Configured question two\"]\n\n[[entries]]\nidentifier = \"urn:air:example.com:openapi:billing\"\ndisplay_name = \"Configured API\"\ndescription = \"Configured API words.\"\n\n[[entries]]\nidentifier = \"urn:air:example.com:mcp:absent\"\ndescription = \"Never applied.\"\n",
+    )
+    .expect("config written");
+    let clean = fixture_binary("fixture_server");
+    // No --name flag on this run: the flag outranks the
+    // config file in rule 4's order, so the shared helper,
+    // which passes one, would mask the behavior under test.
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--openapi",
+        &doc_path.to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(stderr.contains("had no effect"), "stderr was {stderr}");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    assert_eq!(
+        catalog["host"]["displayName"].as_str(),
+        Some("Configured Host"),
+        "catalog was {catalog}"
+    );
+    let entry = &catalog["entries"][0];
+    assert_eq!(
+        entry["displayName"].as_str(),
+        Some("Configured Server"),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        entry["description"].as_str(),
+        Some("Configured words."),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        entry["tags"],
+        serde_json::json!(["music", "booking"]),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        entry["representativeQueries"],
+        serde_json::json!(["Configured question one", "Configured question two"]),
+        "catalog was {catalog}"
+    );
+    let api = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["type"] == "application/openapi+json")
+        .expect("api entry");
+    assert_eq!(
+        api["displayName"].as_str(),
+        Some("Configured API"),
+        "catalog was {catalog}"
+    );
+    assert_eq!(
+        api["description"].as_str(),
+        Some("Configured API words."),
+        "catalog was {catalog}"
+    );
+    let card: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card"),
+    )
+    .expect("card parses");
+    assert_eq!(
+        card["description"].as_str(),
+        Some("Configured words."),
+        "card was {card}"
+    );
+    assert_eq!(
+        card["title"].as_str(),
+        Some("Configured Server"),
+        "card was {card}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn publisher_config_suppresses_entries() {
+    // Rule 1's recorded suppression: a suppressed entry is
+    // not announced and leaves no baseline records, the run
+    // notes it with its reason, and the gate stays clean.
+    let src = temp_site("config-suppress-src");
+    let doc_path = src.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let site = temp_site("config-suppress");
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[entries]]\nidentifier = \"urn:air:example.com:openapi:billing\"\nsuppress = \"The billing API is internal only.\"\n",
+    )
+    .expect("config written");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(
+        stderr.contains("The billing API is internal only."),
+        "stderr was {stderr}"
+    );
+    assert!(
+        !site.join("billing.json").exists(),
+        "a suppressed document must not be copied into the site"
+    );
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        !catalog_text.contains("application/openapi+json"),
+        "catalog was {catalog_text}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["openapi"],
+        serde_json::json!([]),
+        "baseline was {baseline}"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // Suppressing the MCP entry announces no server and
+    // writes no server card.
+    let site = temp_site("config-suppress-mcp");
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nsuppress = \"The server is being renamed.\"\n",
+    )
+    .expect("config written");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(
+        stderr.contains("The server is being renamed."),
+        "stderr was {stderr}"
+    );
+    let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
+    assert!(
+        !catalog_text.contains("mcp-server-card"),
+        "catalog was {catalog_text}"
+    );
+    assert!(
+        !site.join(".well-known/mcp/server-card.json").exists(),
+        "a suppressed server must not be published a card"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert!(baseline["mcp"].is_null(), "baseline was {baseline}");
+
+    // Suppressing a skill entry leaves no served file
+    // behind: check walks the site's skills directory, so a
+    // SKILL.md with no baseline record would read as an
+    // unannounced skill at Critical.
+    let skill_dir = temp_site("config-suppress-skill-src");
+    let skill_src = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_src,
+        "---\nname: guide\ndescription: A guide skill.\n---\n\nGuide the thing.\n",
+    )
+    .expect("skill file");
+    let site = temp_site("config-suppress-skill");
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[entries]]\nidentifier = \"urn:air:example.com:skill:guide\"\nsuppress = \"The guide is withdrawn.\"\n",
+    )
+    .expect("config written");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--skill",
+        &skill_src.to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(
+        stderr.contains("The guide is withdrawn."),
+        "stderr was {stderr}"
+    );
+    assert!(
+        !site.join("skills/guide/SKILL.md").exists(),
+        "a suppressed skill must not be served from the site"
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn publisher_config_errors_refuse_the_run() {
+    // Each malformed editorial block is a configuration
+    // error: the run does not start and no catalog is
+    // written, because every one of these shapes can only
+    // be a mistake about what the run would do.
+    let clean = fixture_binary("fixture_server");
+    for (name, config) in [
+        (
+            "duplicate",
+            "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\ndescription = \"One.\"\n\n[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\ndescription = \"Two.\"\n",
+        ),
+        (
+            "reasonless",
+            "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nsuppress = \"  \"\n",
+        ),
+        (
+            "both",
+            "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nsuppress = \"A reason.\"\ndescription = \"Also an override.\"\n",
+        ),
+        (
+            "no-identifier",
+            "[[entries]]\ndescription = \"No identifier at all.\"\n",
+        ),
+        (
+            "empty-queries",
+            "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nqueries = []\n",
+        ),
+    ] {
+        let site = temp_site(&format!("config-error-{name}"));
+        std::fs::write(site.join("almanac.toml"), config).expect("config written");
+        let (code, _, stderr) = run(&[
+            "generate",
+            "--site",
+            &site_arg(&site),
+            "--domain",
+            "example.com",
+            "--command",
+            &clean.to_string_lossy(),
+        ]);
+        assert_eq!(
+            code, 2,
+            "{name} config must refuse the run, stderr was {stderr}"
+        );
+        assert!(
+            !site.join(".well-known/ard.json").exists(),
+            "{name} config must not write a catalog"
+        );
+    }
+}
+
+#[test]
 fn migrate_records_a2a_baselines_and_judges_claims() {
     let site = temp_site("mig-a2a");
     std::fs::create_dir_all(site.join(".well-known")).expect("well known");

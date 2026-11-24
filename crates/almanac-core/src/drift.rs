@@ -50,6 +50,7 @@ fn finding(severity: Severity, kind: &str, entry: Option<&str>, detail: String) 
 /// suppression carries a reason and an expiry date, and an expired
 /// suppression stops working and reports itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Suppression {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
