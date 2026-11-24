@@ -1328,6 +1328,25 @@ helper shared by the rpc posts and the session
 DELETE; and the tokenless run's stderr assertion
 now also proves no refusal was reported. The
 standards axis's data clump note (the request
-context threading four layers) is accepted as the
-file's existing pattern, to be revisited if a
-fourth rider joins it.
+context threading four layers) is answered in the
+hosted gate fix pass below.
+
+### Credential-aware probe hosted gate fix pass (2026-11-24)
+
+Two hosted rounds, both in the lint layer, no
+product behavior changed. The first was an unused
+import: the walked-live predicate moved the
+credential comparison into the snapshot, so drift's
+library code no longer names the credential type
+and its crate level import moved into the tests
+module that names it. The second was the argument
+lint: threading the credential pushed the request
+helper and the list walk past seven arguments. The
+standards axis had flagged the same clump as a
+judgment call; the lint settled it, and the four
+riders every probe request carries (the endpoint
+URL, the session, the protocol version, the token)
+are now one Conversation value threaded through the
+entry walk, the ladder, the list walk, and each
+request, which is the bundling the review named as
+the natural fix.
