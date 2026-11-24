@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn reduction_rejects_duplicate_skill_ids() {
         let mut dup = card();
-        dup["skills"][1]["id"] = serde_json::json!("review-diff");
+        dup["skills"][0]["id"] = serde_json::json!("review-diff");
         let err = reduce_agent_card(&dup).expect_err("duplicates refuse");
         assert!(err.contains("review-diff"), "error was {err}");
     }

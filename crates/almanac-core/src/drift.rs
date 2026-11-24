@@ -1838,10 +1838,11 @@ mod tests {
         let findings = a2a_check(&cat, &base, doc);
         assert_eq!(
             kinds(&findings),
-            vec!["a2a-skill-description-changed", "a2a-skill-changed"],
+            vec!["a2a-skill-changed", "a2a-skill-description-changed"],
             "findings were {findings:?}"
         );
-        assert_eq!(findings[1].severity, Severity::Major);
+        assert_eq!(findings[0].severity, Severity::Major);
+        assert_eq!(findings[1].severity, Severity::Minor);
     }
 
     #[test]
