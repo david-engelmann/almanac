@@ -1006,10 +1006,12 @@ fn card_divergence_in_declared_mode() {
     assert_eq!(code, 0, "clean declared check failed with {stdout}");
 
     // A card that stops naming one of the baseline's tools is
-    // critical divergence in declared evidence mode.
+    // critical divergence in declared evidence mode. The
+    // published card is Final shaped and lists no tools, so
+    // the diverging card is an enumerating one in the earlier
+    // shape, missing its last tool.
     let card_path = site.join(".well-known/mcp/server-card.json");
-    let mut card: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&card_path).expect("card")).expect("card parses");
+    let mut card = fixture_card(&url);
     card["tools"].as_array_mut().expect("tools").pop();
     std::fs::write(
         &card_path,
@@ -1251,10 +1253,10 @@ fn protected_generation_from_a_final_card() {
             .expect("catalog parses");
     let entry = &catalog["entries"][0];
     assert!(
-        entry["capabilities"]
-            .as_array()
-            .expect("capabilities")
-            .is_empty(),
+        entry
+            .get("capabilities")
+            .and_then(|v| v.as_array())
+            .is_none_or(|items| items.is_empty()),
         "the entry announces no capabilities from an unenumerating card, catalog was {catalog}"
     );
 

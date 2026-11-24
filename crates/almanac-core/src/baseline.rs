@@ -64,8 +64,23 @@ pub struct McpBaseline {
     pub tools: BTreeMap<String, ToolBaseline>,
     pub resources: Vec<String>,
     pub prompts: Vec<String>,
+    /// True when the recorded tool, resource and prompt
+    /// lists are the surface's own enumeration. A baseline
+    /// recorded from a SEP-2127 Final shape server card
+    /// enumerates nothing, because the card lists no
+    /// primitives, and comparisons that would read the
+    /// empty record as a removal must not run against it.
+    /// Baselines written before this field existed were
+    /// recorded from probes and enumerating cards, so the
+    /// field defaults to true for them.
+    #[serde(default = "enumerated_by_default")]
+    pub capabilities_enumerated: bool,
     /// The auth posture at generation time, with metadata records.
     pub auth: AuthBaseline,
+}
+
+fn enumerated_by_default() -> bool {
+    true
 }
 
 /// One tool's recorded hashes.
@@ -194,6 +209,7 @@ impl McpBaseline {
             tools,
             resources: snapshot.resources.clone(),
             prompts: snapshot.prompts.clone(),
+            capabilities_enumerated: snapshot.capabilities_enumerated,
             auth: AuthBaseline::from(&snapshot.auth),
         }
     }

@@ -781,3 +781,27 @@ integration suite migrates against a Final card and
 regenerates a declared check over a tool-recording
 baseline, so deleting the guard or the migrate gate
 fails the suite.
+
+### Hosted gate fix pass (2026-11-24)
+
+The first hosted run of this slice's pull request failed
+three integration tests, and the failures were the
+slice's own blind spot: the enumeration distinction was
+recorded on the snapshot and the card view, but not on
+the baseline. A baseline recorded from a Final card
+holds no tool record, yet the catalog against baseline
+comparison, the card against baseline comparison, and
+the live primitive set comparisons all read its empty
+record as a removal, so a site generated or migrated
+from a Final card failed its own check. McpBaseline now
+records capabilities_enumerated from the snapshot that
+produced it, defaulting to true for baselines written
+before the field existed, and those three comparisons
+run only against a record that enumerated; identity and
+authentication compare either way. Two of the slice's
+tests also repaired their own premises: the declared
+mode divergence test now diverges an enumerating card in
+the earlier shape, since the published card no longer
+carries a tools array to edit, and the Final generation
+test reads an entry whose capabilities field is omitted
+when empty, as the catalog model has always written it.
