@@ -2100,7 +2100,7 @@ fn openapi_generate_variants() {
     let shipping = src.join("shipping.json");
     write_doc(&shipping, &shipping_doc);
     let site = temp_site("openapi-variants");
-    let (code, _, stderr) = run(&[
+    let (code, stdout, stderr) = run(&[
         "generate",
         "--site",
         &site_arg(&site),
@@ -2116,9 +2116,16 @@ fn openapi_generate_variants() {
         &clean.to_string_lossy(),
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
     assert!(
-        stderr.contains("no info description"),
-        "stderr was {stderr}"
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("no info description"))),
+        "report was {report}"
     );
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
@@ -2414,7 +2421,7 @@ fn repo_metadata_supplies_the_editorial_fallbacks() {
     let site = root.join("public");
     std::fs::create_dir_all(&site).expect("site dir");
     let clean = fixture_binary("fixture_server");
-    let (code, _, stderr) = run(&[
+    let (code, stdout, stderr) = run(&[
         "generate",
         "--site",
         &site_arg(&site),
@@ -2424,7 +2431,15 @@ fn repo_metadata_supplies_the_editorial_fallbacks() {
         &clean.to_string_lossy(),
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
-    assert!(stderr.contains("lowest confidence"), "stderr was {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert!(
+        report["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|n| n.as_str().is_some_and(|n| n.contains("lowest confidence"))),
+        "report was {report}"
+    );
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
             .expect("catalog parses");
@@ -2519,7 +2534,7 @@ fn repo_metadata_fills_an_openapi_description() {
     });
     write_doc(&site.join("billing.json"), &doc);
     let clean = fixture_binary("fixture_server");
-    let (code, _, stderr) = run(&[
+    let (code, stdout, stderr) = run(&[
         "generate",
         "--site",
         &site_arg(&site),
@@ -2533,9 +2548,16 @@ fn repo_metadata_fills_an_openapi_description() {
         &clean.to_string_lossy(),
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
     assert!(
-        !stderr.contains("carries no info description"),
-        "stderr was {stderr}"
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .all(|w| !w
+                .as_str()
+                .is_some_and(|w| w.contains("carries no info description"))),
+        "report was {report}"
     );
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
@@ -2576,7 +2598,7 @@ fn publisher_config_overrides_editorial_fields() {
     // No --name flag on this run: the flag outranks the
     // config file in rule 4's order, so the shared helper,
     // which passes one, would mask the behavior under test.
-    let (code, _, stderr) = run(&[
+    let (code, stdout, stderr) = run(&[
         "generate",
         "--site",
         &site_arg(&site),
@@ -2588,7 +2610,15 @@ fn publisher_config_overrides_editorial_fields() {
         &clean.to_string_lossy(),
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
-    assert!(stderr.contains("had no effect"), "stderr was {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("had no effect"))),
+        "report was {report}"
+    );
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
             .expect("catalog parses");
@@ -2655,8 +2685,9 @@ fn publisher_config_overrides_editorial_fields() {
 #[test]
 fn publisher_config_suppresses_entries() {
     // Rule 1's recorded suppression: a suppressed entry is
-    // not announced and leaves no baseline records, the run
-    // notes it with its reason, and the gate stays clean.
+    // not announced and leaves no baseline records, the
+    // generation report records it with its reason, and the
+    // gate stays clean.
     let src = temp_site("config-suppress-src");
     let doc_path = src.join("billing.json");
     write_doc(&doc_path, &billing_doc());
@@ -2667,11 +2698,17 @@ fn publisher_config_suppresses_entries() {
     )
     .expect("config written");
     let clean = fixture_binary("fixture_server");
-    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    let (code, stdout, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
     assert_eq!(code, 0, "generate failed with {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
     assert!(
-        stderr.contains("The billing API is internal only."),
-        "stderr was {stderr}"
+        report["suppressed"]
+            .as_array()
+            .expect("suppressed")
+            .iter()
+            .any(|s| s["entry"] == "urn:air:example.com:openapi:billing"
+                && s["reason"] == "The billing API is internal only."),
+        "report was {report}"
     );
     assert!(
         !site.join("billing.json").exists(),
@@ -2701,11 +2738,17 @@ fn publisher_config_suppresses_entries() {
         "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nsuppress = \"The server is being renamed.\"\n",
     )
     .expect("config written");
-    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    let (code, stdout, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
     assert_eq!(code, 0, "generate failed with {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
     assert!(
-        stderr.contains("The server is being renamed."),
-        "stderr was {stderr}"
+        report["suppressed"]
+            .as_array()
+            .expect("suppressed")
+            .iter()
+            .any(|s| s["entry"] == "urn:air:example.com:mcp:telorama"
+                && s["reason"] == "The server is being renamed."),
+        "report was {report}"
     );
     let catalog_text = std::fs::read_to_string(site.join(".well-known/ard.json")).expect("catalog");
     assert!(
@@ -2738,7 +2781,7 @@ fn publisher_config_suppresses_entries() {
         "[[entries]]\nidentifier = \"urn:air:example.com:skill:guide\"\nsuppress = \"The guide is withdrawn.\"\n",
     )
     .expect("config written");
-    let (code, _, stderr) = run(&[
+    let (code, stdout, stderr) = run(&[
         "generate",
         "--site",
         &site_arg(&site),
@@ -2750,9 +2793,15 @@ fn publisher_config_suppresses_entries() {
         &clean.to_string_lossy(),
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
     assert!(
-        stderr.contains("The guide is withdrawn."),
-        "stderr was {stderr}"
+        report["suppressed"]
+            .as_array()
+            .expect("suppressed")
+            .iter()
+            .any(|s| s["entry"] == "urn:air:example.com:skill:guide"
+                && s["reason"] == "The guide is withdrawn."),
+        "report was {report}"
     );
     assert!(
         !site.join("skills/guide/SKILL.md").exists(),
@@ -3151,6 +3200,111 @@ fn stdio_discover_first_stateless() {
     assert_eq!(baseline["mcp"]["protocol_version"], "2026-07-28");
     let (code, stdout, _) = check_stdio(&site, &server);
     assert_eq!(code, 0, "clean check failed with {stdout}");
+}
+
+#[test]
+fn generate_prints_the_full_report() {
+    // The full generation report: one JSON document on
+    // stdout naming the entries with their provenance,
+    // the files written, and the run's notes, with
+    // nothing scattered across stderr.
+    let site = temp_site("generation-report");
+    let skill_dir = temp_site("generation-report-skill");
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: guide\ndescription: A guide skill.\n---\n\nGuide the thing.\n",
+    )
+    .expect("skill file");
+    let clean = fixture_binary("fixture_server");
+    let (code, stdout, stderr) = generate_stdio_with_skill(&site, &clean, &skill_file);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(stderr.is_empty(), "stderr was {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert_eq!(report["mode"], "generate", "report was {report}");
+    assert_eq!(report["host"], "Example", "report was {report}");
+    assert_eq!(report["domain"], "example.com", "report was {report}");
+    let entries = report["entries"].as_array().expect("entries");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["entry"] == "urn:air:example.com:mcp:telorama"
+                && e["type"] == "application/mcp-server-card+json"
+                && e["provenance"] == "live-probe"),
+        "report was {report}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["entry"] == "urn:air:example.com:skill:guide"
+                && e["type"] == "text/markdown"
+                && e["provenance"] == "skill-file"),
+        "report was {report}"
+    );
+    let files: Vec<&str> = report["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f.as_str().expect("file name"))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ".well-known/mcp/server-card.json",
+            "skills/guide/SKILL.md",
+            ".well-known/ard.json",
+            ".well-known/ai-catalog.json",
+            "baseline.json",
+        ],
+        "files must be exact and in write order, report was {report}"
+    );
+    assert_eq!(
+        report["removed"],
+        serde_json::json!([]),
+        "report was {report}"
+    );
+    assert_eq!(
+        report["suppressed"],
+        serde_json::json!([]),
+        "report was {report}"
+    );
+    assert!(
+        report["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|n| n.as_str().is_some_and(|n| n.contains("legacy path"))),
+        "report was {report}"
+    );
+}
+
+#[test]
+fn generate_report_collects_the_config_warnings() {
+    // The config validator's own warnings (a query count
+    // outside the draft's two to five, here) are generation
+    // warnings like any other: they land in the report and
+    // nothing prints to stderr.
+    let site = temp_site("generation-report-config");
+    std::fs::write(
+        site.join("almanac.toml"),
+        "[[entries]]\nidentifier = \"urn:air:example.com:mcp:telorama\"\nqueries = [\"Ask once\"]\n",
+    )
+    .expect("config written");
+    let clean = fixture_binary("fixture_server");
+    let (code, stdout, stderr) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    assert!(stderr.is_empty(), "stderr was {stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("report parses");
+    assert!(
+        report["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("configures 1 representative queries"))),
+        "report was {report}"
+    );
 }
 
 #[test]

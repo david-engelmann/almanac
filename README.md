@@ -43,7 +43,11 @@ Generation is the on-ramp. The gate is the product.
   a recorded reason. Where no stronger source names the
   host or describes an entry, the repo's own manifests
   supply the words as the lowest confidence editorial
-  source, flagged in the run's notes.
+  source, flagged in the run's notes. The run ends by
+  printing a generation report naming the entries it
+  announced and which input produced each one, the files
+  it wrote, the entries it suppressed with their
+  reasons, and every note and warning the run produced.
 - validate checks a catalog beyond schema, covering URN anchoring,
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.

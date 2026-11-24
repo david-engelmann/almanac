@@ -1350,3 +1350,85 @@ are now one Conversation value threaded through the
 entry walk, the ladder, the list walk, and each
 request, which is the bundling the review named as
 the natural fix.
+
+## Generation roadmap, fifth slice: the full generation report (2026-11-24)
+
+The roadmap's last generation item. What the record
+has called the generation report so far is the run's
+stderr notes, in the metadata slice's own words, a
+partial thing: the notes were collected, but the
+warnings printed at the point of occurrence, the
+suppressions rode inside note strings, and the run
+named neither the entries it wrote nor the files it
+touched. Check prints a structured report and
+migrate prints a structured report; generate printed
+one stdout line and scattered the rest across
+stderr. The full report completes the pattern.
+
+Generate now ends a successful run by printing one
+JSON report on stdout, in the same outer shape as
+check's (the mode first, then the fields). It
+carries the host display name and the domain; the
+entries written, each with its identifier, its media
+type, and the provenance the baseline records for it
+(produced_by); the files written, as site relative
+paths in write order (the server card copies, a
+skill file copy, the catalog pair, any document
+copies, the baseline); the files a suppression
+removed; the suppressed entries as identifier and
+reason pairs; and the run's notes and warnings as
+two lists. Every note and warning the
+run produces is collected into the report, including
+the ones that used to print at the point of
+occurrence (the protected card keeping its own
+words, the off origin endpoint's well known only
+card, the unmatched config blocks, the document
+description fallbacks), and a successful run prints
+nothing to stderr. The suppression note strings are
+retired; the structured pairs carry the same facts.
+The main function's own written-under line is
+retired with them; the report is the run's output.
+
+Two boundaries. A refused run prints no report, as
+before: the refusal is the error, on stderr, exit 2.
+And the report is a run record, not a site artifact:
+it is printed, never written into the site, because
+the baseline is the committed record of a generation
+and a second record beside it would be a second
+source of truth. Tests that asserted on generate's
+stderr now read the report's fields, which is the
+sharper assertion in each case: a suppressed entry's
+reason is a field, not a substring of prose.
+
+As built: the card disagreement helper returns its
+warnings instead of printing them, so generate
+collects them and migrate, its other caller, prints
+them as it always did. The note strings lose their
+presentation prefix in the report, since the field
+is the framing now. A new end to end test pins the
+report's shape on a run with a skill: the mode, the
+domain, both entries with their provenance, the five
+files, the empty suppression list, the legacy path
+note, and an empty stderr.
+
+### Generation report checkpoint fix pass (2026-11-24)
+
+All three reviews found the same Major, and it was
+the slice's headline claim: the config validator's
+two warnings (a query count outside two to five,
+duplicate values in a block) still printed to stderr
+and never reached the report, because the validator
+had no channel to it. The validator now returns its
+warnings and generate seeds the report's list with
+them, pinned by a test whose run carries such a
+config. Further closures: the report also records
+the files a suppression removed (a suppressed
+server's card copies, a suppressed skill's stale
+served copy), each recorded only when the removal
+actually happened; the written paths are derived
+from the write sites' own path values rather than
+repeated as literals; the report test asserts the
+host and the exact files list in write order; a
+missing provenance record would read "unrecorded"
+rather than an empty string; and the report's print
+follows the sibling reports' serialization idiom.

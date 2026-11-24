@@ -489,17 +489,60 @@ fn read_repo_metadata(site: &Path) -> RepoMetadata {
 
 /// The low confidence flag for one use of repo metadata
 /// words, in the generation report's note form. The notes
-/// are collected during the run and printed only once the
-/// catalog is about to be written, so a run that refuses
-/// never claims words for a catalog that does not exist.
+/// are collected during the run and printed only in the
+/// report at its end, so a run that refuses never claims
+/// words for a catalog that does not exist.
 fn metadata_note(what: &str, source: &str) -> String {
-    format!("note, {what} from repo metadata in {source}, the lowest confidence editorial source")
+    format!("{what} from repo metadata in {source}, the lowest confidence editorial source")
 }
 
-/// The note a suppressed entry leaves in the generation
-/// report, naming the entry and the recorded reason.
-fn suppression_note(identifier: &str, reason: &str) -> String {
-    format!("note, {identifier} is suppressed in almanac.toml and is not announced: {reason}")
+/// A written file's path as the generation report
+/// names it: relative to the site root, with forward
+/// slashes. A path outside the site (which the write
+/// sites never produce) falls back to its full form.
+fn relative_to_site(site: &Path, path: &Path) -> String {
+    match path.strip_prefix(site) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// One entry in the generation report: what was
+/// announced, and which input produced it.
+#[derive(Serialize)]
+struct GeneratedEntry {
+    entry: String,
+    #[serde(rename = "type")]
+    media_type: String,
+    provenance: String,
+}
+
+/// One suppressed entry in the generation report: the
+/// identifier config named and the reason it recorded.
+#[derive(Serialize)]
+struct SuppressedEntry {
+    entry: String,
+    reason: String,
+}
+
+/// The full generation report, printed on stdout at the
+/// end of a successful run: the entries announced with
+/// their provenance, the files written, the entries
+/// suppressed, and every note and warning the run
+/// produced, collected rather than scattered across
+/// stderr. The baseline is the committed record of the
+/// run; this report is its run-time account.
+#[derive(Serialize)]
+struct GenerationReport {
+    mode: &'static str,
+    host: String,
+    domain: String,
+    entries: Vec<GeneratedEntry>,
+    files: Vec<String>,
+    removed: Vec<String>,
+    suppressed: Vec<SuppressedEntry>,
+    notes: Vec<String>,
+    warnings: Vec<String>,
 }
 
 /// The generate command. Probes the live surface, writes the dual
@@ -521,7 +564,7 @@ pub fn generate(
     // and validated before the probe runs, so a configuration
     // error refuses the run without spending a probe on it.
     let config = load_config(site)?;
-    validate_entry_blocks(&config)?;
+    let config_warnings = validate_entry_blocks(&config)?;
     let probe_snapshot = run_probe(target, token);
     if let Some(failure) = &probe_snapshot.failure {
         return Err(format!(
@@ -534,6 +577,10 @@ pub fn generate(
     // entry description no stronger source supplies.
     let metadata = read_repo_metadata(site);
     let mut notes: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = config_warnings;
+    let mut suppressed: Vec<SuppressedEntry> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     let display_name: String = match display_name {
         Some(name) => name.to_string(),
         None => match config
@@ -578,17 +625,21 @@ pub fn generate(
     let mcp_block = entry_block(&config, &entry_id);
     let mcp_suppressed = mcp_block.and_then(|block| block.suppress.as_deref());
     if let Some(reason) = mcp_suppressed {
-        notes.push(suppression_note(&entry_id, reason));
+        suppressed.push(SuppressedEntry {
+            entry: entry_id.clone(),
+            reason: reason.to_string(),
+        });
     }
     if card_source.is_some()
         && mcp_suppressed.is_none()
         && mcp_block
             .is_some_and(|block| block.description.is_some() || block.display_name.is_some())
     {
-        eprintln!(
-            "warning, almanac.toml overrides the MCP entry's editorial fields, but the surface \
+        warnings.push(
+            "almanac.toml overrides the MCP entry's editorial fields, but the surface \
              is protected and its existing server card is republished unchanged, so the card \
              keeps its own words"
+                .into(),
         );
     }
     // The entry's description is resolved before the card is
@@ -633,14 +684,16 @@ pub fn generate(
                     Some(&mcp_description),
                     Some(&mcp_display_name),
                 );
-                warn_on_card_disagreement(site, &card, &snapshot);
+                warnings.extend(warn_on_card_disagreement(site, &card, &snapshot));
                 pretty_bytes(&card)
             }
         }
     };
     let card_url = format!("https://{domain}/.well-known/mcp/server-card.json");
     if mcp_suppressed.is_none() {
-        write_file(&site.join(".well-known/mcp/server-card.json"), &card_bytes)?;
+        let card_path = site.join(".well-known/mcp/server-card.json");
+        write_file(&card_path, &card_bytes)?;
+        written.push(relative_to_site(site, &card_path));
     }
     // The normative copy, at the endpoint's own path, when the
     // endpoint lives on this site's origin. Identical bytes, so
@@ -651,27 +704,35 @@ pub fn generate(
     if mcp_suppressed.is_none() {
         if let Some((_, path)) = &normative_card {
             write_file(path, &card_bytes)?;
+            written.push(relative_to_site(site, path));
         }
         if matches!(target, ProbeTarget::Http(_)) && normative_card.is_none() {
-            eprintln!(
-                "warning, the endpoint is not on the site's origin, so the server card \
+            warnings.push(
+                "the endpoint is not on the site's origin, so the server card \
                  is published at the well known path only"
+                    .into(),
             );
         }
     }
     if mcp_suppressed.is_some() {
         if card_source.is_some() {
-            eprintln!(
-                "warning, the surface is protected, so its existing server card remains \
+            warnings.push(
+                "the surface is protected, so its existing server card remains \
                  published; suppressing the entry silences the catalog only"
+                    .into(),
             );
         } else {
             // The card on an open surface is one almanac itself
             // generated, so a suppressed server does not stay
             // discoverable through copies an earlier run wrote.
-            let _ = fs::remove_file(site.join(".well-known/mcp/server-card.json"));
-            if let Some((_, path)) = &normative_card {
-                let _ = fs::remove_file(path);
+            let card_path = site.join(".well-known/mcp/server-card.json");
+            if fs::remove_file(&card_path).is_ok() {
+                removed.push(relative_to_site(site, &card_path));
+            }
+            if let Some((_, path)) = &normative_card
+                && fs::remove_file(path).is_ok()
+            {
+                removed.push(relative_to_site(site, path));
             }
         }
     }
@@ -753,15 +814,22 @@ pub fn generate(
         let skill_suppressed =
             entry_block(&config, &skill_id).and_then(|block| block.suppress.as_deref());
         if let Some(reason) = skill_suppressed {
-            notes.push(suppression_note(&skill_id, reason));
+            suppressed.push(SuppressedEntry {
+                entry: skill_id.clone(),
+                reason: reason.to_string(),
+            });
             matched.insert(skill_id.clone());
             let dest = site.join(format!("skills/{name}/SKILL.md"));
-            if skill_path.canonicalize().ok() != dest.canonicalize().ok() {
-                let _ = fs::remove_file(&dest);
+            if skill_path.canonicalize().ok() != dest.canonicalize().ok()
+                && fs::remove_file(&dest).is_ok()
+            {
+                removed.push(relative_to_site(site, &dest));
             }
         }
         if skill_suppressed.is_none() {
-            write_file(&site.join(format!("skills/{name}/SKILL.md")), &bytes)?;
+            let skill_dest = site.join(format!("skills/{name}/SKILL.md"));
+            write_file(&skill_dest, &bytes)?;
+            written.push(relative_to_site(site, &skill_dest));
             entries.push(Entry {
                 identifier: skill_id.clone(),
                 display_name: name.clone(),
@@ -910,7 +978,10 @@ pub fn generate(
         if let Some(reason) =
             entry_block(&config, &plan.api_id).and_then(|block| block.suppress.as_deref())
         {
-            notes.push(suppression_note(&plan.api_id, reason));
+            suppressed.push(SuppressedEntry {
+                entry: plan.api_id.clone(),
+                reason: reason.to_string(),
+            });
             matched.insert(plan.api_id.clone());
             continue;
         }
@@ -932,10 +1003,10 @@ pub fn generate(
                         description.clone()
                     }
                     _ => {
-                        eprintln!(
-                            "warning, {} carries no info description, so the entry announces its title as its description",
+                        warnings.push(format!(
+                            "{} carries no info description, so the entry announces its title as its description",
                             plan.source
-                        );
+                        ));
                         plan.view.title.clone()
                     }
                 },
@@ -1078,7 +1149,10 @@ pub fn generate(
         if let Some(reason) =
             entry_block(&config, &plan.card_id).and_then(|block| block.suppress.as_deref())
         {
-            notes.push(suppression_note(&plan.card_id, reason));
+            suppressed.push(SuppressedEntry {
+                entry: plan.card_id.clone(),
+                reason: reason.to_string(),
+            });
             matched.insert(plan.card_id.clone());
             continue;
         }
@@ -1100,10 +1174,10 @@ pub fn generate(
                         description.clone()
                     }
                     _ => {
-                        eprintln!(
-                            "warning, {} carries no description, so the entry announces its name as its description",
+                        warnings.push(format!(
+                            "{} carries no description, so the entry announces its name as its description",
                             plan.source
-                        );
+                        ));
                         plan.view.name.clone()
                     }
                 },
@@ -1180,10 +1254,10 @@ pub fn generate(
     }
     for block in &config.entries {
         if !matched.contains(block.identifier.as_str()) {
-            eprintln!(
-                "warning, almanac.toml configures {}, which this run did not generate, so the block had no effect",
+            warnings.push(format!(
+                "almanac.toml configures {}, which this run did not generate, so the block had no effect",
                 block.identifier
-            );
+            ));
         }
     }
 
@@ -1194,16 +1268,18 @@ pub fn generate(
         },
         entries,
     };
-    for note in &notes {
-        eprintln!("{note}");
-    }
-    let catalog_bytes = catalog.canonical_bytes();
-    write_file(&site.join(".well-known/ard.json"), &catalog_bytes)?;
-    write_file(&site.join(".well-known/ai-catalog.json"), &catalog_bytes)?;
-    eprintln!(
-        "note, ai-catalog.json is written beside ard.json for the readers still on the \
+    notes.push(
+        "ai-catalog.json is written beside ard.json for the readers still on the \
          legacy path, and almanac never removes the legacy path on its own"
+            .into(),
     );
+    let catalog_bytes = catalog.canonical_bytes();
+    let ard_path = site.join(".well-known/ard.json");
+    write_file(&ard_path, &catalog_bytes)?;
+    written.push(relative_to_site(site, &ard_path));
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    write_file(&legacy_path, &catalog_bytes)?;
+    written.push(relative_to_site(site, &legacy_path));
 
     let baseline = Baseline {
         spec_version: SPEC_VERSION.into(),
@@ -1218,8 +1294,40 @@ pub fn generate(
     // and planned and the run past every refusal.
     for (dest, bytes) in &pending_copies {
         write_file(dest, bytes)?;
+        written.push(relative_to_site(site, dest));
     }
-    write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;
+    let baseline_path = site.join("baseline.json");
+    write_file(&baseline_path, &pretty_bytes(&baseline))?;
+    written.push(relative_to_site(site, &baseline_path));
+
+    let report = GenerationReport {
+        mode: "generate",
+        host: catalog.host.display_name.clone(),
+        domain: domain.to_string(),
+        entries: catalog
+            .entries
+            .iter()
+            .map(|entry| GeneratedEntry {
+                entry: entry.identifier.clone(),
+                media_type: entry.media_type.clone(),
+                provenance: baseline
+                    .provenance
+                    .iter()
+                    .find(|record| record.entry_id == entry.identifier)
+                    .map(|record| record.produced_by.clone())
+                    .unwrap_or_else(|| "unrecorded".into()),
+            })
+            .collect(),
+        files: written,
+        removed,
+        suppressed,
+        notes,
+        warnings,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("the report always serializes")
+    );
     Ok(())
 }
 
@@ -1240,10 +1348,11 @@ fn warn_on_card_disagreement(
     site: &Path,
     new_card: &serde_json::Value,
     snapshot: &SurfaceSnapshot,
-) {
+) -> Vec<String> {
+    let mut warnings = Vec::new();
     let path = site.join(".well-known/mcp/server-card.json");
     let Ok(existing) = read_json::<serde_json::Value>(&path) else {
-        return;
+        return warnings;
     };
     // Identity is compared through the shared reduction, so an
     // existing card in the earlier shape and the new card in
@@ -1264,22 +1373,23 @@ fn warn_on_card_disagreement(
         ),
     ] {
         if old_value != new_value {
-            eprintln!(
-                "warning, the existing server card says {field} is {old_value}, the live surface says {new_value}"
-            );
+            warnings.push(format!(
+                "the existing server card says {field} is {old_value}, the live surface says {new_value}"
+            ));
         }
     }
     if let Some(old_tools) = &old.tools {
         let old_names: Vec<&str> = old_tools.iter().map(|t| t.name.as_str()).collect();
         let new_names: Vec<&str> = snapshot.tools.iter().map(|t| t.name.as_str()).collect();
         if old_names != new_names {
-            eprintln!(
-                "warning, the existing server card lists tools {}, the live surface serves {}",
+            warnings.push(format!(
+                "the existing server card lists tools {}, the live surface serves {}",
                 old_names.join(", "),
                 new_names.join(", ")
-            );
+            ));
         }
     }
+    warnings
 }
 
 /// The publisher's configuration file, almanac.toml at the site
@@ -1401,8 +1511,12 @@ fn load_suppressions(site: &Path) -> Result<Vec<Suppression>, String> {
 /// no identifier, an empty queries list, a suppression
 /// without a reason, and a block that both suppresses and
 /// overrides are configuration errors, because each can only
-/// be a mistake about what the run will do.
-fn validate_entry_blocks(config: &AlmanacConfig) -> Result<(), String> {
+/// be a mistake about what the run will do. The softer
+/// findings (a query count outside the draft's two to five,
+/// duplicate values within a block) are returned as the
+/// run's first warnings, for the generation report.
+fn validate_entry_blocks(config: &AlmanacConfig) -> Result<Vec<String>, String> {
+    let mut warnings: Vec<String> = Vec::new();
     if let Some(name) = config
         .host
         .as_ref()
@@ -1466,25 +1580,25 @@ fn validate_entry_blocks(config: &AlmanacConfig) -> Result<(), String> {
         if let Some(queries) = &block.queries
             && !(2..=5).contains(&queries.len())
         {
-            eprintln!(
-                "warning, almanac.toml configures {} representative queries for {}, and the draft asks for two to five",
+            warnings.push(format!(
+                "almanac.toml configures {} representative queries for {}, and the draft asks for two to five",
                 queries.len(),
                 block.identifier
-            );
+            ));
         }
         for (field, values) in [("queries", &block.queries), ("tags", &block.tags)] {
             if let Some(values) = values {
                 let mut unique: std::collections::HashSet<&str> = std::collections::HashSet::new();
                 if values.iter().any(|value| !unique.insert(value.as_str())) {
-                    eprintln!(
-                        "warning, almanac.toml configures duplicate {field} for {}, and the duplicates are published as written",
+                    warnings.push(format!(
+                        "almanac.toml configures duplicate {field} for {}, and the duplicates are published as written",
                         block.identifier
-                    );
+                    ));
                 }
             }
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn valid_iso_date(text: &str) -> bool {
@@ -2099,11 +2213,13 @@ pub fn migrate_site(
                 if card_source.is_none()
                     && let Some(named) = probed_target
                 {
-                    warn_on_card_disagreement(
+                    for warning in warn_on_card_disagreement(
                         site,
                         &card_value(snap, named, &domain, None, None),
                         snap,
-                    );
+                    ) {
+                        eprintln!("warning, {warning}");
+                    }
                 }
                 // The capability and version claims are judged,
                 // not just noted. Each one that fails is a
