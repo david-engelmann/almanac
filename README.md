@@ -34,7 +34,10 @@ Generation is the on-ramp. The gate is the product.
   recorded alongside. OpenAPI documents the site serves are
   announced as API entries, and A2A agent cards as agent
   entries, and the baseline records their operations and
-  skills so check can compare them fact by fact.
+  skills so check can compare them fact by fact. Where no
+  stronger source names the host or describes an entry,
+  the repo's own manifests supply the words as the lowest
+  confidence editorial source, flagged in the run's notes.
 - validate checks a catalog beyond schema, covering URN anchoring,
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.

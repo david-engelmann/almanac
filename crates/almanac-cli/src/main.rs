@@ -139,7 +139,6 @@ fn run() -> Result<i32, String> {
                 .domain
                 .as_deref()
                 .ok_or("--domain is required for generate")?;
-            let name = flags.name.as_deref().unwrap_or(domain);
             let target =
                 target(&flags)?.ok_or("generate needs a surface target, --url or --command")?;
             let skill = flags.skill.as_deref().map(PathBuf::from);
@@ -148,7 +147,7 @@ fn run() -> Result<i32, String> {
             site::generate(
                 &site,
                 domain,
-                name,
+                flags.name.as_deref(),
                 &target,
                 skill.as_deref(),
                 &openapi,

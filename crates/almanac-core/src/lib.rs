@@ -18,6 +18,7 @@ pub mod baseline;
 pub mod catalog;
 pub mod drift;
 pub mod hash;
+pub mod metadata;
 pub mod openapi;
 pub mod snapshot;
 pub mod validate;
