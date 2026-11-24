@@ -13,6 +13,7 @@
 //! time and the live surface probed at check time, and classifies
 //! every divergence by the severity defined here.
 
+pub mod a2a;
 pub mod baseline;
 pub mod catalog;
 pub mod drift;

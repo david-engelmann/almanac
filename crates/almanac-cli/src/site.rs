@@ -15,8 +15,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use almanac_core::Severity;
+use almanac_core::a2a::{A2aView, reduce_agent_card};
 use almanac_core::baseline::{
-    ArtifactBaseline, Baseline, EntryProvenance, McpBaseline, OpenApiBaseline, SkillBaseline,
+    A2aBaseline, ArtifactBaseline, Baseline, EntryProvenance, McpBaseline, OpenApiBaseline,
+    SkillBaseline,
 };
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
@@ -433,6 +435,7 @@ pub fn generate(
     target: &ProbeTarget,
     skill_path: Option<&Path>,
     openapi_paths: &[PathBuf],
+    agent_card_paths: &[PathBuf],
     queries: &[String],
 ) -> Result<(), String> {
     let probe_snapshot = run_probe(target);
@@ -599,6 +602,16 @@ pub fn generate(
         copy_to: Option<PathBuf>,
     }
     let site_canon = fs::canonicalize(site).unwrap_or_else(|_| site.to_path_buf());
+    // Every placed path an input claims, across both
+    // document kinds: a copy destination or an in-place
+    // source. Two inputs claiming one path would overwrite
+    // each other or a publisher's own file, so planning
+    // refuses the second claim, whichever kind makes it.
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    // Copies are written only once every input is planned,
+    // so no write can land on a file a later plan still has
+    // to read.
+    let mut pending_copies: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut planned: Vec<PlannedApi> = Vec::new();
     for openapi_path in openapi_paths {
         let bytes = fs::read(openapi_path)
@@ -656,6 +669,18 @@ pub fn generate(
                 Some(site.join(file_name)),
             ),
         };
+        let placed = copy_to
+            .as_ref()
+            .map(|_| site_canon.join(file_name))
+            .unwrap_or_else(|| doc_canon.clone());
+        if claimed.contains(&placed) {
+            return Err(format!(
+                "{} would land on {}, which another input already claims, and generation will not overwrite it",
+                openapi_path.display(),
+                placed.display()
+            ));
+        }
+        claimed.push(placed);
         planned.push(PlannedApi {
             source: openapi_path.display().to_string(),
             bytes,
@@ -668,7 +693,7 @@ pub fn generate(
     let mut openapi: Vec<OpenApiBaseline> = Vec::new();
     for plan in planned {
         if let Some(dest) = &plan.copy_to {
-            write_file(dest, &plan.bytes)?;
+            pending_copies.push((dest.clone(), plan.bytes.clone()));
         }
         let description = match &plan.view.description {
             Some(description) => description.clone(),
@@ -716,6 +741,154 @@ pub fn generate(
         });
     }
 
+    // The generation roadmap's second input. An A2A agent
+    // card becomes an agent entry, planned exactly the way
+    // the OpenAPI documents are planned: read, reduced and
+    // placed before anything is written.
+    struct PlannedAgentCard {
+        source: String,
+        bytes: Vec<u8>,
+        view: A2aView,
+        examples: Vec<String>,
+        card_id: String,
+        card_url: String,
+        copy_to: Option<PathBuf>,
+    }
+    let mut planned_cards: Vec<PlannedAgentCard> = Vec::new();
+    for card_path in agent_card_paths {
+        let bytes = fs::read(card_path)
+            .map_err(|e| format!("could not read {} with {e}", card_path.display()))?;
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "{} is not a JSON document ({e}), and generate reads agent cards in JSON only",
+                card_path.display()
+            )
+        })?;
+        let view = reduce_agent_card(&doc)
+            .map_err(|reason| format!("{} cannot be announced, {reason}", card_path.display()))?;
+        let file_name = card_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("{} has no usable file name", card_path.display()))?;
+        if file_name == "baseline.json" {
+            return Err(
+                "an agent card named baseline.json cannot be announced, because that name belongs to the site's own baseline"
+                    .into(),
+            );
+        }
+        let stem = file_name.strip_suffix(".json").unwrap_or(file_name);
+        if !valid_plain_name(stem) {
+            return Err(format!(
+                "the file stem {stem} is not a plain name, and generation will not build an identifier from it"
+            ));
+        }
+        let card_id = format!("urn:air:{domain}:a2a:{stem}");
+        if entries.iter().any(|e| e.identifier == card_id)
+            || planned_cards.iter().any(|p| p.card_id == card_id)
+        {
+            return Err(format!(
+                "two inputs would both announce {card_id}, and generation will not merge them"
+            ));
+        }
+        // The skills' own examples, in card order, are the
+        // representative queries' first source: the
+        // publisher's words, never generated text. The
+        // reduction harvested them from the skills it kept,
+        // so the harvest lives in one place, in the core.
+        let examples: Vec<String> = view.examples.iter().take(5).cloned().collect();
+        // Where the card lives in the site, resolved the
+        // same way as an OpenAPI document's placement.
+        let doc_canon = fs::canonicalize(card_path).unwrap_or_else(|_| card_path.to_path_buf());
+        let (card_url, copy_to) = match doc_canon.strip_prefix(&site_canon) {
+            Ok(rel) => (
+                format!(
+                    "https://{domain}/{}",
+                    rel.to_string_lossy().replace('\\', "/")
+                ),
+                None,
+            ),
+            Err(_) => (
+                format!("https://{domain}/{file_name}"),
+                Some(site.join(file_name)),
+            ),
+        };
+        let placed = copy_to
+            .as_ref()
+            .map(|_| site_canon.join(file_name))
+            .unwrap_or_else(|| doc_canon.clone());
+        if claimed.contains(&placed) {
+            return Err(format!(
+                "{} would land on {}, which another input already claims, and generation will not overwrite it",
+                card_path.display(),
+                placed.display()
+            ));
+        }
+        claimed.push(placed);
+        planned_cards.push(PlannedAgentCard {
+            source: card_path.display().to_string(),
+            bytes,
+            view,
+            examples,
+            card_id,
+            card_url,
+            copy_to,
+        });
+    }
+    let mut a2a: Vec<A2aBaseline> = Vec::new();
+    for plan in planned_cards {
+        if let Some(dest) = &plan.copy_to {
+            pending_copies.push((dest.clone(), plan.bytes.clone()));
+        }
+        let description = match &plan.view.description {
+            Some(description) => description.clone(),
+            None => {
+                eprintln!(
+                    "warning, {} carries no description, so the entry announces its name as its description",
+                    plan.source
+                );
+                plan.view.name.clone()
+            }
+        };
+        let mut queries = plan.examples.clone();
+        for template in [
+            format!("What can the {} agent do", plan.view.name),
+            format!("Ask the {} agent to complete a task", plan.view.name),
+        ] {
+            if queries.len() >= 2 {
+                break;
+            }
+            if !queries.contains(&template) {
+                queries.push(template);
+            }
+        }
+        entries.push(Entry {
+            identifier: plan.card_id.clone(),
+            display_name: plan.view.name.clone(),
+            media_type: "application/a2a-agent-card+json".into(),
+            url: Some(plan.card_url.clone()),
+            data: None,
+            description,
+            capabilities: plan.view.skills.iter().map(|s| s.id.clone()).collect(),
+            representative_queries: queries,
+            tags: vec![],
+            version: Some(plan.view.version.clone()),
+            digest: Some(hash::digest_field(&plan.bytes)),
+            updated_at: None,
+            trust_manifest: None,
+        });
+        a2a.push(A2aBaseline::from_view(
+            &plan.card_id,
+            &plan.card_url,
+            &hash::sha256_hex(&plan.bytes),
+            &plan.view,
+        ));
+        provenance.push(EntryProvenance {
+            entry_id: plan.card_id,
+            produced_by: "agent-card-file".into(),
+            overruled: vec![],
+        });
+    }
+
     let catalog = Catalog {
         host: Host {
             display_name: display_name.to_string(),
@@ -737,8 +910,14 @@ pub fn generate(
         skills,
         artifacts,
         openapi,
+        a2a,
         provenance,
     };
+    // The deferred copies land now, with every input read
+    // and planned and the run past every refusal.
+    for (dest, bytes) in &pending_copies {
+        write_file(dest, bytes)?;
+    }
     write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;
     Ok(())
 }
@@ -1103,6 +1282,35 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
             },
         }
     }
+    // The agent cards the baseline records, reduced now, with
+    // the same broken-with-reason posture as the documents.
+    let mut a2a_views: Vec<(String, A2aView)> = Vec::new();
+    let mut a2a_broken: Vec<(String, String)> = Vec::new();
+    for card in &baseline.a2a {
+        let Some(path) = url_to_path(site, &published.host.domain, &card.url) else {
+            a2a_broken.push((
+                card.entry_id.clone(),
+                "its URL does not map into the site".into(),
+            ));
+            continue;
+        };
+        match fs::read(&path) {
+            Err(_) => a2a_broken.push((
+                card.entry_id.clone(),
+                "the card is missing where its catalog entry points".into(),
+            )),
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Err(e) => a2a_broken.push((
+                    card.entry_id.clone(),
+                    format!("the card no longer parses as JSON ({e})"),
+                )),
+                Ok(doc) => match reduce_agent_card(&doc) {
+                    Ok(view) => a2a_views.push((card.entry_id.clone(), view)),
+                    Err(reason) => a2a_broken.push((card.entry_id.clone(), reason)),
+                },
+            },
+        }
+    }
 
     let today = today_utc();
     let findings = drift::check(&CheckInputs {
@@ -1120,6 +1328,8 @@ pub fn check(site: &Path, target: Option<&ProbeTarget>, fail_at: Severity) -> Re
         catalog_endpoints: &catalog_endpoints,
         openapi_views: &openapi_views,
         openapi_broken: &openapi_broken,
+        a2a_views: &a2a_views,
+        a2a_broken: &a2a_broken,
         suppressions: &suppressions,
         today: &today,
     });
@@ -1340,6 +1550,7 @@ pub fn migrate_site(
     let mut skill_baselines: Vec<SkillBaseline> = Vec::new();
     let mut artifacts: Vec<ArtifactBaseline> = Vec::new();
     let mut openapi_baselines: Vec<OpenApiBaseline> = Vec::new();
+    let mut a2a_baselines: Vec<A2aBaseline> = Vec::new();
     let mut provenance: Vec<EntryProvenance> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1707,6 +1918,69 @@ pub fn migrate_site(
                     carried.push(kept);
                     continue;
                 }
+                if entry.media_type == "application/a2a-agent-card+json" {
+                    // An A2A entry is verified as the surface
+                    // it is, the way an OpenAPI entry is: the
+                    // card is reduced, its version and skill
+                    // claims are judged, and the baseline
+                    // records the reduction.
+                    let view = match serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .map_err(|e| format!("the card does not parse as JSON with {e}"))
+                        .and_then(|doc| reduce_agent_card(&doc))
+                    {
+                        Ok(view) => view,
+                        Err(reason) => {
+                            let reason = format!(
+                                "the card the entry announces cannot be read as an agent card, {reason}"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                            continue;
+                        }
+                    };
+                    let card_skills: Vec<String> =
+                        view.skills.iter().map(|s| s.id.clone()).collect();
+                    for name in &entry.capabilities {
+                        if !card_skills.contains(name) {
+                            let reason = format!(
+                                "the entry announced {name}, which the card does not serve"
+                            );
+                            failed.push(migration_failure(id, &reason));
+                        }
+                    }
+                    for name in &card_skills {
+                        if !entry.capabilities.contains(name) {
+                            let reason =
+                                format!("the card serves {name}, which the entry never announced");
+                            failed.push(migration_failure(id, &reason));
+                        }
+                    }
+                    if let Some(announced) = &entry.version
+                        && *announced != view.version
+                    {
+                        let reason = format!(
+                            "the entry announced version {announced} and the card carries {}",
+                            view.version
+                        );
+                        failed.push(migration_failure(id, &reason));
+                    }
+                    let mut kept = entry.clone();
+                    kept.capabilities = card_skills;
+                    kept.version = Some(view.version.clone());
+                    kept.digest = Some(hash::digest_field(&bytes));
+                    a2a_baselines.push(A2aBaseline::from_view(
+                        id,
+                        &url,
+                        &hash::sha256_hex(&bytes),
+                        &view,
+                    ));
+                    provenance.push(EntryProvenance {
+                        entry_id: id.to_string(),
+                        produced_by: "migration".into(),
+                        overruled: vec![],
+                    });
+                    carried.push(kept);
+                    continue;
+                }
                 carry_artifact(
                     &mut carried,
                     &mut artifacts,
@@ -1752,6 +2026,7 @@ pub fn migrate_site(
             skills: skill_baselines,
             artifacts,
             openapi: openapi_baselines,
+            a2a: a2a_baselines,
             provenance,
         };
         write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;

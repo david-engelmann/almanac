@@ -805,3 +805,149 @@ the earlier shape, since the published card no longer
 carries a tools array to edit, and the Final generation
 test reads an entry whose capabilities field is omitted
 when empty, as the catalog model has always written it.
+
+## Generation roadmap, second slice: A2A input (2026-11-24)
+
+The second generation input is the A2A agent card, the
+second slice of the generation roadmap the applicability
+audit's third charge pointed at: A2A core stands at 1.0.1,
+and the 1.1 release candidate adds the media type this
+slice announces, application/a2a-agent-card+json, which
+the ARD entry-type registry already names. The card shape
+was read from the specification's field table as carried
+in the audit report and two independent schema guides. A
+1.0 card is a JSON document at /.well-known/agent-card.json
+whose required fields are name, description, version (the
+agent's own version, not the protocol's), an ordered
+supportedInterfaces array whose entries carry url,
+protocolBinding, and protocolVersion, a capabilities
+object (streaming, pushNotifications, extensions,
+extendedAgentCard), default input and output modes, and a
+skills array whose entries carry id, name, description,
+and tags, with examples and modes optional. Cards from
+the 0.3 line still circulate with a top-level url,
+preferredTransport, and protocolVersion instead of the
+interfaces array, and the reduction accepts that shape
+too, the way the card reduction accepts both MCP card
+shapes. An agent card is a declared artifact, like an
+OpenAPI document, and not a live probe: almanac speaks
+no A2A RPC in this slice, and the card is compared fact
+by fact against the baseline the way the OpenAPI document
+is compared operation by operation, never byte by byte.
+
+Generate takes a repeatable --agent-card flag naming a
+card file, with the OpenAPI slice's placement rules: a
+file outside the site is copied to the site root under
+its file name, a file inside is used in place. The entry
+is typed application/a2a-agent-card+json with identifier
+urn:air:<domain>:a2a:<stem>, the stem being the file stem
+validated as a plain name. The display name and version
+come from the card, the description from the card's
+description per Rule 4, and a card with no description
+generates with its name as the description plus a warning
+on stderr, mirroring the OpenAPI title fallback.
+Capabilities are the skill identifiers, sorted.
+Representative queries are the skills' own examples where
+the card carries them, the publisher's words rather than
+anything generated, and the two standing templates
+otherwise. The digest is the digest of the card bytes as
+served, and the provenance is agent-card-file.
+
+The reduction refuses a document that is not a sound
+frame, naming the reason: not a JSON object, no name, no
+version, or no interface naming a url. From a sound frame
+it records the agent name and version, the interfaces in
+order as url, binding, and protocol version triples, the
+skills by identifier with a hash of each skill's
+description and a hash of the rest of the skill object,
+the capability flags, and whether the card requires
+security, judged from a non-empty securityRequirements
+list or a non-empty securitySchemes map. A 0.3 card's
+top-level url and protocolVersion synthesize its single
+interface. The baseline record, A2aBaseline, sits beside
+the OpenAPI one with the same serde default, so baselines
+written before this slice still parse.
+
+Check compares the served card against the baseline on
+independent channels, so no change masks another. A
+baselined card that is missing or will not reduce is
+Critical, kind a2a-card-unreadable. A recorded skill no
+longer served is Major, a2a-skill-removed; a served skill
+never recorded is Critical, a2a-skill-unannounced, the
+unannounced-capability rule of DESIGN section 6. An
+agent version change is Major under the existing
+server-version-changed kind; an interface change, the
+ordered triples differing, is Major, a2a-interfaces-changed;
+a security posture change is Major under the existing
+authentication-changed kind; a capability flags change is
+Major, a2a-capabilities-changed; a skill description
+change is Minor, a2a-skill-description-changed, and any
+other change inside a skill object is Major,
+a2a-skill-changed. The phantom rule runs in both
+directions exactly as it does for OpenAPI: a baselined
+A2A entry the catalog dropped, or a published
+application/a2a-agent-card+json entry with no baseline
+record, or a catalog whose capabilities disagree with the
+baseline's skill identifiers, is Critical
+catalog-baseline-divergence.
+
+Migration judges an A2A entry the way it judges an
+OpenAPI one: the card in the site is reduced, its
+version and skill claims are judged as claims, false
+claims are reported failures that force exit 1, the entry
+carries reconciled to the card, and an A2aBaseline is
+recorded. The card's name is not judged: the entry's
+identifier segment is a file stem or the publisher's own
+choice, not a claim about the card's display name. A card
+that will not reduce fails that entry with the reason.
+
+### A2A slice checkpoint fix pass (2026-11-24)
+
+The three reviews landed with no Critical findings; the
+red team carried three Majors and the standards axis one,
+and the fix pass closed all of them. The reduction drops
+nothing the card declares any more: capabilities
+extensions are recorded as a sorted identifier set and
+compared under a2a-capabilities-changed beside the
+flags, and the default input and output modes are
+recorded and compared as a2a-modes-changed at Major. An
+interface record is a named InterfaceBaseline carrying a
+hash of the rest of the interface object beside its
+triple, so a field like a multi-tenant marker is gated;
+the baseline and the drift pass share the one conversion.
+The published entry's own url and version are claims
+too: check_a2a compares both against the baseline
+record, and the same comparison was added to
+check_openapi, whose pass shared the gap (an entry
+edited to point at another document, or to announce a
+version the baseline never recorded, now diverges at
+Critical in both passes). The agent's name and
+description are gated, one step past the OpenAPI
+posture, because generate takes the entry's display name
+and description from the card: a name change fires
+server-version-changed at Major with the identity named,
+a description change a2a-description-changed at Minor;
+provider, documentation and icon links stay editorial
+and ungated.
+
+Generation plans both document kinds before it writes
+anything: copies are deferred until every input is read
+and planned, and every placed path (a copy destination
+or an in-place source) is claimed across both kinds, so
+an OpenAPI document and an agent card with the same file
+name refuse the run instead of overwriting each other or
+a publisher's in-site file. The representative queries
+are stated plainly: the kept skills' examples in card
+order, harvested by the reduction into the view, capped
+at five, filled out to at least two with the standing
+templates. The frame tightened: an interface url that is
+empty names nothing in either shape, and a declared
+interface list with no usable url no longer falls back
+to a stale top-level one. A skill description that is
+not a string now hashes as its JSON text, so a change
+between two non-string values fires. check_a2a gained
+its core unit test family beside check_openapi's,
+covering agreement, both skill directions, the channel
+split, the document-level classes, the unreadable class,
+and the phantom rule in both directions including the
+entry url and version claims.

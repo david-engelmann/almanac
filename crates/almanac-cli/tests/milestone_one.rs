@@ -2191,6 +2191,258 @@ fn check_repo(site: &Path) -> (i32, String, String) {
     run(&["check", "--site", &site_arg(site)])
 }
 
+fn agent_card() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Code Review Agent",
+        "description": "Reviews code changes.",
+        "version": "1.2.0",
+        "supportedInterfaces": [
+            {"url": "https://example.com/review", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
+        ],
+        "capabilities": {"streaming": true},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+            {"id": "review-diff", "name": "Review a diff", "description": "Reviews a diff.", "tags": ["code"], "examples": ["Review PR 12"]},
+            {"id": "summarize-repo", "name": "Summarize", "description": "Summarizes a repo.", "tags": ["code"]}
+        ]
+    })
+}
+
+fn generate_stdio_with_agent_card(
+    site: &Path,
+    fixture: &Path,
+    card: &Path,
+) -> (i32, String, String) {
+    run(&[
+        "generate",
+        "--site",
+        &site_arg(site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--agent-card",
+        &card.to_string_lossy(),
+        "--command",
+        &fixture.to_string_lossy(),
+    ])
+}
+
+#[test]
+fn a2a_input_and_skill_drift() {
+    let src = temp_site("a2a-src");
+    let card_path = src.join("review-agent.json");
+    write_doc(&card_path, &agent_card());
+    let site = temp_site("a2a");
+    let clean = fixture_binary("fixture_server");
+
+    // Generation announces the agent beside the MCP server,
+    // the card is copied into the site, and the entry's
+    // representative queries lead with the skill's own
+    // example, the publisher's words.
+    let (code, _, stderr) = generate_stdio_with_agent_card(&site, &clean, &card_path);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let site_card = site.join("review-agent.json");
+    assert!(site_card.exists(), "the card must be copied in");
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    let entry = catalog["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["type"] == "application/a2a-agent-card+json")
+        .expect("a2a entry");
+    assert_eq!(
+        entry["identifier"].as_str(),
+        Some("urn:air:example.com:a2a:review-agent")
+    );
+    assert_eq!(
+        entry["capabilities"],
+        serde_json::json!(["review-diff", "summarize-repo"])
+    );
+    assert_eq!(
+        entry["representativeQueries"][0].as_str(),
+        Some("Review PR 12"),
+        "entry was {entry}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["a2a"][0]["entry_id"].as_str(),
+        Some("urn:air:example.com:a2a:review-agent"),
+        "baseline was {baseline}"
+    );
+    assert_eq!(baseline["a2a"][0]["version"].as_str(), Some("1.2.0"));
+    assert_eq!(
+        baseline["a2a"][0]["skills"]
+            .as_array()
+            .expect("recorded skills")
+            .len(),
+        2
+    );
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "clean check failed with {stdout}");
+
+    // A formatting only rewrite of the served card is not
+    // drift. The comparison is fact by fact, never byte by
+    // byte.
+    let card: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&site_card).expect("card")).expect("parses");
+    std::fs::write(&site_card, serde_json::to_string(&card).expect("serialize"))
+        .expect("rewrite compact");
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 0, "formatting rewrite must pass, report was {stdout}");
+
+    // A skill the card stops serving is major drift.
+    let mut broken = agent_card();
+    broken["skills"]
+        .as_array_mut()
+        .expect("skills")
+        .retain(|s| s["id"] != "summarize-repo");
+    write_doc(&site_card, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "removed skill must fail, report was {stdout}");
+    assert!(stdout.contains("a2a-skill-removed"), "report was {stdout}");
+
+    // A skill the catalog never announced is critical.
+    let (code, _, _) = generate_stdio_with_agent_card(&site, &clean, &card_path);
+    assert_eq!(code, 0);
+    let mut broken = agent_card();
+    broken["skills"].as_array_mut().expect("skills").push(
+        serde_json::json!({"id": "delete-repo", "name": "Delete", "description": "Deletes.", "tags": []}),
+    );
+    write_doc(&site_card, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "unannounced skill must fail, report was {stdout}");
+    assert!(
+        stdout.contains("a2a-skill-unannounced"),
+        "report was {stdout}"
+    );
+
+    // An interface change is major drift.
+    let (code, _, _) = generate_stdio_with_agent_card(&site, &clean, &card_path);
+    assert_eq!(code, 0);
+    let mut broken = agent_card();
+    broken["supportedInterfaces"][0]["url"] = serde_json::json!("https://example.com/review-v2");
+    write_doc(&site_card, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "interface change must fail, report was {stdout}");
+    assert!(
+        stdout.contains("a2a-interfaces-changed"),
+        "report was {stdout}"
+    );
+
+    // A default modes change is major drift too.
+    let (code, _, _) = generate_stdio_with_agent_card(&site, &clean, &card_path);
+    assert_eq!(code, 0);
+    let mut broken = agent_card();
+    broken["defaultInputModes"] = serde_json::json!(["application/json"]);
+    write_doc(&site_card, &broken);
+    let (code, stdout, _) = check_stdio(&site, &clean);
+    assert_eq!(code, 1, "modes change must fail, report was {stdout}");
+    assert!(stdout.contains("a2a-modes-changed"), "report was {stdout}");
+}
+
+#[test]
+fn generate_refuses_an_openapi_and_agent_card_name_collision() {
+    // An OpenAPI document and an agent card with the same
+    // file name would land on the same site path. Planning
+    // refuses the run before any write, so neither input
+    // overwrites the other and the site is left untouched.
+    let src = temp_site("collision-src");
+    std::fs::create_dir_all(src.join("ext")).expect("ext dir");
+    std::fs::create_dir_all(src.join("ext2")).expect("ext2 dir");
+    write_doc(&src.join("ext/api.json"), &billing_doc());
+    write_doc(&src.join("ext2/api.json"), &agent_card());
+    let site = temp_site("collision");
+    let clean = fixture_binary("fixture_server");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &src.join("ext/api.json").to_string_lossy(),
+        "--agent-card",
+        &src.join("ext2/api.json").to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 2, "the collision must refuse, stderr was {stderr}");
+    assert!(stderr.contains("already claims"), "stderr was {stderr}");
+    assert!(
+        !site.join("api.json").exists(),
+        "no copy may land on a refused run"
+    );
+}
+
+#[test]
+fn migrate_records_a2a_baselines_and_judges_claims() {
+    let site = temp_site("mig-a2a");
+    std::fs::create_dir_all(site.join(".well-known")).expect("well known");
+    write_doc(&site.join("review-agent.json"), &agent_card());
+    let entry = serde_json::json!({
+        "identifier": "urn:air:example.com:a2a:review-agent",
+        "displayName": "Code Review Agent",
+        "type": "application/a2a-agent-card+json",
+        "url": "https://example.com/review-agent.json",
+        "description": "Reviews code changes.",
+        "capabilities": ["review-diff", "summarize-repo", "invented-skill"],
+        "representativeQueries": ["Review PR 12"],
+        "version": "1.2.0"
+    });
+    let catalog = serde_json::json!({
+        "host": {"displayName": "Example", "domain": "example.com"},
+        "entries": [entry]
+    });
+    std::fs::write(
+        site.join(".well-known/ai-catalog.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&catalog).expect("serialize")
+        ),
+    )
+    .expect("legacy catalog");
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+    ]);
+    // The invented skill is a false claim: the migration
+    // reports it and exits 1, and the entry still carries,
+    // reconciled to the card's real skills.
+    assert_eq!(
+        code, 1,
+        "false claims must fail, report was {stdout} {stderr}"
+    );
+    assert!(stdout.contains("invented-skill"), "report was {stdout}");
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    assert_eq!(
+        migrated["entries"][0]["capabilities"],
+        serde_json::json!(["review-diff", "summarize-repo"]),
+        "catalog was {migrated}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["a2a"][0]["version"].as_str(),
+        Some("1.2.0"),
+        "baseline was {baseline}"
+    );
+}
+
 #[test]
 fn migrate_records_openapi_baselines() {
     let clean = fixture_binary("fixture_server");

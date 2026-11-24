@@ -128,6 +128,15 @@ pub struct CheckInputs<'a> {
     /// longer read as OpenAPI documents, by entry identifier,
     /// with the reason.
     pub openapi_broken: &'a [(String, String)],
+    /// The current reduction of each A2A agent card the
+    /// baseline records, by entry identifier. A baselined
+    /// card that could not be read or reduced is absent here
+    /// and present in `a2a_broken` instead.
+    pub a2a_views: &'a [(String, crate::a2a::A2aView)],
+    /// Baselined A2A agent cards that are missing or no
+    /// longer read as agent cards, by entry identifier, with
+    /// the reason.
+    pub a2a_broken: &'a [(String, String)],
     pub suppressions: &'a [Suppression],
     /// Today's date, YYYY-MM-DD, for suppression expiry.
     pub today: &'a str,
@@ -353,6 +362,7 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     // document is a file surface, read in repo mode and live
     // mode alike, and compared operation by operation.
     check_openapi(inputs, &mut findings);
+    check_a2a(inputs, &mut findings);
 
     apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
@@ -498,6 +508,32 @@ fn check_openapi(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
                         "catalog-baseline-divergence",
                         Some(&api.entry_id),
                         "the catalog's announced operations differ from the baseline recorded at generation"
+                            .into(),
+                    ));
+                }
+                // The entry's own pointer and version are
+                // claims too, as in the A2A pass: an entry
+                // edited to name a different document, or a
+                // version the baseline never recorded,
+                // diverges even when the recorded document
+                // itself is untouched.
+                if entry.url.as_deref() != Some(api.url.as_str()) {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&api.entry_id),
+                        "the catalog's OpenAPI entry points at a different document than the baseline recorded at generation"
+                            .into(),
+                    ));
+                }
+                if let Some(announced) = &entry.version
+                    && *announced != api.version
+                {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&api.entry_id),
+                        "the catalog's OpenAPI entry announces a version the baseline did not record"
                             .into(),
                     ));
                 }
@@ -664,6 +700,229 @@ fn check_openapi(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
                     Some(&api.entry_id),
                     format!(
                         "operation {} is served by the document and the catalog never announced it",
+                        current.id
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// The A2A pass. Each baselined agent card is compared
+/// against the reduction of the card the site serves now,
+/// channel by channel, and the phantom rule runs in both
+/// directions between the catalog and the baseline.
+fn check_a2a(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    let published = inputs.published;
+    let baseline = inputs.baseline;
+    for entry in &published.entries {
+        if entry.media_type == "application/a2a-agent-card+json"
+            && !baseline.a2a.iter().any(|a| a.entry_id == entry.identifier)
+            && !baseline
+                .artifacts
+                .iter()
+                .any(|a| a.entry_id == entry.identifier)
+        {
+            findings.push(finding(
+                Severity::Critical,
+                "catalog-baseline-divergence",
+                Some(&entry.identifier),
+                "the catalog announces an A2A entry the baseline does not record".into(),
+            ));
+        }
+    }
+    for card in &baseline.a2a {
+        match published
+            .entries
+            .iter()
+            .find(|e| e.identifier == card.entry_id)
+        {
+            Some(entry) => {
+                let announced: std::collections::BTreeSet<&str> =
+                    entry.capabilities.iter().map(|c| c.as_str()).collect();
+                let recorded: std::collections::BTreeSet<&str> =
+                    card.skills.iter().map(|s| s.id.as_str()).collect();
+                if announced != recorded {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&card.entry_id),
+                        "the catalog's announced skills differ from the baseline recorded at generation"
+                            .into(),
+                    ));
+                }
+                // The entry's own pointer and version are
+                // claims too: an entry edited to name a
+                // different card, or a version the baseline
+                // never recorded, diverges even when the
+                // recorded card itself is untouched.
+                if entry.url.as_deref() != Some(card.url.as_str()) {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&card.entry_id),
+                        "the catalog's A2A entry points at a different card than the baseline recorded at generation"
+                            .into(),
+                    ));
+                }
+                if let Some(announced) = &entry.version
+                    && *announced != card.version
+                {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "catalog-baseline-divergence",
+                        Some(&card.entry_id),
+                        "the catalog's A2A entry announces a version the baseline did not record"
+                            .into(),
+                    ));
+                }
+            }
+            None => findings.push(finding(
+                Severity::Critical,
+                "catalog-baseline-divergence",
+                Some(&card.entry_id),
+                "the baseline records an A2A entry the catalog no longer announces".into(),
+            )),
+        }
+        if let Some((_, reason)) = inputs
+            .a2a_broken
+            .iter()
+            .find(|(id, _)| id == &card.entry_id)
+        {
+            findings.push(finding(
+                Severity::Critical,
+                "a2a-card-unreadable",
+                Some(&card.entry_id),
+                format!(
+                    "the agent card at {} cannot be read as one, {reason}",
+                    card.url
+                ),
+            ));
+            continue;
+        }
+        let Some((_, view)) = inputs.a2a_views.iter().find(|(id, _)| id == &card.entry_id) else {
+            continue;
+        };
+        if view.version != card.version {
+            findings.push(finding(
+                Severity::Major,
+                "server-version-changed",
+                Some(&card.entry_id),
+                format!(
+                    "the agent's version changed from {} at generation to {}",
+                    card.version, view.version
+                ),
+            ));
+        }
+        if view.name != card.name {
+            findings.push(finding(
+                Severity::Major,
+                "server-version-changed",
+                Some(&card.entry_id),
+                format!(
+                    "the agent's name changed from {} at generation to {}",
+                    card.name, view.name
+                ),
+            ));
+        }
+        if crate::hash::sha256_str(view.description.as_deref().unwrap_or_default())
+            != card.description_sha256
+        {
+            findings.push(finding(
+                Severity::Minor,
+                "a2a-description-changed",
+                Some(&card.entry_id),
+                "the agent's description changed since generation".into(),
+            ));
+        }
+        let current_interfaces: Vec<crate::baseline::InterfaceBaseline> = view
+            .interfaces
+            .iter()
+            .map(crate::baseline::InterfaceBaseline::from_view)
+            .collect();
+        if current_interfaces != card.interfaces {
+            findings.push(finding(
+                Severity::Major,
+                "a2a-interfaces-changed",
+                Some(&card.entry_id),
+                "the card's interfaces differ from the baseline recorded at generation".into(),
+            ));
+        }
+        if view.security_required != card.security_required {
+            findings.push(finding(
+                Severity::Major,
+                "authentication-changed",
+                Some(&card.entry_id),
+                "the card's security posture changed since generation".into(),
+            ));
+        }
+        if view.capability_flags != card.capability_flags || view.extensions != card.extensions {
+            findings.push(finding(
+                Severity::Major,
+                "a2a-capabilities-changed",
+                Some(&card.entry_id),
+                "the card's capability flags or declared extensions changed since generation"
+                    .into(),
+            ));
+        }
+        if view.default_input_modes != card.default_input_modes
+            || view.default_output_modes != card.default_output_modes
+        {
+            findings.push(finding(
+                Severity::Major,
+                "a2a-modes-changed",
+                Some(&card.entry_id),
+                "the card's default input or output modes changed since generation".into(),
+            ));
+        }
+        let current_skills: std::collections::HashMap<&str, &crate::a2a::A2aSkillView> =
+            view.skills.iter().map(|s| (s.id.as_str(), s)).collect();
+        for recorded in &card.skills {
+            match current_skills.get(recorded.id.as_str()) {
+                None => findings.push(finding(
+                    Severity::Major,
+                    "a2a-skill-removed",
+                    Some(&card.entry_id),
+                    format!(
+                        "skill {} is recorded in the baseline and the card no longer serves it",
+                        recorded.id
+                    ),
+                )),
+                Some(current) => {
+                    if crate::hash::sha256_str(&current.description) != recorded.description_sha256
+                    {
+                        findings.push(finding(
+                            Severity::Minor,
+                            "a2a-skill-description-changed",
+                            Some(&card.entry_id),
+                            format!(
+                                "skill {} changed its description since the baseline",
+                                recorded.id
+                            ),
+                        ));
+                    }
+                    if current.contract_sha256 != recorded.contract_sha256 {
+                        findings.push(finding(
+                            Severity::Major,
+                            "a2a-skill-changed",
+                            Some(&card.entry_id),
+                            format!(
+                                "skill {} changed since the baseline, apart from its description",
+                                recorded.id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        for current in &view.skills {
+            if !card.skills.iter().any(|s| s.id == current.id) {
+                findings.push(finding(
+                    Severity::Critical,
+                    "a2a-skill-unannounced",
+                    Some(&card.entry_id),
+                    format!(
+                        "skill {} is served by the card and the catalog never announced it",
                         current.id
                     ),
                 ));
@@ -1083,6 +1342,8 @@ mod tests {
             catalog_endpoints: &[],
             openapi_views: &[],
             openapi_broken: &[],
+            a2a_views: &[],
+            a2a_broken: &[],
             suppressions: &[],
             today: "2026-11-21",
         }
@@ -1146,6 +1407,7 @@ mod tests {
             skills: vec![],
             artifacts: vec![],
             openapi: vec![],
+            a2a: vec![],
             provenance: vec![],
         }
     }
@@ -1463,6 +1725,213 @@ mod tests {
 
     fn kinds(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|f| f.kind.as_str()).collect()
+    }
+
+    const A2A_ID: &str = "urn:air:example.com:a2a:review-agent";
+
+    fn agent_doc() -> serde_json::Value {
+        serde_json::json!({
+            "name": "Code Review Agent",
+            "description": "Reviews code changes.",
+            "version": "1.2.0",
+            "supportedInterfaces": [
+                {"url": "https://example.com/review", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
+            ],
+            "capabilities": {"streaming": true},
+            "defaultInputModes": ["text/plain"],
+            "defaultOutputModes": ["text/plain"],
+            "skills": [
+                {"id": "review-diff", "name": "Review a diff", "description": "Reviews a diff.", "tags": ["code"], "examples": ["Review PR 12"]},
+                {"id": "summarize-repo", "name": "Summarize", "description": "Summarizes a repo.", "tags": ["code"]}
+            ]
+        })
+    }
+
+    fn a2a_setup() -> (Catalog, Baseline, crate::a2a::A2aView) {
+        let view = crate::a2a::reduce_agent_card(&agent_doc()).expect("reduces");
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.a2a = vec![crate::baseline::A2aBaseline::from_view(
+            A2A_ID,
+            "https://example.com/review-agent.json",
+            "00",
+            &view,
+        )];
+        let mut cat = catalog();
+        cat.entries.push(Entry {
+            identifier: A2A_ID.into(),
+            display_name: "Code Review Agent".into(),
+            media_type: "application/a2a-agent-card+json".into(),
+            url: Some("https://example.com/review-agent.json".into()),
+            data: None,
+            description: "Reviews code changes.".into(),
+            capabilities: view.skills.iter().map(|s| s.id.clone()).collect(),
+            representative_queries: vec![],
+            tags: vec![],
+            version: Some("1.2.0".into()),
+            digest: None,
+            updated_at: None,
+            trust_manifest: None,
+        });
+        (cat, base, view)
+    }
+
+    fn a2a_check(cat: &Catalog, base: &Baseline, doc: serde_json::Value) -> Vec<Finding> {
+        let view = crate::a2a::reduce_agent_card(&doc).expect("reduces");
+        let views = vec![(A2A_ID.to_string(), view)];
+        let mut with = inputs(cat, base, None);
+        with.a2a_views = &views;
+        check(&with)
+    }
+
+    #[test]
+    fn a2a_agreement_produces_no_findings() {
+        let (cat, base, _) = a2a_setup();
+        assert!(a2a_check(&cat, &base, agent_doc()).is_empty());
+    }
+
+    #[test]
+    fn a2a_removed_and_unannounced_skills_fire() {
+        let (cat, base, _) = a2a_setup();
+        let mut doc = agent_doc();
+        doc["skills"]
+            .as_array_mut()
+            .expect("skills")
+            .retain(|s| s["id"] != "summarize-repo");
+        let findings = a2a_check(&cat, &base, doc);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "a2a-skill-removed" && f.severity == Severity::Major),
+            "findings were {findings:?}"
+        );
+        let mut doc = agent_doc();
+        doc["skills"].as_array_mut().expect("skills").push(
+            serde_json::json!({"id": "delete-repo", "name": "Delete", "description": "Deletes.", "tags": []}),
+        );
+        let findings = a2a_check(&cat, &base, doc);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "a2a-skill-unannounced" && f.severity == Severity::Critical),
+            "findings were {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a2a_description_change_cannot_mask_a_contract_change() {
+        let (cat, base, _) = a2a_setup();
+        // A description edit alone is the minor channel only.
+        let mut doc = agent_doc();
+        doc["skills"][0]["description"] = serde_json::json!("Looks at a diff.");
+        let findings = a2a_check(&cat, &base, doc);
+        assert_eq!(
+            kinds(&findings),
+            vec!["a2a-skill-description-changed"],
+            "findings were {findings:?}"
+        );
+        assert_eq!(findings[0].severity, Severity::Minor);
+        // A contract edit wearing a description edit still
+        // fires the major channel, and only it besides.
+        let mut doc = agent_doc();
+        doc["skills"][0]["description"] = serde_json::json!("Looks at a diff.");
+        doc["skills"][0]["tags"] = serde_json::json!(["code", "review"]);
+        let findings = a2a_check(&cat, &base, doc);
+        assert_eq!(
+            kinds(&findings),
+            vec!["a2a-skill-description-changed", "a2a-skill-changed"],
+            "findings were {findings:?}"
+        );
+        assert_eq!(findings[1].severity, Severity::Major);
+    }
+
+    #[test]
+    fn a2a_document_level_changes_fire() {
+        let (cat, base, _) = a2a_setup();
+        let mut doc = agent_doc();
+        doc["version"] = serde_json::json!("2.0.0");
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"server-version-changed"));
+        let mut doc = agent_doc();
+        doc["name"] = serde_json::json!("Renamed Agent");
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"server-version-changed"));
+        let mut doc = agent_doc();
+        doc["description"] = serde_json::json!("Does something else now.");
+        let findings = a2a_check(&cat, &base, doc);
+        assert_eq!(kinds(&findings), vec!["a2a-description-changed"]);
+        let mut doc = agent_doc();
+        doc["securityRequirements"] = serde_json::json!([{"bearer": []}]);
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"authentication-changed"));
+        let mut doc = agent_doc();
+        doc["capabilities"]["pushNotifications"] = serde_json::json!(true);
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"a2a-capabilities-changed"));
+        let mut doc = agent_doc();
+        doc["capabilities"]["extensions"] =
+            serde_json::json!([{"uri": "https://example.com/ext/pay", "required": true}]);
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"a2a-capabilities-changed"));
+        let mut doc = agent_doc();
+        doc["defaultInputModes"] = serde_json::json!(["application/json"]);
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"a2a-modes-changed"));
+        let mut doc = agent_doc();
+        doc["supportedInterfaces"][0]["url"] = serde_json::json!("https://example.com/review-v2");
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"a2a-interfaces-changed"));
+        // A change to another field of the interface object
+        // fires the same class through the rest hash.
+        let mut doc = agent_doc();
+        doc["supportedInterfaces"][0]["tenant"] = serde_json::json!("acme");
+        assert!(kinds(&a2a_check(&cat, &base, doc)).contains(&"a2a-interfaces-changed"));
+    }
+
+    #[test]
+    fn a2a_unreadable_card_and_phantom_rule_fire() {
+        let (cat, base, _) = a2a_setup();
+        let broken = vec![(A2A_ID.to_string(), "the card carries no name".to_string())];
+        let mut with = inputs(&cat, &base, None);
+        with.a2a_broken = &broken;
+        let findings = check(&with);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "a2a-card-unreadable" && f.severity == Severity::Critical),
+            "findings were {findings:?}"
+        );
+
+        // A baselined entry the catalog dropped.
+        let (mut cat, base, view) = a2a_setup();
+        cat.entries.retain(|e| e.identifier != A2A_ID);
+        let views = vec![(A2A_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.a2a_views = &views;
+        assert!(kinds(&check(&with)).contains(&"catalog-baseline-divergence"));
+
+        // A published entry with no baseline record.
+        let (cat, mut base, view) = a2a_setup();
+        base.a2a.clear();
+        let views = vec![(A2A_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.a2a_views = &views;
+        assert!(kinds(&check(&with)).contains(&"catalog-baseline-divergence"));
+
+        // An entry edited to point at another card, and one
+        // edited to announce another version.
+        let (mut cat, base, view) = a2a_setup();
+        cat.entries
+            .iter_mut()
+            .find(|e| e.identifier == A2A_ID)
+            .expect("entry")
+            .url = Some("https://example.com/other.json".into());
+        let views = vec![(A2A_ID.to_string(), view.clone())];
+        let mut with = inputs(&cat, &base, None);
+        with.a2a_views = &views;
+        assert!(kinds(&check(&with)).contains(&"catalog-baseline-divergence"));
+        let (mut cat, base, _) = a2a_setup();
+        cat.entries
+            .iter_mut()
+            .find(|e| e.identifier == A2A_ID)
+            .expect("entry")
+            .version = Some("9.9.9".into());
+        let views = vec![(A2A_ID.to_string(), view)];
+        let mut with = inputs(&cat, &base, None);
+        with.a2a_views = &views;
+        assert!(kinds(&check(&with)).contains(&"catalog-baseline-divergence"));
     }
 
     #[test]

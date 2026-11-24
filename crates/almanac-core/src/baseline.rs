@@ -31,6 +31,12 @@ pub struct Baseline {
     /// list, so the field defaults empty.
     #[serde(default)]
     pub openapi: Vec<OpenApiBaseline>,
+    /// A2A agent cards by entry identifier, with the card
+    /// facts recorded at generation. Baselines written before
+    /// the generation roadmap's A2A slice carry no such list,
+    /// so the field defaults empty.
+    #[serde(default)]
+    pub a2a: Vec<A2aBaseline>,
     /// Per entry provenance. Which input produced the entry, and
     /// which inputs it overruled on the way.
     pub provenance: Vec<EntryProvenance>,
@@ -179,6 +185,110 @@ impl OpenApiBaseline {
                     required: op.required.clone(),
                     description_sha256: crate::hash::sha256_str(&op.description),
                     contract_sha256: op.contract_sha256.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One A2A agent card's recorded facts, mirroring
+/// OpenApiBaseline. The channels are recorded apart so a
+/// change in one can never mask a change in another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct A2aBaseline {
+    pub entry_id: String,
+    pub url: String,
+    /// The sha256 hex of the card at generation.
+    pub sha256: String,
+    /// The agent's own version at generation.
+    pub version: String,
+    /// The agent's name at generation.
+    pub name: String,
+    /// Hash of the card's description at generation, the
+    /// empty string's hash when it carried none.
+    pub description_sha256: String,
+    /// The interfaces at generation, in the card's
+    /// preference order.
+    pub interfaces: Vec<InterfaceBaseline>,
+    /// The capability flags switched on at generation,
+    /// sorted.
+    pub capability_flags: Vec<String>,
+    /// The extension identifiers declared at generation,
+    /// sorted.
+    pub extensions: Vec<String>,
+    /// Whether the card demanded security at generation.
+    pub security_required: bool,
+    /// The card's default input modes at generation,
+    /// sorted.
+    pub default_input_modes: Vec<String>,
+    /// The card's default output modes at generation,
+    /// sorted.
+    pub default_output_modes: Vec<String>,
+    pub skills: Vec<A2aSkillBaseline>,
+}
+
+/// One interface's recorded facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InterfaceBaseline {
+    pub url: String,
+    pub protocol_binding: String,
+    pub protocol_version: String,
+    /// Hash of the rest of the interface object.
+    pub rest_sha256: String,
+}
+
+impl InterfaceBaseline {
+    /// Record one reduced interface. The single conversion
+    /// from a view to a record, used by the baseline and
+    /// by the drift pass alike.
+    pub fn from_view(view: &crate::a2a::InterfaceView) -> Self {
+        InterfaceBaseline {
+            url: view.url.clone(),
+            protocol_binding: view.protocol_binding.clone(),
+            protocol_version: view.protocol_version.clone(),
+            rest_sha256: view.rest_sha256.clone(),
+        }
+    }
+}
+
+/// One skill's recorded facts, in two channels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct A2aSkillBaseline {
+    pub id: String,
+    pub description_sha256: String,
+    pub contract_sha256: String,
+}
+
+impl A2aBaseline {
+    /// Record a reduced agent card as the baseline for one
+    /// entry.
+    pub fn from_view(entry_id: &str, url: &str, sha256: &str, view: &crate::a2a::A2aView) -> Self {
+        A2aBaseline {
+            entry_id: entry_id.to_string(),
+            url: url.to_string(),
+            sha256: sha256.to_string(),
+            version: view.version.clone(),
+            name: view.name.clone(),
+            description_sha256: crate::hash::sha256_str(
+                view.description.as_deref().unwrap_or_default(),
+            ),
+            interfaces: view
+                .interfaces
+                .iter()
+                .map(InterfaceBaseline::from_view)
+                .collect(),
+            capability_flags: view.capability_flags.clone(),
+            extensions: view.extensions.clone(),
+            security_required: view.security_required,
+            default_input_modes: view.default_input_modes.clone(),
+            default_output_modes: view.default_output_modes.clone(),
+            skills: view
+                .skills
+                .iter()
+                .map(|skill| A2aSkillBaseline {
+                    id: skill.id.clone(),
+                    description_sha256: crate::hash::sha256_str(&skill.description),
+                    contract_sha256: skill.contract_sha256.clone(),
                 })
                 .collect(),
         }
