@@ -1146,7 +1146,6 @@ mod tests {
             skills: vec![],
             artifacts: vec![],
             openapi: vec![],
-            a2a: vec![],
             provenance: vec![],
         }
     }
