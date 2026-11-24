@@ -2699,7 +2699,13 @@ fn publisher_config_suppresses_entries() {
     // behind: check walks the site's skills directory, so a
     // SKILL.md with no baseline record would read as an
     // unannounced skill at Critical.
-    let skill_src = write_skill_source();
+    let skill_dir = temp_site("config-suppress-skill-src");
+    let skill_src = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_src,
+        "---\nname: guide\ndescription: A guide skill.\n---\n\nGuide the thing.\n",
+    )
+    .expect("skill file");
     let site = temp_site("config-suppress-skill");
     std::fs::write(
         site.join("almanac.toml"),
