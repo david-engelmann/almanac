@@ -1148,3 +1148,20 @@ exception, and the --queries flag remains the source
 when config names no queries for the entry. Config use
 is not flagged low confidence; config is the
 publisher's own voice, not a fallback.
+
+### Publisher config hosted gate fix pass (2026-11-24)
+
+Two hosted rounds, two test-side repairs, no product
+change. The first red was a helper that never existed:
+the skill suppression case called a name invented at
+test-writing time from the file's other helpers, and it
+now builds its SKILL.md source inline, the file's
+established construction. The second was a premise:
+the overrides test expected the config file's host
+name to win while running through a shared helper that
+passes --name "Example", and rule 4's order, recorded
+in the metadata slice and this one, ranks the explicit
+flag first, the config second. The product code already
+implements that order; the test now runs without the
+flag, with a comment saying why, so the headline
+behavior is proven rather than masked.

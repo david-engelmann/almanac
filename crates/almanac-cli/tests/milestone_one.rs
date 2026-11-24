@@ -2560,7 +2560,20 @@ fn publisher_config_overrides_editorial_fields() {
     )
     .expect("config written");
     let clean = fixture_binary("fixture_server");
-    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    // No --name flag on this run: the flag outranks the
+    // config file in rule 4's order, so the shared helper,
+    // which passes one, would mask the behavior under test.
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--openapi",
+        &doc_path.to_string_lossy(),
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
     assert!(stderr.contains("had no effect"), "stderr was {stderr}");
     let catalog: serde_json::Value =
