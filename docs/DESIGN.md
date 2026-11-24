@@ -313,7 +313,12 @@ server would never have surfaced.
   runs card against catalog against baseline, and the report labels
   the run as declared evidence only. It never prints the words live
   pass for a surface it could not touch. This is Amendment B carrying
-  real weight, not tidiness.
+  real weight, not tidiness. A card in the Final shape declares
+  identity and endpoints and no capabilities, so declared mode
+  compares it at identity level and says nothing about tools it
+  never claimed to list; capability evidence for a protected
+  surface is live evidence, and gathering it is the
+  credential-aware probe's work.
 - OAuth discovery metadata is itself a checked surface. The
   authorization server metadata and protected resource metadata a
   remote MCP server publishes are artifacts with bytes and hashes,
@@ -441,7 +446,15 @@ One internal model, two files, written in a single run.
   output.
   The catalog entry references the card by url at the well known
   path, because that path exists for every transport, including
-  stdio servers that have no endpoint URL to append to. Both
+  stdio servers that have no endpoint URL to append to. The
+  card's content is the SEP-2127 Final shape, a $schema field,
+  a reverse DNS name, a version, a short description, and the
+  remotes that reach the server, and it lists no tools,
+  resources or prompts, because the Final leaves primitives
+  to the live surface on purpose. Almanac reads both that
+  shape and the earlier one its first versions wrote, because
+  published cards predate the Final and a reader that dropped
+  them would blind itself to the installed base. Both
   copies carry the same bytes, the entry's one digest binds both,
   and the baseline records both as artifacts of the entry, so a
   copy that diverges or disappears is drift like any other

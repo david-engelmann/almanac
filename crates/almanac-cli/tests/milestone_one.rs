@@ -333,6 +333,24 @@ fn fixture_card() -> serde_json::Value {
     })
 }
 
+/// The same server described by a card in the SEP-2127 Final
+/// shape, for the auth-card-final mode. The endpoint is filled
+/// in by the handler, which knows the port.
+fn fixture_card_final(endpoint: &str) -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
+        "name": "com.example/telorama",
+        "title": "telorama",
+        "version": "0.1.0",
+        "description": "The telorama MCP server, from its card.",
+        "remotes": [{
+            "type": "streamable-http",
+            "url": endpoint,
+            "supportedProtocolVersions": ["2025-06-18"]
+        }]
+    })
+}
+
 fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u16) {
     let (method, path, headers, body) = read_request(stream);
     let mode = mode.lock().expect("mode lock").clone();
@@ -370,7 +388,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             respond(stream, 200, "application/json", "", &doc.to_string());
         }
         ("GET", "/.well-known/mcp/server-card.json") => {
-            if mode == "auth-card-normative" {
+            if mode == "auth-card-normative" || mode == "auth-card-final" {
                 respond(stream, 404, "text/plain", "", "not found");
             } else if mode == "auth-card-both" {
                 // Both locations serve, with different cards, so
@@ -389,7 +407,15 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             }
         }
         ("GET", "/mcp/server-card") => {
-            if mode == "auth-card-normative" || mode == "auth-card-both" {
+            if mode == "auth-card-final" {
+                respond(
+                    stream,
+                    200,
+                    "application/json",
+                    "",
+                    &fixture_card_final(&format!("{origin}/mcp")).to_string(),
+                );
+            } else if mode == "auth-card-normative" || mode == "auth-card-both" {
                 respond(
                     stream,
                     200,
@@ -980,10 +1006,12 @@ fn card_divergence_in_declared_mode() {
     assert_eq!(code, 0, "clean declared check failed with {stdout}");
 
     // A card that stops naming one of the baseline's tools is
-    // critical divergence in declared evidence mode.
+    // critical divergence in declared evidence mode. The
+    // published card is Final shaped and lists no tools, so
+    // the diverging card is an enumerating one in the earlier
+    // shape, missing its last tool.
     let card_path = site.join(".well-known/mcp/server-card.json");
-    let mut card: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&card_path).expect("card")).expect("card parses");
+    let mut card = fixture_card();
     card["tools"].as_array_mut().expect("tools").pop();
     std::fs::write(
         &card_path,
@@ -1046,6 +1074,252 @@ fn protected_generation_from_the_card() {
         stdout.contains("authentication-changed"),
         "report was {stdout}"
     );
+}
+
+#[test]
+fn migrate_carries_tool_claims_unverified_from_a_final_card() {
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("mig-final");
+    *mode.lock().expect("mode") = "auth-card-final".to_string();
+    let entry = serde_json::json!({
+        "identifier": "urn:air:example.com:mcp:telorama",
+        "displayName": "telorama",
+        "type": "application/mcp-server-card+json",
+        "url": "https://example.com/.well-known/mcp/server-card.json",
+        "description": "The telorama MCP server.",
+        "capabilities": ["render_scene", "validate_scene"],
+        "representativeQueries": ["What can telorama do", "Use telorama to complete a task"],
+        "version": "0.1.0"
+    });
+    let catalog = serde_json::json!({
+        "host": {"displayName": "Example", "domain": "example.com"},
+        "entries": [entry]
+    });
+    std::fs::create_dir_all(site.join(".well-known")).expect("well known");
+    std::fs::write(
+        site.join(".well-known/ai-catalog.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&catalog).expect("serialize")
+        ),
+    )
+    .expect("legacy catalog");
+    let ci = site.join("ci/almanac.yml");
+    let (code, stdout, stderr) = run(&[
+        "migrate",
+        "--site",
+        &site_arg(&site),
+        "--ci",
+        &ci.to_string_lossy(),
+        "--url",
+        &url,
+    ]);
+    // The only card is a Final one, which enumerates no tools.
+    // The entry's tool claims cannot be judged, so they carry
+    // unverified and the migration succeeds, saying so. Judged
+    // against an empty list, every claim would fail and the
+    // entry would drop.
+    assert_eq!(code, 0, "migrate failed with {stdout} {stderr}");
+    assert!(
+        stdout.contains("carried unverified"),
+        "the report must say the claims carried unverified, report was {stdout}"
+    );
+    let migrated: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(site.join(".well-known/ard.json")).expect("migrated catalog"),
+    )
+    .expect("migrated catalog parses");
+    assert_eq!(
+        migrated["entries"][0]["capabilities"],
+        serde_json::json!(["render_scene", "validate_scene"]),
+        "the entry keeps the claims it announced, catalog was {migrated}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["mcp"]["server_name"].as_str(),
+        Some("telorama"),
+        "baseline was {baseline}"
+    );
+    assert!(
+        baseline["mcp"]["tools"]
+            .as_object()
+            .expect("tools")
+            .is_empty(),
+        "the baseline records no tools from an unenumerating card, baseline was {baseline}"
+    );
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "check after migrate failed with {stdout}");
+}
+
+#[test]
+fn generated_card_is_final_shaped() {
+    let (url, _mode) = start_http_fixture();
+    let site = temp_site("cardshape");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let card: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card"),
+    )
+    .expect("card parses");
+    assert_eq!(
+        card["$schema"].as_str(),
+        Some("https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"),
+        "card was {card}"
+    );
+    assert_eq!(
+        card["name"].as_str(),
+        Some("com.example/telorama"),
+        "card was {card}"
+    );
+    assert_eq!(card["title"].as_str(), Some("telorama"), "card was {card}");
+    assert_eq!(card["version"].as_str(), Some("0.1.0"), "card was {card}");
+    let description = card["description"].as_str().expect("description");
+    assert!(
+        description.chars().count() <= 100,
+        "description was {description}"
+    );
+    assert!(
+        card.get("tools").is_none(),
+        "a Final card lists no tools, card was {card}"
+    );
+    assert!(
+        card.get("endpoint").is_none(),
+        "the endpoint lives in remotes, card was {card}"
+    );
+    assert_eq!(
+        card["remotes"][0]["type"].as_str(),
+        Some("streamable-http"),
+        "card was {card}"
+    );
+    assert_eq!(
+        card["remotes"][0]["url"].as_str(),
+        Some(url.as_str()),
+        "card was {card}"
+    );
+    assert_eq!(
+        card["remotes"][0]["supportedProtocolVersions"][0].as_str(),
+        Some("2025-06-18"),
+        "card was {card}"
+    );
+
+    // A check with no target named resolves the endpoint from
+    // the Final card's remotes and runs clean.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "check with a resolved target failed with {stdout}");
+}
+
+#[test]
+fn protected_generation_from_a_final_card() {
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("protgenfinal");
+    *mode.lock().expect("mode") = "auth-card-final".to_string();
+
+    // Generation succeeds from a card that declares identity
+    // and endpoints alone, served only at the normative
+    // location.
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(
+        code, 0,
+        "protected generate from a Final card failed with {stderr}"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline parses");
+    assert_eq!(
+        baseline["mcp"]["server_name"].as_str(),
+        Some("telorama"),
+        "baseline was {baseline}"
+    );
+    assert_eq!(
+        baseline["mcp"]["server_version"].as_str(),
+        Some("0.1.0"),
+        "baseline was {baseline}"
+    );
+    assert_eq!(
+        baseline["mcp"]["protocol_version"].as_str(),
+        Some("2025-06-18"),
+        "baseline was {baseline}"
+    );
+    assert!(
+        baseline["mcp"]["tools"]
+            .as_object()
+            .expect("tools")
+            .is_empty(),
+        "a Final card enumerates no tools, baseline was {baseline}"
+    );
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join(".well-known/ard.json")).expect("catalog"))
+            .expect("catalog parses");
+    let entry = &catalog["entries"][0];
+    assert!(
+        entry
+            .get("capabilities")
+            .and_then(|v| v.as_array())
+            .is_none_or(|items| items.is_empty()),
+        "the entry announces no capabilities from an unenumerating card, catalog was {catalog}"
+    );
+
+    // The declared check is clean and, above all, does not read
+    // the card's silence about tools as a divergence.
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean declared check failed with {stdout}");
+    assert!(
+        stdout.contains("declared-evidence-only"),
+        "report was {stdout}"
+    );
+    assert!(!stdout.contains("card-divergence"), "report was {stdout}");
+
+    // The same silence against a baseline and a catalog that
+    // DO record a tool, as a site generated while the card
+    // still enumerated would hold: the unenumerated card must
+    // still say nothing about tools. Read as an empty list,
+    // it would diverge from both records at critical severity.
+    let baseline_path = site.join("baseline.json");
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline_path).expect("baseline"))
+            .expect("baseline parses");
+    baseline["mcp"]["tools"] = serde_json::json!({
+        "render_scene": {"description_sha256": "x", "schema_sha256": "y"}
+    });
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline).expect("baseline text"),
+    )
+    .expect("edit baseline");
+    for name in [".well-known/ard.json", ".well-known/ai-catalog.json"] {
+        let path = site.join(name);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("catalog"))
+                .expect("catalog parses");
+        catalog["entries"][0]["capabilities"] = serde_json::json!(["render_scene"]);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&catalog).expect("catalog text"),
+        )
+        .expect("edit catalog");
+    }
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(
+        code, 0,
+        "an unenumerated card must not diverge on tools, report was {stdout}"
+    );
+    assert!(!stdout.contains("card-divergence"), "report was {stdout}");
+
+    // Identity is still compared: a card that changes its
+    // version diverges.
+    let card_path = site.join(".well-known/mcp/server-card.json");
+    let mut card: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&card_path).expect("card")).expect("card parses");
+    card["version"] = serde_json::json!("0.0.9");
+    std::fs::write(
+        &card_path,
+        serde_json::to_string_pretty(&card).expect("card text"),
+    )
+    .expect("tamper card");
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "identity change must fail, report was {stdout}");
+    assert!(stdout.contains("card-divergence"), "report was {stdout}");
 }
 
 #[test]

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::Severity;
-use crate::baseline::{AuthBaseline, Baseline};
+use crate::baseline::{AuthBaseline, Baseline, McpBaseline};
 use crate::catalog::Catalog;
 use crate::openapi::OpenApiView;
 use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
@@ -67,6 +67,12 @@ pub struct CardView {
     pub server_name: String,
     pub server_version: String,
     pub tools: Vec<String>,
+    /// False when the card carries no tools array, the
+    /// SEP-2127 Final shape. An unenumerated card is compared
+    /// at identity level only, because it never claimed to
+    /// list tools and reading the absence as an empty list
+    /// would report every recorded tool as vanished.
+    pub tools_enumerated: bool,
 }
 
 /// Everything a check run compares, gathered by the CLI.
@@ -707,10 +713,15 @@ fn check_catalog_against_baseline(
     findings: &mut Vec<Finding>,
 ) {
     let mcp = baseline.mcp.as_ref().expect("checked by caller");
-    if let Some(entry) = published
-        .entries
-        .iter()
-        .find(|e| e.identifier == mcp.entry_id)
+    // The comparison runs only on a baseline that
+    // enumerated. A baseline recorded from a Final shape
+    // card holds no tool record, and the catalog's claims
+    // cannot diverge from a record that was never made.
+    if mcp.capabilities_enumerated
+        && let Some(entry) = published
+            .entries
+            .iter()
+            .find(|e| e.identifier == mcp.entry_id)
     {
         let announced: std::collections::BTreeSet<&str> =
             entry.capabilities.iter().map(|c| c.as_str()).collect();
@@ -737,31 +748,45 @@ fn check_card(
     findings: &mut Vec<Finding>,
 ) {
     let mcp = baseline.mcp.as_ref().expect("checked by caller");
-    let card_tools: std::collections::BTreeSet<&str> =
-        card.tools.iter().map(|t| t.as_str()).collect();
-    let recorded: std::collections::BTreeSet<&str> = mcp.tools.keys().map(|k| k.as_str()).collect();
-    if card_tools != recorded {
-        findings.push(finding(
-            Severity::Critical,
-            "card-divergence",
-            Some(&mcp.entry_id),
-            "the server card's tools differ from the baseline recorded at generation".into(),
-        ));
-    }
-    if let Some(entry) = published
-        .entries
-        .iter()
-        .find(|e| e.identifier == mcp.entry_id)
-    {
-        let announced: std::collections::BTreeSet<&str> =
-            entry.capabilities.iter().map(|c| c.as_str()).collect();
-        if card_tools != announced {
-            findings.push(finding(
-                Severity::Critical,
-                "card-divergence",
-                Some(&mcp.entry_id),
-                "the server card's tools differ from the tools the catalog announces".into(),
-            ));
+    // The tool comparisons run only on a card that enumerates.
+    // A Final shape card carries no tools array, and comparing
+    // its silence against the recorded set would manufacture
+    // a divergence the card never stated.
+    if card.tools_enumerated {
+        let card_tools: std::collections::BTreeSet<&str> =
+            card.tools.iter().map(|t| t.as_str()).collect();
+        // Against the baseline, both sides must have
+        // enumerated: a baseline recorded from a Final shape
+        // card holds no tool record for an enumerating card
+        // to diverge from.
+        if mcp.capabilities_enumerated {
+            let recorded: std::collections::BTreeSet<&str> =
+                mcp.tools.keys().map(|k| k.as_str()).collect();
+            if card_tools != recorded {
+                findings.push(finding(
+                    Severity::Critical,
+                    "card-divergence",
+                    Some(&mcp.entry_id),
+                    "the server card's tools differ from the baseline recorded at generation"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(entry) = published
+            .entries
+            .iter()
+            .find(|e| e.identifier == mcp.entry_id)
+        {
+            let announced: std::collections::BTreeSet<&str> =
+                entry.capabilities.iter().map(|c| c.as_str()).collect();
+            if card_tools != announced {
+                findings.push(finding(
+                    Severity::Critical,
+                    "card-divergence",
+                    Some(&mcp.entry_id),
+                    "the server card's tools differ from the tools the catalog announces".into(),
+                ));
+            }
         }
     }
     if card.server_name != mcp.server_name || card.server_version != mcp.server_version {
@@ -790,6 +815,48 @@ fn check_live_surface(
         .map(|tool| (tool.name.as_str(), tool))
         .collect();
 
+    // The primitive set comparisons run only on a baseline
+    // that enumerated. A baseline recorded from a Final
+    // shape card holds no tool, resource or prompt record,
+    // and a live surface's sets cannot diverge from a
+    // record that was never made. Identity and auth are
+    // recorded either way and always compare.
+    if mcp.capabilities_enumerated {
+        check_live_primitive_sets(mcp, snapshot, &live, findings);
+    }
+
+    if snapshot.server_name != mcp.server_name
+        || snapshot.server_version != mcp.server_version
+        || snapshot.protocol_version != mcp.protocol_version
+    {
+        findings.push(finding(
+            Severity::Major,
+            "server-version-changed",
+            Some(&mcp.entry_id),
+            format!(
+                "server identity changed since generation, was {} {} on {}, is {} {} on {}",
+                mcp.server_name,
+                mcp.server_version,
+                mcp.protocol_version,
+                snapshot.server_name,
+                snapshot.server_version,
+                snapshot.protocol_version
+            ),
+        ));
+    }
+}
+
+/// The live primitive set comparisons: tools in both
+/// directions with their schema and description channels,
+/// and the resource and prompt sets. Called only when the
+/// baseline enumerated, so every comparison here reads a
+/// record that was actually made.
+fn check_live_primitive_sets(
+    mcp: &McpBaseline,
+    snapshot: &SurfaceSnapshot,
+    live: &BTreeMap<&str, &crate::snapshot::ToolSurface>,
+    findings: &mut Vec<Finding>,
+) {
     for (name, recorded) in &mcp.tools {
         match live.get(name.as_str()) {
             None => findings.push(finding(
@@ -830,26 +897,6 @@ fn check_live_surface(
                 ),
             ));
         }
-    }
-
-    if snapshot.server_name != mcp.server_name
-        || snapshot.server_version != mcp.server_version
-        || snapshot.protocol_version != mcp.protocol_version
-    {
-        findings.push(finding(
-            Severity::Major,
-            "server-version-changed",
-            Some(&mcp.entry_id),
-            format!(
-                "server identity changed since generation, was {} {} on {}, is {} {} on {}",
-                mcp.server_name,
-                mcp.server_version,
-                mcp.protocol_version,
-                snapshot.server_name,
-                snapshot.server_version,
-                snapshot.protocol_version
-            ),
-        ));
     }
     if snapshot.resources != mcp.resources {
         findings.push(finding(
@@ -1072,6 +1119,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities_enumerated: true,
             tools,
             resources: vec![],
             prompts: vec![],
@@ -1618,5 +1666,95 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "catalog-baseline-divergence");
         assert_eq!(findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn an_unenumerated_card_is_compared_at_identity_level_only() {
+        // The baseline records a tool the catalog announces.
+        // The card view names the same server and version but
+        // enumerates nothing, the SEP-2127 Final shape. Read
+        // as an empty tool list, it would diverge from both
+        // the baseline and the catalog; read as unenumerated,
+        // it must say nothing about tools at all. The same
+        // view marked enumerated must diverge, so the guard
+        // itself is what this test pins.
+        let cat = catalog();
+        let mut snap = snapshot(vec![ping()]);
+        snap.auth = AuthSurface::Protected(Box::new(crate::snapshot::ProtectedMetadata {
+            resource_metadata: None,
+            authorization_servers: vec![],
+        }));
+        let base = baseline_for(&snap);
+        let view = |enumerated: bool| CardView {
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            tools: vec![],
+            tools_enumerated: enumerated,
+        };
+        let card = view(false);
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&card);
+        let findings = check(&with);
+        assert!(
+            findings.iter().all(|f| f.kind != "card-divergence"),
+            "an unenumerated card must not diverge on tools, findings were {findings:?}"
+        );
+
+        let enumerated = view(true);
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&enumerated);
+        let findings = check(&with);
+        assert!(
+            findings.iter().any(|f| f.kind == "card-divergence"),
+            "an enumerated card with no tools must diverge from the recorded tool, findings were {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unenumerated_baseline_record_diverges_from_nothing() {
+        // The mirror image: a baseline recorded from a Final
+        // shape card holds no tool record, while the catalog
+        // announces a tool the publisher's migration carried
+        // unverified. The catalog cannot diverge from a
+        // record that was never made, and an enumerating
+        // card view has nothing recorded to diverge from
+        // either. With the baseline's flag set back to
+        // enumerated, the same inputs must diverge, so the
+        // baseline side of the guard is what this test pins.
+        let cat = catalog();
+        let mut snap = snapshot(vec![]);
+        snap.capabilities_enumerated = false;
+        snap.auth = AuthSurface::Protected(Box::new(crate::snapshot::ProtectedMetadata {
+            resource_metadata: None,
+            authorization_servers: vec![],
+        }));
+        let mut base = baseline_for(&snap);
+        assert!(!base.mcp.as_ref().expect("mcp").capabilities_enumerated);
+        let card = CardView {
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            tools: vec!["ping".into()],
+            tools_enumerated: true,
+        };
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&card);
+        let findings = check(&with);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "catalog-baseline-divergence" && f.kind != "card-divergence"),
+            "an unenumerated baseline record must not diverge, findings were {findings:?}"
+        );
+
+        base.mcp.as_mut().expect("mcp").capabilities_enumerated = true;
+        let mut with = inputs(&cat, &base, Some(&snap));
+        with.card = Some(&card);
+        let findings = check(&with);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "catalog-baseline-divergence"),
+            "an enumerated baseline with no tools must diverge from the announced tool, findings were {findings:?}"
+        );
     }
 }

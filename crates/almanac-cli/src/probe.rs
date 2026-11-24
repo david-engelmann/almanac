@@ -83,6 +83,7 @@ pub(crate) fn handshake_snapshot(
             .unwrap_or_default()
             .to_string(),
         stateless_shape,
+        capabilities_enumerated: true,
         tools: vec![],
         resources: vec![],
         prompts: vec![],
@@ -152,6 +153,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         server_version: String::new(),
         protocol_version: String::new(),
         stateless_shape: false,
+        capabilities_enumerated: false,
         tools: vec![],
         resources: vec![],
         prompts: vec![],
