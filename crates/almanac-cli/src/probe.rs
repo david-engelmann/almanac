@@ -15,7 +15,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use almanac_core::snapshot::{AuthSurface, ProbeFailure, SurfaceSnapshot, ToolSurface};
+use almanac_core::snapshot::{
+    AuthSurface, CredentialOutcome, ProbeFailure, SurfaceSnapshot, ToolSurface,
+};
 use serde_json::{Value, json};
 
 pub const OFFERED_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -88,6 +90,7 @@ pub(crate) fn handshake_snapshot(
         resources: vec![],
         prompts: vec![],
         auth: AuthSurface::Open,
+        credential: CredentialOutcome::NotPresented,
         failure: None,
     }
 }
@@ -158,6 +161,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         resources: vec![],
         prompts: vec![],
         auth: AuthSurface::Open,
+        credential: CredentialOutcome::NotPresented,
         failure: Some(ProbeFailure {
             step: step.to_string(),
             detail,

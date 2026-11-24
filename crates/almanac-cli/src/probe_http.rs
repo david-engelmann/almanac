@@ -12,7 +12,9 @@
 //! completion. A 401 at either entry is a branch, not a dead end.
 //! It leads to the OAuth metadata ladder, and the run degrades to
 //! declared evidence with the metadata recorded for the drift
-//! engine.
+//! engine. With a publisher credential in hand the walk retries
+//! once with it, and a walked retry is live evidence whose auth
+//! still records the declared posture.
 //!
 //! Redirects on the MCP endpoint are not followed. An announced
 //! endpoint that forwards agents elsewhere is a surface change to
@@ -20,7 +22,9 @@
 
 use std::time::Duration;
 
-use almanac_core::snapshot::{AuthSurface, MetadataRecord, ProbeFailure, SurfaceSnapshot};
+use almanac_core::snapshot::{
+    AuthSurface, CredentialOutcome, MetadataRecord, ProbeFailure, SurfaceSnapshot,
+};
 use serde_json::{Value, json};
 use ureq::Agent;
 
@@ -31,6 +35,13 @@ use crate::probe::{
 use crate::sse;
 
 const TRANSPORT: &str = "streamable-http";
+
+/// The Authorization header value for a publisher token.
+/// One construction, used by the rpc posts and by the
+/// session DELETE courtesy, the endpoint's only requests.
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
 
 fn build_agent() -> Agent {
     ureq::Agent::config_builder()
@@ -54,15 +65,29 @@ struct RpcOutcome {
     message: Option<Value>,
 }
 
+/// One endpoint conversation: the URL every request
+/// posts to, and the riders its requests carry. The
+/// session and the version exist only on the legacy
+/// ladder, the token only when the publisher supplied
+/// one, and all four travel together through the entry
+/// walk, the ladder, the list walk, and each request,
+/// so they are one value rather than four arguments
+/// repeated at every layer.
+struct Conversation<'a> {
+    url: &'a str,
+    session: Option<&'a str>,
+    version: Option<&'a str>,
+    token: Option<&'a str>,
+}
+
 fn rpc(
     agent: &Agent,
-    url: &str,
-    session: Option<&str>,
-    protocol_version: Option<&str>,
+    conversation: &Conversation,
     id: Option<i64>,
     method: &str,
     params: Value,
 ) -> Result<RpcOutcome, String> {
+    let url = conversation.url;
     let mut payload = json!({"jsonrpc": "2.0", "method": method, "params": params});
     if let Some(id) = id {
         payload["id"] = json!(id);
@@ -71,10 +96,18 @@ fn rpc(
         .post(url)
         .header("Accept", "application/json, text/event-stream")
         .header("Content-Type", "application/json");
-    if let Some(session) = session {
+    // The credential rides only on requests to the endpoint
+    // itself, which is the only place rpc posts. The metadata
+    // ladder fetches its documents through get_bytes, never
+    // through here, so the token cannot cross to the
+    // authorization server's origin.
+    if let Some(token) = conversation.token {
+        request = request.header("Authorization", bearer(token));
+    }
+    if let Some(session) = conversation.session {
         request = request.header("Mcp-Session-Id", session);
     }
-    if let Some(version) = protocol_version {
+    if let Some(version) = conversation.version {
         request = request.header("MCP-Protocol-Version", version);
     }
     let mut response = request
@@ -319,16 +352,18 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
             resource_metadata,
             authorization_servers,
         })),
+        credential: CredentialOutcome::NotPresented,
         failure: None,
     }
 }
 
 /// How a list walk ended. A protected answer mid walk hands
-/// back the degraded snapshot the metadata ladder built, and
-/// the caller returns it instead of the walked one.
+/// back the degraded snapshot the metadata ladder built and
+/// the step the challenge arrived at, and the caller returns
+/// it instead of the walked one.
 enum ListWalk {
     Done,
-    Protected(Box<SurfaceSnapshot>),
+    Protected(Box<SurfaceSnapshot>, &'static str),
 }
 
 /// Walk the three lists into the snapshot over HTTP, following
@@ -340,13 +375,12 @@ enum ListWalk {
 /// wrong list under either.
 fn walk_lists(
     agent: &Agent,
-    url: &str,
+    conversation: &Conversation,
     snapshot: &mut SurfaceSnapshot,
-    session: Option<&str>,
-    version: Option<&str>,
     stateless: bool,
     next_id: &mut i64,
 ) -> ListWalk {
+    let url = conversation.url;
     for kind in LIST_KINDS {
         let method = kind.method();
         let mut cursor: Option<String> = None;
@@ -362,7 +396,7 @@ fn walk_lists(
             };
             let id = *next_id;
             *next_id += 1;
-            let outcome = match rpc(agent, url, session, version, Some(id), method, params) {
+            let outcome = match rpc(agent, conversation, Some(id), method, params) {
                 Ok(outcome) => outcome,
                 Err(detail) => {
                     snapshot.failure = Some(ProbeFailure {
@@ -373,11 +407,14 @@ fn walk_lists(
                 }
             };
             if outcome.status == 401 {
-                return ListWalk::Protected(Box::new(protected_snapshot(
-                    agent,
-                    url,
-                    outcome.www_authenticate.as_deref(),
-                )));
+                return ListWalk::Protected(
+                    Box::new(protected_snapshot(
+                        agent,
+                        url,
+                        outcome.www_authenticate.as_deref(),
+                    )),
+                    method,
+                );
             }
             let Some(message) = outcome.message else {
                 snapshot.failure = Some(ProbeFailure {
@@ -429,9 +466,64 @@ fn walk_lists(
     ListWalk::Done
 }
 
-/// Probe an MCP server over Streamable HTTP. Discover first,
-/// the current revision's entry point, and the initialize
-/// ladder behind it for the servers that predate discover.
+/// How one entry walk ended. A challenge is not a failure:
+/// the endpoint answered 401 at the named step, and the
+/// snapshot is the declared mode one the metadata ladder
+/// built from that challenge. The caller decides whether a
+/// credential retries the walk or the declared snapshot is
+/// the run's answer.
+enum EntryOutcome {
+    Snapshot(SurfaceSnapshot),
+    Challenged {
+        step: &'static str,
+        snapshot: SurfaceSnapshot,
+    },
+}
+
+/// Probe an MCP server over Streamable HTTP. The walk runs
+/// unauthenticated first. A challenge, with a publisher
+/// credential in hand, retries the whole walk once with the
+/// credential presented; a walked retry is a live pass whose
+/// auth still records the declared posture the first
+/// challenge's metadata ladder read, and a refused retry
+/// returns the declared snapshot with the refusal named. No
+/// credential, and the declared snapshot is the answer, as
+/// before.
+pub fn probe_http(url: &str, token: Option<&str>) -> SurfaceSnapshot {
+    let agent = build_agent();
+    match entry_walk(&agent, url, None) {
+        EntryOutcome::Snapshot(snapshot) => snapshot,
+        EntryOutcome::Challenged { snapshot, .. } => {
+            let Some(token) = token else {
+                return snapshot;
+            };
+            match entry_walk(&agent, url, Some(token)) {
+                EntryOutcome::Snapshot(mut walked) => {
+                    // A walk that failed partway is a failed
+                    // probe, not an accepted credential: its
+                    // lists are partial, and the failure
+                    // branch of every consumer is what reads
+                    // it. Only a completed walk earns the
+                    // mark and the declared posture.
+                    if walked.failure.is_none() {
+                        walked.auth = snapshot.auth.clone();
+                        walked.credential = CredentialOutcome::Accepted;
+                    }
+                    walked
+                }
+                EntryOutcome::Challenged { step, .. } => {
+                    let mut refused = snapshot;
+                    refused.credential = CredentialOutcome::Refused(step.to_string());
+                    refused
+                }
+            }
+        }
+    }
+}
+
+/// One walk of the endpoint: discover first, the current
+/// revision's entry point, and the initialize ladder behind
+/// it for the servers that predate discover.
 ///
 /// The fallback is evidence based, because the two entries
 /// diagnose different servers. Only an answer that says the
@@ -446,27 +538,35 @@ fn walk_lists(
 /// to show, and would let a broken discover hide behind a
 /// healthy handshake indefinitely. A transport failure is a
 /// discover failure too, for the same reason.
-pub fn probe_http(url: &str) -> SurfaceSnapshot {
-    let agent = build_agent();
-    let outcome = match rpc(
-        &agent,
+fn entry_walk(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutcome {
+    let conversation = Conversation {
         url,
-        None,
-        None,
+        session: None,
+        version: None,
+        token,
+    };
+    let outcome = match rpc(
+        agent,
+        &conversation,
         Some(1),
         "server/discover",
         discover_params(),
     ) {
         Ok(outcome) => outcome,
-        Err(detail) => return failed_snapshot(TRANSPORT, "server/discover", detail),
+        Err(detail) => {
+            return EntryOutcome::Snapshot(failed_snapshot(TRANSPORT, "server/discover", detail));
+        }
     };
     if outcome.status == 401 {
-        return protected_snapshot(&agent, url, outcome.www_authenticate.as_deref());
+        return EntryOutcome::Challenged {
+            step: "server/discover",
+            snapshot: protected_snapshot(agent, url, outcome.www_authenticate.as_deref()),
+        };
     }
     if outcome.message.as_ref().is_some_and(is_method_not_found)
         || matches!(outcome.status, 404 | 405)
     {
-        return initialize_ladder(&agent, url);
+        return initialize_ladder(agent, url, token);
     }
     let result = outcome
         .message
@@ -481,37 +581,44 @@ pub fn probe_http(url: &str) -> SurfaceSnapshot {
             },
             None => format!("endpoint answered HTTP {} without a result", outcome.status),
         };
-        return failed_snapshot(TRANSPORT, "server/discover", detail);
+        return EntryOutcome::Snapshot(failed_snapshot(TRANSPORT, "server/discover", detail));
     };
     let mut snapshot = handshake_snapshot(TRANSPORT, result, true);
     if snapshot.server_name.is_empty() {
-        return failed_snapshot(
+        return EntryOutcome::Snapshot(failed_snapshot(
             TRANSPORT,
             "server/discover",
             "the discover result named no server".into(),
-        );
+        ));
     }
     if snapshot.protocol_version.is_empty() {
         snapshot.protocol_version = CURRENT_PROTOCOL_VERSION.into();
     }
     let mut next_id = 2_i64;
-    if let ListWalk::Protected(protected) =
-        walk_lists(&agent, url, &mut snapshot, None, None, true, &mut next_id)
+    if let ListWalk::Protected(protected, step) =
+        walk_lists(agent, &conversation, &mut snapshot, true, &mut next_id)
     {
-        return *protected;
+        return EntryOutcome::Challenged {
+            step,
+            snapshot: *protected,
+        };
     }
-    snapshot
+    EntryOutcome::Snapshot(snapshot)
 }
 
 /// The earlier revisions' entry: an initialize handshake, the
 /// initialized notification, the lists with the session echoed,
 /// and the DELETE courtesy when the server issued a session.
-fn initialize_ladder(agent: &Agent, url: &str) -> SurfaceSnapshot {
+fn initialize_ladder(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutcome {
+    let bare = Conversation {
+        url,
+        session: None,
+        version: None,
+        token,
+    };
     let init = match rpc(
         agent,
-        url,
-        None,
-        None,
+        &bare,
         Some(1),
         "initialize",
         json!({
@@ -521,10 +628,15 @@ fn initialize_ladder(agent: &Agent, url: &str) -> SurfaceSnapshot {
         }),
     ) {
         Ok(outcome) => outcome,
-        Err(detail) => return failed_snapshot(TRANSPORT, "initialize", detail),
+        Err(detail) => {
+            return EntryOutcome::Snapshot(failed_snapshot(TRANSPORT, "initialize", detail));
+        }
     };
     if init.status == 401 {
-        return protected_snapshot(agent, url, init.www_authenticate.as_deref());
+        return EntryOutcome::Challenged {
+            step: "initialize",
+            snapshot: protected_snapshot(agent, url, init.www_authenticate.as_deref()),
+        };
     }
     if init.status != 200 {
         let detail = match (&init.location, init.status) {
@@ -533,21 +645,21 @@ fn initialize_ladder(agent: &Agent, url: &str) -> SurfaceSnapshot {
             }
             _ => format!("endpoint answered HTTP {}", init.status),
         };
-        return failed_snapshot(TRANSPORT, "initialize", detail);
+        return EntryOutcome::Snapshot(failed_snapshot(TRANSPORT, "initialize", detail));
     }
     let Some(init_message) = init.message else {
-        return failed_snapshot(
+        return EntryOutcome::Snapshot(failed_snapshot(
             TRANSPORT,
             "initialize",
             "endpoint answered 200 without an initialize result".into(),
-        );
+        ));
     };
     if let Some(error) = init_message.get("error") {
-        return failed_snapshot(
+        return EntryOutcome::Snapshot(failed_snapshot(
             TRANSPORT,
             "initialize",
             format!("server answered initialize with error {error}"),
-        );
+        ));
     }
     let result = init_message.get("result").cloned().unwrap_or(Value::Null);
     let negotiated = result
@@ -566,37 +678,44 @@ fn initialize_ladder(agent: &Agent, url: &str) -> SurfaceSnapshot {
     // outcome is otherwise uninteresting. A 401 there is not,
     // because it means the surface is protected after all, so
     // that one answer routes to the metadata ladder.
-    if let Ok(outcome) = rpc(
-        agent,
+    let stateful = Conversation {
         url,
         session,
         version,
+        token,
+    };
+    if let Ok(outcome) = rpc(
+        agent,
+        &stateful,
         None,
         "notifications/initialized",
         json!({}),
     ) && outcome.status == 401
     {
-        return protected_snapshot(agent, url, outcome.www_authenticate.as_deref());
+        return EntryOutcome::Challenged {
+            step: "notifications/initialized",
+            snapshot: protected_snapshot(agent, url, outcome.www_authenticate.as_deref()),
+        };
     }
 
-    if let ListWalk::Protected(protected) = walk_lists(
-        agent,
-        url,
-        &mut snapshot,
-        session,
-        version,
-        false,
-        &mut next_id,
-    ) {
-        return *protected;
+    if let ListWalk::Protected(protected, step) =
+        walk_lists(agent, &stateful, &mut snapshot, false, &mut next_id)
+    {
+        return EntryOutcome::Challenged {
+            step,
+            snapshot: *protected,
+        };
     }
 
     if let Some(session) = session {
-        let delete = agent
+        let mut delete = agent
             .delete(url)
             .header("Mcp-Session-Id", session)
             .header("MCP-Protocol-Version", negotiated.as_str());
+        if let Some(token) = token {
+            delete = delete.header("Authorization", bearer(token));
+        }
         let _ = delete.call();
     }
-    snapshot
+    EntryOutcome::Snapshot(snapshot)
 }

@@ -1165,3 +1165,188 @@ flag first, the config second. The product code already
 implements that order; the test now runs without the
 flag, with a comment saying why, so the headline
 behavior is proven rather than masked.
+
+## Post-launch enhancement: the credential-aware probe (design, 2026-11-24)
+
+DESIGN section 11 flags this as the first post-launch
+enhancement, and HTTP-TRANSPORT.md states its shape in
+one sentence: a publisher supplied token from the CI
+secret store. The design here settles the details
+before the build, in the same record-first discipline.
+
+The credential is a bearer token the publisher already
+holds, presented as an Authorization header. Almanac
+runs no authorization flow: no client registration, no
+authorization code exchange, no refresh, no client
+credentials grant. Acquiring and rotating the token is
+the publisher's arrangement with their own server; the
+probe's whole part is presenting it correctly and
+saying honestly what it bought.
+
+The token reaches the probe from the environment only.
+Generate, check, and migrate gain a --token-env flag
+naming the environment variable to read, defaulting to
+ALMANAC_TOKEN, which is the shape a CI secret store
+already produces. The token is never a flag value (argv
+is world-visible and CI echoes commands), never read
+from almanac.toml (a committed file must not carry a
+secret), and never written to the baseline, the
+catalog, or the report. When the named variable is
+unset or empty, the run is exactly today's run.
+
+The header is attached only to requests to the MCP
+endpoint itself, the URL the catalog names. The OAuth
+discovery documents are public and may live on another
+origin; they are fetched without the header, so the
+token never crosses to a host that did not challenge
+for it. The endpoint's redirects are not followed, as
+before, so there is no redirect path for the header to
+leak along either.
+
+The ladder gains one rung. The walk runs unauthenticated
+first, as today; a 401 from the endpoint, with a token
+available, retries the whole walk (discover, then the
+lists) with the header. A credentialed walk that
+completes is a live pass: the snapshot records that a
+credential was presented and accepted, and the report
+labels the run a live pass without the declared
+evidence qualification. A 401 anywhere in the
+credentialed walk falls back to the declared path, and
+the report says the presented credential was refused,
+naming the step. The baseline records the surface's
+declared auth posture (the protected resource and
+authorization server metadata, compared as today)
+whether or not a credential was presented: holding a
+token is a property of the run, not of the surface, so
+authentication-changed keeps its meaning across runs
+with and without one.
+
+What the credential buys is rung by rung, and the
+record says so plainly. Against a baseline recorded
+from a Final card, a credentialed check verifies
+identity and endpoint liveness live (the announced
+server actually answers and handshakes) but compares
+no capabilities, because none were recorded; the full
+capability comparison needs a credentialed generate or
+migrate to record the live baseline first, after which
+credentialed checks compare live against live. Generate
+with a token on a protected surface takes the open
+path: live snapshot, enumerated capabilities,
+live-probe provenance, the generated card written from
+the live surface.
+
+Stdio targets are untouched: a stdio server is a local
+process in the operator's own environment, and the
+flag has no effect there.
+
+Tests ride the existing auth fixture, which gains a
+mode that answers 401 without the token and serves the
+discover and list walk with it. The pins: a credentialed
+check on a protected surface is a live pass; a
+credentialed generate records the tools; a refused
+token degrades to declared mode with the refusal
+reported; and no token changes nothing, which the
+existing protected-surface tests already pin.
+
+### The credential-aware probe, as built (2026-11-24)
+
+The snapshot records the run's credential as a
+CredentialOutcome: NotPresented, Accepted, or
+Refused(step). It is a fact of the run beside the
+auth posture, which stays the surface's: a credentialed
+snapshot's auth is still Protected with the metadata
+the first challenge's ladder read, so the baseline
+records the posture and authentication-changed keeps
+comparing it across runs with and without a token.
+
+The HTTP probe walks unauthenticated first, exactly as
+before; a challenge hands back the step and the
+declared snapshot, and only then, with a token in hand,
+retries the whole walk once with the Authorization
+header on the endpoint requests. The header value is
+built by one helper and set only on the endpoint's own
+requests, the rpc posts and the session DELETE; the
+metadata ladder and the card fetch go through the
+plain document fetch and never see it. A
+walked retry returns the live snapshot with its auth
+replaced by the declared posture and its credential
+marked Accepted. A refused retry returns the declared
+snapshot with the refusal step recorded. A failure in
+the credentialed walk that is not a 401 is a probe
+failure as usual; only the challenge degrades.
+
+The drift dispatch reads the outcome: a Protected
+snapshot with an accepted credential runs the live
+surface comparison (the auth comparison above it runs
+either way), and any other Protected snapshot runs
+the card comparison as before. Generate and migrate
+take the card path only when the credential was not
+accepted, so a credentialed run records the live
+baseline with live-probe provenance. Check labels a
+credentialed run live, and a refused run declared,
+with stderr naming the refusal and its step.
+
+The CLI takes --token-env naming the variable to
+read, defaulting to ALMANAC_TOKEN; an unset or empty
+variable is no credential. The fixture gained an
+auth-token mode serving the walk only to the token
+bearer, and the pins are an end to end test (generate
+records the seven walked tools with live-probe
+provenance, check is live with the token, declared
+without it, declared with the refusal named on a
+wrong one) plus a core test pinning the dispatch on
+the credential outcome alone.
+
+### Credential-aware probe checkpoint fix pass (2026-11-24)
+
+The red team and the spec review each found the same
+two Majors, and both sat on the slice's headline
+claims. First, the core dispatch test asserted a
+finding kind nothing emits (tool-removed for the
+live comparison's announced-tool-missing), so the
+pin was void in both directions; it now asserts the
+real kind. Second, the live identity comparison
+compared protocol versions ungated, and a baseline
+recorded from a Final card holds the card's first
+declared version, not a negotiation, so a
+credentialed check against such a baseline would
+have reported identity drift that never happened.
+Protocol now compares only between two live records,
+which the entry's provenance distinguishes, matching
+the card comparison's longstanding omission of the
+field. Further closures: migrate names a refused
+credential in its report, as generate and check
+already did; a credentialed walk that fails partway
+no longer earns the Accepted mark, since its lists
+are partial; the token value is trimmed against the
+secret store's trailing newline; a refusal at the
+initialized notification names that step rather than
+the ladder's; the walked-live predicate is stated
+once on the snapshot instead of re-derived at five
+sites; the Authorization value is built by one
+helper shared by the rpc posts and the session
+DELETE; and the tokenless run's stderr assertion
+now also proves no refusal was reported. The
+standards axis's data clump note (the request
+context threading four layers) is answered in the
+hosted gate fix pass below.
+
+### Credential-aware probe hosted gate fix pass (2026-11-24)
+
+Two hosted rounds, both in the lint layer, no
+product behavior changed. The first was an unused
+import: the walked-live predicate moved the
+credential comparison into the snapshot, so drift's
+library code no longer names the credential type
+and its crate level import moved into the tests
+module that names it. The second was the argument
+lint: threading the credential pushed the request
+helper and the list walk past seven arguments. The
+standards axis had flagged the same clump as a
+judgment call; the lint settled it, and the four
+riders every probe request carries (the endpoint
+URL, the session, the protocol version, the token)
+are now one Conversation value threaded through the
+entry walk, the ladder, the list walk, and each
+request, which is the bundling the review named as
+the natural fix.

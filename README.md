@@ -31,7 +31,9 @@ Generation is the on-ramp. The gate is the product.
 - generate writes the dual path catalog and the baseline from repo
   artifacts and the live surface. A protected surface is generated
   from its server card instead, with the authentication metadata
-  recorded alongside. OpenAPI documents the site serves are
+  recorded alongside, unless a publisher credential is available
+  through the environment, in which case the surface is probed
+  live and the baseline records what the walk actually served. OpenAPI documents the site serves are
   announced as API entries, and A2A agent cards as agent
   entries, and the baseline records their operations and
   skills so check can compare them fact by fact. The
@@ -46,7 +48,11 @@ Generation is the on-ramp. The gate is the product.
   exactly one of url or data per entry, representative query
   counts, dual path coherence and trust manifest shape and expiry.
 - check is the drift gate for CI, in an offline repo mode and a live
-  mode that probes the deployed surface. It also cross checks the
+  mode that probes the deployed surface. A protected surface is
+  checked against its server card as declared evidence, or probed
+  live when a publisher credential is available through the
+  environment, and a refused credential is named in the run's
+  output rather than silently falling back. It also cross checks the
   MCP endpoints a site's agents.json names against the ones the
   catalog announces, because two public claims about one surface
   should not disagree.

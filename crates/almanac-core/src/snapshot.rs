@@ -48,11 +48,53 @@ pub struct SurfaceSnapshot {
     /// Prompt names, sorted by the probe.
     pub prompts: Vec<String>,
     pub auth: AuthSurface,
+    /// How a publisher credential figured in this probe. A
+    /// surface's auth posture and a run's credential are
+    /// different facts: the posture is the surface's, recorded
+    /// in the baseline and compared across runs, while the
+    /// credential is the run's, and decides only which evidence
+    /// the run gathered.
+    pub credential: CredentialOutcome,
     /// Set when the probe could not complete. The step names where
     /// it stopped. A snapshot with a failure still carries whatever
     /// the probe learned before it, and the drift engine decides
     /// what the failure means.
     pub failure: Option<ProbeFailure>,
+}
+
+/// A publisher supplied credential, presented by the probe
+/// when a protected surface challenges it. Almanac runs no
+/// authorization flow; the token is the publisher's own,
+/// read from the environment, and presented only to the MCP
+/// endpoint itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CredentialOutcome {
+    /// No credential was presented. The walk ran open, or the
+    /// surface challenged and the run holds no token.
+    NotPresented,
+    /// A credential was presented and the surface accepted
+    /// it: this snapshot's lists were walked live on a
+    /// protected surface, and its auth still records the
+    /// declared posture the metadata ladder read.
+    Accepted,
+    /// A credential was presented and the surface answered
+    /// 401 at the named step. The snapshot is the declared
+    /// mode one, and the refusal is a fact of the run the
+    /// report names.
+    Refused(String),
+}
+
+impl SurfaceSnapshot {
+    /// True when this snapshot is live evidence from a
+    /// protected surface: the surface's posture is Protected
+    /// and the run walked it on a credential the surface
+    /// accepted. The one place this slice's central predicate
+    /// is stated, so the drift dispatch and the three
+    /// commands cannot disagree about the same snapshot.
+    pub fn walked_live(&self) -> bool {
+        matches!(self.auth, AuthSurface::Protected(_))
+            && self.credential == CredentialOutcome::Accepted
+    }
 }
 
 /// One tool as served.
