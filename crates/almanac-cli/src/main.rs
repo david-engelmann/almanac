@@ -56,7 +56,9 @@ Validate reads a whole site, or one catalog file with --file PATH.
 Validate verifies trust manifest signatures with keys from
 --trust-keys PATH (a JWKS document or a single JWK), and with
 --fetch-keys it also resolves a did:web identity's document
-over HTTPS to find its keys.
+over HTTPS to find its keys. Check judges trust manifests as
+part of its drift report: the envelope layers always, and
+signatures too when the same two flags give the run keys.
 Migrate writes CI wiring to --ci PATH when it migrates a site.
 A protected surface is probed live when a publisher credential
 is available. The token is read from the environment variable
@@ -165,17 +167,17 @@ fn token(flags: &Flags) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// The trust key flags belong to validate alone. Another
-/// command refuses them outright rather than accepting
-/// and silently ignoring them, which would let an
-/// operator believe signatures were gated when no
-/// verification ran.
+/// The trust key flags belong to validate and check.
+/// Another command refuses them outright rather than
+/// accepting and silently ignoring them, which would
+/// let an operator believe signatures were gated when
+/// no verification ran.
 fn refuse_trust_flags(flags: &Flags) -> Result<(), String> {
     if flags.trust_keys.is_some() {
-        return Err("--trust-keys applies to validate only".into());
+        return Err("--trust-keys applies to validate and check only".into());
     }
     if flags.fetch_keys {
-        return Err("--fetch-keys applies to validate only".into());
+        return Err("--fetch-keys applies to validate and check only".into());
     }
     Ok(())
 }
@@ -227,15 +229,17 @@ fn run() -> Result<i32, String> {
         }
         "check" => {
             let flags = parse_flags(&args[1..])?;
-            refuse_trust_flags(&flags)?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let target = target(&flags)?;
+            let trust_keys = flags.trust_keys.as_deref().map(PathBuf::from);
             site::check(
                 &site,
                 target.as_ref(),
                 fail_at(&flags)?,
                 token(&flags).as_deref(),
                 flags.fetch_remote,
+                trust_keys.as_deref(),
+                flags.fetch_keys,
             )
         }
         "validate" => {

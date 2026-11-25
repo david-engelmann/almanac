@@ -667,7 +667,10 @@ Rust, the fleet default, with no exception requested.
   carries that experience in verirun. It has since arrived. The core
   carries an RFC 8785 module, and validate verifies trust manifest
   signatures over the canonical bytes, as the trust manifest
-  verification section of DECISIONS.md records.
+  verification section of DECISIONS.md records. Check judges the
+  same envelopes inside its drift report, the signature layer when
+  the run holds keys and the removal of a recorded envelope always,
+  as the check integration section of DECISIONS.md records.
 - Distribution. The binary is named almanac and the crates are
   almanac-core and almanac-cli, the bare crate name belonging to a
   dormant calendar tool, as section 1 records. The crates publish to

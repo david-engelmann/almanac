@@ -19,7 +19,7 @@ use almanac_core::Severity;
 use almanac_core::a2a::{A2aView, reduce_agent_card};
 use almanac_core::baseline::{
     A2aBaseline, ArtifactBaseline, Baseline, CardDisplay, EntryProvenance, McpBaseline,
-    OpenApiBaseline, SkillBaseline,
+    OpenApiBaseline, SkillBaseline, TrustManifestBaseline,
 };
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
@@ -679,6 +679,30 @@ struct GenerationReport {
     warnings: Vec<String>,
 }
 
+/// The baseline's trust manifest records for a set of
+/// entries: one record per entry carrying at least
+/// one envelope, with the hashes the trust module
+/// computes. Generation and migration both record
+/// what the catalog they write carries, so a later
+/// check can see an envelope that was there and is
+/// gone.
+fn trust_records(entries: &[Entry]) -> Vec<TrustManifestBaseline> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let hashes = almanac_core::trust::trust_manifest_hashes(entry);
+            if hashes.is_empty() {
+                None
+            } else {
+                Some(TrustManifestBaseline {
+                    entry_id: entry.identifier.clone(),
+                    manifest_sha256: hashes,
+                })
+            }
+        })
+        .collect()
+}
+
 /// The generate command. Probes the live surface when a
 /// target is named, writes the dual path catalog, the
 /// server card and the baseline. A protected surface is
@@ -702,6 +726,41 @@ pub fn generate(
     // and validated before the probe runs, so a configuration
     // error refuses the run without spending a probe on it.
     let config = load_config(site)?;
+    // The catalog this run replaces, read before anything
+    // is written: its entries' trust manifests carry
+    // forward onto the entries that persist, because
+    // generation authors no manifests of its own and a
+    // regeneration that stripped a publisher's envelope
+    // would un-sign their catalog as a side effect. A
+    // predecessor that cannot be read carries nothing,
+    // and the report says so.
+    let mut carry_warnings: Vec<String> = Vec::new();
+    let previous: Option<Catalog> = {
+        let ard = site.join(".well-known/ard.json");
+        let legacy = site.join(".well-known/ai-catalog.json");
+        // The current path first, the legacy path behind
+        // it: a predecessor on either path can carry
+        // envelopes, and one unreadable copy does not
+        // strand the other's.
+        let mut read_errors: Vec<String> = Vec::new();
+        let mut found = None;
+        for path in [&ard, &legacy] {
+            if found.is_some() || !path.exists() {
+                continue;
+            }
+            match read_json(path) {
+                Ok(catalog) => found = Some(catalog),
+                Err(reason) => read_errors.push(reason),
+            }
+        }
+        if found.is_none() && !read_errors.is_empty() {
+            carry_warnings.push(format!(
+                "the catalog this run replaces could not be read ({}), so its trust manifests were not carried forward",
+                read_errors.join("; ")
+            ));
+        }
+        found
+    };
     let config_warnings = validate_entry_blocks(&config)?;
     if target.is_none()
         && skill_path.is_none()
@@ -719,6 +778,7 @@ pub fn generate(
     let metadata = read_repo_metadata(site);
     let mut notes: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = config_warnings;
+    warnings.extend(carry_warnings);
     let mut suppressed: Vec<SuppressedEntry> = Vec::new();
     let mut written: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
@@ -1440,6 +1500,34 @@ pub fn generate(
         }
     }
 
+    // Carried envelopes land on the entries that
+    // persist, before the catalog and the baseline are
+    // assembled from the same final entries. An entry
+    // whose facts changed under its envelope will fail
+    // the envelope's own binding at the next validate
+    // or check, which is the re-sign signal working as
+    // designed, never a reason to drop the envelope
+    // silently here.
+    if let Some(previous) = &previous {
+        for entry in &mut entries {
+            if entry.trust_manifest.is_none()
+                && entry.trust_manifests.is_empty()
+                && let Some(old) = previous
+                    .entries
+                    .iter()
+                    .find(|e| e.identifier == entry.identifier)
+                && (old.trust_manifest.is_some() || !old.trust_manifests.is_empty())
+            {
+                entry.trust_manifest = old.trust_manifest.clone();
+                entry.trust_manifests = old.trust_manifests.clone();
+                notes.push(format!(
+                    "the trust manifest for {} was carried from the catalog this run replaces",
+                    entry.identifier
+                ));
+            }
+        }
+    }
+    let trust_manifests = trust_records(&entries);
     let catalog = Catalog {
         host: Host {
             display_name: display_name.clone(),
@@ -1468,6 +1556,7 @@ pub fn generate(
         openapi,
         a2a,
         provenance,
+        trust_manifests,
     };
     // The deferred copies land now, with every input read
     // and planned and the run past every refusal.
@@ -1793,6 +1882,15 @@ fn valid_iso_date(text: &str) -> bool {
         && (1..=31).contains(&text[8..10].parse::<u32>().unwrap_or(0))
 }
 
+/// The current time in unix seconds, from the system
+/// clock, for the expiry claims that read in seconds.
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Today's date in UTC, YYYY-MM-DD, from the system clock. The
 /// civil conversion is the standard days-from-epoch algorithm,
 /// kept here so the CLI needs no date crate for one string.
@@ -1905,6 +2003,8 @@ pub fn check(
     fail_at: Severity,
     token: Option<&str>,
     fetch_remote: bool,
+    trust_keys: Option<&Path>,
+    fetch_keys: bool,
 ) -> Result<i32, String> {
     let ard_path = site.join(".well-known/ard.json");
     let legacy_path = site.join(".well-known/ai-catalog.json");
@@ -2143,7 +2243,21 @@ pub fn check(
         }
     }
 
+    // The trust pass's keys, assembled only when the
+    // run names a key source: a run holding no keys
+    // judges the envelopes' shape, bindings and expiry
+    // and makes no signature claim, the scoping the
+    // check integration design records.
+    let held_keys;
+    let trust_keys_held: Option<&[almanac_core::trust::TrustKey]> =
+        if trust_keys.is_some() || fetch_keys {
+            held_keys = validation_keys(&published, trust_keys, fetch_keys)?;
+            Some(&held_keys)
+        } else {
+            None
+        };
     let today = today_utc();
+    let now_unix = now_unix();
     let findings = drift::check(&CheckInputs {
         published: &published,
         legacy: legacy_ref,
@@ -2164,6 +2278,8 @@ pub fn check(
         a2a_broken: &a2a_broken,
         suppressions: &suppressions,
         today: &today,
+        now_unix,
+        trust_keys: trust_keys_held,
         catalog_media_type: catalog_media_type.as_deref(),
     });
     let mode = match &snapshot {
@@ -2989,6 +3105,7 @@ pub fn migrate_site(
             openapi: openapi_baselines,
             a2a: a2a_baselines,
             provenance,
+            trust_manifests: trust_records(&carried),
         };
         write_file(&site.join("baseline.json"), &pretty_bytes(&baseline))?;
         let catalog = Catalog {
@@ -3076,10 +3193,7 @@ fn report_validation(
     trust_keys: Option<&Path>,
     fetch_keys: bool,
 ) -> Result<i32, String> {
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_unix = now_unix();
     let keys = validation_keys(published, trust_keys, fetch_keys)?;
     let findings = almanac_core::validate::validate_catalog_with_keys(
         published,

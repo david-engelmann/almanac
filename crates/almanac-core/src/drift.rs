@@ -145,6 +145,15 @@ pub struct CheckInputs<'a> {
     pub suppressions: &'a [Suppression],
     /// Today's date, YYYY-MM-DD, for suppression expiry.
     pub today: &'a str,
+    /// The current time in unix seconds, for the trust
+    /// manifest expiry claims that read in seconds.
+    pub now_unix: i64,
+    /// The trust verification keys the run holds, when
+    /// it holds any. None makes no signature claim in
+    /// the trust pass, the scoping the check integration
+    /// design records; Some, even empty, engages the
+    /// signature layer and reports what it cannot judge.
+    pub trust_keys: Option<&'a [crate::trust::TrustKey]>,
     /// The media type the catalog itself was observed
     /// served with, in a run that could observe it. None
     /// when the run made no observation (repo mode, or
@@ -464,6 +473,12 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     check_openapi(inputs, &mut findings);
     check_a2a(inputs, &mut findings);
 
+    // The trust pass runs in every mode. The envelope
+    // layers judge the published catalog's manifests,
+    // and the baseline's envelope records catch the
+    // removal no content comparison sees.
+    check_trust(inputs, &mut findings);
+
     apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
     findings.sort_by(|a, b| {
@@ -474,6 +489,57 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
             .then_with(|| a.detail.cmp(&b.detail))
     });
     findings
+}
+
+/// The trust pass. The envelope findings come from
+/// the validate module's layers, the same code the
+/// validate command runs, so a manifest is judged
+/// identically wherever it surfaces. The removal
+/// judgment is this module's: an entry the baseline
+/// records an envelope for, still published and
+/// carrying no envelope, has lost it silently, a
+/// downgrade at critical. Carrying no envelope is
+/// the test, not carrying no manifest: an envelope
+/// swapped for an expiry-only stub has been removed
+/// in every way that matters, and an envelope
+/// swapped for another envelope, a re-signing, is
+/// re-judged on its new contents by the envelope
+/// layers with no finding of its own from here,
+/// which is why the recorded hashes identify the
+/// baseline's envelope in the record rather than
+/// gating this judgment. An entry gone from the
+/// catalog is the entry classes' finding, not this
+/// one's.
+fn check_trust(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    findings.extend(crate::validate::envelope_findings(
+        inputs.published,
+        inputs.today,
+        inputs.now_unix,
+        inputs.trust_keys,
+    ));
+    for record in &inputs.baseline.trust_manifests {
+        let Some(entry) = inputs
+            .published
+            .entries
+            .iter()
+            .find(|e| e.identifier == record.entry_id)
+        else {
+            continue;
+        };
+        let carries_envelope = entry
+            .trust_manifest
+            .iter()
+            .chain(entry.trust_manifests.iter())
+            .any(crate::trust::is_envelope);
+        if !carries_envelope {
+            findings.push(finding(
+                Severity::Critical,
+                "trust-manifest-removed",
+                Some(&entry.identifier),
+                "the baseline records a trust manifest for this entry, and the published catalog carries none".into(),
+            ));
+        }
+    }
 }
 
 /// Amendment C, the agents.json cross check. agents.json, the
@@ -1459,7 +1525,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{ArtifactBaseline, CardDisplay, McpBaseline};
+    use crate::baseline::{ArtifactBaseline, CardDisplay, McpBaseline, TrustManifestBaseline};
     use crate::catalog::{Catalog, Entry, Host};
     use crate::snapshot::{CredentialOutcome, ToolSurface};
 
@@ -1488,6 +1554,8 @@ mod tests {
             a2a_broken: &[],
             suppressions: &[],
             today: "2026-11-21",
+            now_unix: 1_800_000_000,
+            trust_keys: None,
             catalog_media_type: None,
         }
     }
@@ -1554,7 +1622,68 @@ mod tests {
             openapi: vec![],
             a2a: vec![],
             provenance: vec![],
+            trust_manifests: vec![],
         }
+    }
+
+    #[test]
+    fn a_recorded_trust_manifest_removed_is_critical() {
+        // The baseline remembers the entry's envelope.
+        // The published entry carrying none is the
+        // silent downgrade at critical. The same record
+        // against a catalog whose entry is gone draws
+        // nothing from this class, and a baseline with
+        // no record judges nothing either.
+        let cat = catalog();
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.trust_manifests = vec![TrustManifestBaseline {
+            entry_id: "urn:air:example.com:mcp:demo".into(),
+            manifest_sha256: vec!["0".repeat(64)],
+        }];
+        let findings = check(&inputs(&cat, &base, None));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-removed" && f.severity == Severity::Critical),
+            "{findings:?}"
+        );
+        // An expiry-only stub where the envelope stood
+        // is the same removal: the entry carries a
+        // manifest and no envelope.
+        let mut stubbed = catalog();
+        stubbed.entries[0].trust_manifest = Some(serde_json::json!({"expiresAt": "2999-01-01"}));
+        let findings = check(&inputs(&stubbed, &base, None));
+        assert!(
+            findings.iter().any(|f| f.kind == "trust-manifest-removed"),
+            "{findings:?}"
+        );
+        // Another envelope in its place, a re-signing,
+        // is re-judged on its contents and draws no
+        // removal.
+        let mut resigned = catalog();
+        resigned.entries[0].trust_manifest = Some(serde_json::json!({
+            "identity": "did:web:example.com",
+            "subject": {"identifier": "urn:air:example.com:mcp:demo"},
+            "signature": "eyJhbGciOiJFUzI1NiJ9..AAAA",
+        }));
+        let findings = check(&inputs(&resigned, &base, None));
+        assert!(
+            findings.iter().all(|f| f.kind != "trust-manifest-removed"),
+            "{findings:?}"
+        );
+        let mut gone = catalog();
+        gone.entries.clear();
+        let findings = check(&inputs(&gone, &base, None));
+        assert!(
+            findings.iter().all(|f| f.kind != "trust-manifest-removed"),
+            "{findings:?}"
+        );
+        let plain = baseline_for(&snapshot(vec![ping()]));
+        let findings = check(&inputs(&cat, &plain, None));
+        assert!(
+            findings.iter().all(|f| f.kind != "trust-manifest-removed"),
+            "{findings:?}"
+        );
     }
 
     #[test]

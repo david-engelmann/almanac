@@ -40,6 +40,29 @@ pub struct Baseline {
     /// Per entry provenance. Which input produced the entry, and
     /// which inputs it overruled on the way.
     pub provenance: Vec<EntryProvenance>,
+    /// Trust manifest records by entry identifier, the
+    /// envelope the catalog carried at generation time.
+    /// Baselines written before the check integration
+    /// slice carry no such list, so the field defaults
+    /// empty, and their catalogs are judged without the
+    /// removal class.
+    #[serde(default)]
+    pub trust_manifests: Vec<TrustManifestBaseline>,
+}
+
+/// What generation recorded about one entry's trust
+/// manifests: the sha256 of each manifest's JCS
+/// canonical bytes. The record exists so a later
+/// check can see a manifest that was there and is
+/// gone, the downgrade no content comparison catches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustManifestBaseline {
+    /// The catalog entry the envelopes ride on.
+    pub entry_id: String,
+    /// The sha256 of each recorded envelope's JCS
+    /// canonical bytes, identifying the envelope the
+    /// baseline claims in the record.
+    pub manifest_sha256: Vec<String>,
 }
 
 /// Which input produced one entry, and which inputs were
@@ -411,6 +434,9 @@ mod tests {
         }"#;
         let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
         assert!(baseline.openapi.is_empty());
+        // The same document predates the trust records
+        // too, and their default is empty as well.
+        assert!(baseline.trust_manifests.is_empty());
     }
 
     #[test]

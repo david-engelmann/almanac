@@ -4136,3 +4136,122 @@ fn validate_verifies_a_trust_manifest_signature_with_supplied_keys() {
         "report was {stdout}"
     );
 }
+
+#[test]
+fn check_judges_trust_manifests_and_remembers_a_removal() {
+    // The fifteenth slice end to end. A manifest is
+    // added to the generated catalog by hand, as a
+    // publisher's signer would leave it. Check without
+    // keys judges the envelope and is clean; check with
+    // keys engages the signature layer and the planted
+    // junk signature fails; regeneration carries the
+    // envelope forward and the baseline records it; a
+    // catalog stripped of the envelope then fails check
+    // with the removal at critical.
+    let site = temp_site("check-trust");
+    let fixture = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &fixture);
+    assert_eq!(code, 0, "generate failed: {stderr}");
+
+    let ard_path = site.join(".well-known/ard.json");
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ard_path).expect("ard.json reads"))
+            .expect("catalog parses");
+    let entry = catalog["entries"]
+        .as_array_mut()
+        .expect("entries")
+        .iter_mut()
+        .find(|e| e["type"] == "application/mcp-server-card+json")
+        .expect("the MCP entry");
+    let identifier = entry["identifier"].as_str().unwrap().to_string();
+    let digest = entry["digest"].as_str().unwrap().to_string();
+    let junk_signature = format!(
+        "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..{}",
+        "A".repeat(86)
+    );
+    entry["trustManifest"] = serde_json::json!({
+        "identity": "did:web:example.com",
+        "expiresAt": "2028-06-01",
+        "subject": {
+            "identifier": identifier,
+            "type": "application/mcp-server-card+json",
+            "digest": digest,
+        },
+        "signature": junk_signature,
+    });
+    let bytes = serde_json::to_vec_pretty(&catalog).expect("catalog serializes");
+    std::fs::write(&ard_path, &bytes).expect("ard.json written");
+    std::fs::write(&legacy_path, &bytes).expect("legacy written");
+
+    // No keys: the envelope is sound and no signature
+    // claim is made in either direction.
+    let (code, stdout, stderr) = check_stdio(&site, &fixture);
+    assert_eq!(code, 0, "check failed: {stdout} {stderr}");
+    assert!(!stdout.contains("trust-manifest"), "report was {stdout}");
+
+    // Keys named: the signature layer engages and the
+    // junk signature is invalid.
+    let keys_path = site.join("keys.json");
+    std::fs::write(
+        &keys_path,
+        r#"{"kty":"EC","crv":"P-256","kid":"did:web:example.com#key-1","x":"KFvtK60fJVnMb4stS4hJSzf4U37o4zyW2oy0fuOL_Ow","y":"C43rXNNfvh4McIabWEirso0xH2eDtSDCVfupwMHs7mE"}"#,
+    )
+    .expect("keys written");
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--command",
+        &fixture.to_string_lossy(),
+        "--trust-keys",
+        &keys_path.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "keyed check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-signature-invalid"),
+        "report was {stdout}"
+    );
+
+    // Regeneration carries the envelope and the new
+    // baseline records it.
+    let (code, stdout, stderr) = generate_stdio(&site, &fixture);
+    assert_eq!(code, 0, "regenerate failed: {stderr}");
+    assert!(
+        stdout.contains("carried from the catalog this run replaces"),
+        "report was {stdout}"
+    );
+    let regenerated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ard_path).expect("ard.json reads"))
+            .expect("catalog parses");
+    assert!(
+        regenerated["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e.get("trustManifest").is_some()),
+        "the envelope did not carry: {regenerated}"
+    );
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline reads");
+    assert!(
+        baseline_text.contains("\"trust_manifests\""),
+        "baseline was {baseline_text}"
+    );
+
+    // Stripped from both paths, the recorded envelope's
+    // absence fails the gate at critical.
+    let mut stripped = regenerated;
+    for entry in stripped["entries"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("trustManifest");
+    }
+    let bytes = serde_json::to_vec_pretty(&stripped).expect("catalog serializes");
+    std::fs::write(&ard_path, &bytes).expect("ard.json written");
+    std::fs::write(&legacy_path, &bytes).expect("legacy written");
+    let (code, stdout, _) = check_stdio(&site, &fixture);
+    assert_eq!(code, 1, "stripped check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-removed"),
+        "report was {stdout}"
+    );
+}

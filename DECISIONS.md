@@ -2447,3 +2447,242 @@ above misassigns the fault, and this paragraph
 supersedes its diagnosis. The lesson is the fleet's
 own: when two witnesses agree, check what they were
 both looking at.
+
+## Check integration of trust verification (design, 2026-11-25)
+
+Proposed, awaiting Main's ruling before any code.
+The trust slice fenced this off by name: validate
+carries the verification, check does not change.
+This section proposes the follow-up.
+
+The gap. Verification lives in a command a
+publisher runs by hand. The drift gate is what runs
+in CI on every pull request, and check today reads
+nothing of a catalog's trust manifests: a manifest
+swapped, weakened, or stripped from a persisting
+entry passes the gate as long as the entries
+themselves match the baseline, because the
+three-sided comparison never looks at the envelope.
+The manifest is part of the published claim. The
+gate should judge the claim it exists to judge.
+
+Layer 1, the offline envelope judgments join check.
+Check already parses the published catalog on every
+run, repo mode and live alike. The proposal: check
+runs the envelope layers over the published catalog
+as part of assembling its findings, the shape
+judgments at major, subject binding and identity
+binding at critical, and the expiry judgments, all
+under the kinds the trust slice established, folded
+into the same deterministic report order. No new
+inputs, no network, no behavior change for
+catalogs carrying no manifests. Mechanically this
+is the keyed pass's envelope half, factored so
+validate and check run the same code over the same
+rules; validate keeps its own report and exit
+shape, check keeps its drift report and severity
+gate, and the findings are indistinguishable in
+kind and wording wherever they surface.
+
+Layer 2, signatures engage only when a run holds
+keys. Check accepts --trust-keys and --fetch-keys
+with validate's meanings and key sources, and the
+refuse-other-commands guard moves accordingly.
+When a check run holds keys, the signature layer
+runs as validate's does, invalid at critical,
+unattemptable at minor naming why. When it holds
+none, check makes no signature claim at all, in
+either direction. This departs deliberately from
+validate's never-silent rule, and the reason is the
+difference in the two commands: validate is the
+verification command, run to answer the signature
+question; check is a drift gate run unattended on
+every pull request, and a standing minor on every
+signed catalog trains its readers to ignore the
+report. A check run that means to gate signatures
+says so by naming keys. Open question 1 for Main:
+this scoping, or validate's rule carried over whole.
+
+Layer 3, the baseline remembers the envelope. The
+baseline records, per entry, the trust manifest's
+presence and its JCS hash at generation time, an
+additive field on the entry's baseline record with
+the serde default posture the card display field
+established, so pre-slice baselines judge as
+before. Check then sees the two downgrade shapes
+layer 1 cannot: a manifest the baseline recorded
+and the published catalog no longer carries, and a
+manifest whose bytes changed under the same entry.
+The changed case is largely re-judged by layers 1
+and 2 on its new contents; the removal case is the
+crisp one, a signed entry going silently unsigned,
+and the proposal names it at critical under a new
+kind, trust-manifest-removed, with a changed
+manifest that still verifies drawing no finding of
+its own. Open question 2: the removal severity,
+critical as proposed or major. Open question 3:
+whether generation, which does not author
+manifests, records the envelope from the published
+catalog it replaces, the only place it can see one,
+or whether the baseline record is written by a
+validate run instead. The design's instinct is
+generation, keeping one baseline writer.
+
+Scope lines. No signing, still, under Amendment D.
+No attestation fetching (the section 6.4 follow-up
+stands separately) and no cross-origin url binding
+(the section 6.2 follow-up likewise). Live mode and
+repo mode judge identically, one code path, as
+check already runs. The dusk.fm catalog stays
+parked. Nothing here needs David.
+
+Approved by Main 2026-11-25 with the three questions
+answered as this record frames them: the signature
+layer engages only when a run names keys, removal
+stands at critical, and generation writes the
+baseline's envelope record.
+
+### As built (2026-11-25)
+
+The envelope layers run in check through one shared
+pass, envelope_pass in validate.rs, which validate's
+keyed pass and check's envelope_findings both call,
+so a manifest is judged identically wherever it
+surfaces; a manifest repeated across the slots or
+twice in the array is judged once, in its first
+slot. verify_envelope takes the run's keys as an
+option, and the verdict is the only layer the
+option gates: shape, subject binding, identity
+binding and expiry judge in every check run, keyed
+or not. Check assembles keys through the same
+validation_keys validate uses, file first and
+did:web resolution behind --fetch-keys, only when a
+key source is named. The baseline's record is
+written by generation from the catalog it replaces:
+generation reads the predecessor (the current path,
+then the legacy path behind it; one unreadable copy
+does not strand the other's envelopes, and a
+predecessor nothing can read carries nothing, with
+the warning in the report), carries its envelopes
+onto the entries that persist, and records each
+entry's envelope hashes, the sha256 of the JCS
+canonical bytes of envelopes only. An expiry-only
+manifest is not an envelope and earns no record.
+
+The removal judgment measures envelopes, not
+manifests: a recorded entry still published and
+carrying no envelope has lost its envelope at
+critical under trust-manifest-removed, whether the
+envelope was stripped outright or swapped for an
+expiry-only stub. A different envelope in its
+place, a re-signing, is re-judged on its contents
+and draws no removal; the recorded hashes identify
+the baseline's envelope in the record rather than
+gating the judgment, because a hash gate would fire
+on every legitimate re-signing. Migration records
+the same records from the entries it carries, a
+judgment beyond the design's letter, taken because
+a migrated site is a baseline's first writing and
+leaving the class inert there until a regeneration
+would exempt exactly the adoption path; it is
+flagged for Main's ratification in the staging
+report. Migrate's standing limit applies to the
+record as to its entries: migration vouches for
+what it ingested at the level it verified it.
+
+Known postures the reviews surfaced and this slice
+keeps, in the open. The plural slot's identity
+exemption is the draft's own model of third-party
+attestations, not this build's invention: a
+publisher envelope relocated into the plural array
+is judged as a third-party attestation, and in an
+unkeyed run a third-party envelope's only remaining
+judgment is its signature, which the keyed scoping
+leaves unclaimed. Both follow the draft and the
+approved scoping, and changing either is a design
+change, not a repair. Trust findings pass through
+check's suppressions like every other class, so a
+reasoned, expiring suppression can hold one back;
+that is the drift model's standing term, stated
+here because the headline class inherits it. The
+removal class protects the window between a strip
+and the next generation, which is the CI shape; a
+regeneration after a strip records the stripped
+catalog, as generation must, and the evidence
+retires with it.
+
+### Check integration checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging. Spec fidelity
+passed the implementation on every layer, 0 critical,
+1 major, 2 minor. Standards returned 1 critical,
+3 major, 7 minor. The red team returned 1 critical,
+2 major, 7 minor. Every critical and major is closed
+in the tree; the dispositions follow.
+
+The red team's critical converged with the spec
+axis's second minor and outranked it: as first
+built, the recorded hashes were written and never
+read, and the removal test was presence of any
+manifest, so an envelope swapped for an expiry-only
+stub passed check green in every configuration, the
+exact hole the slice exists to close. Closed by
+measuring envelopes, as the as-built now records:
+the writer records envelopes only, and the removal
+judgment asks whether the entry carries any
+envelope at all. The spec axis's other minor,
+migration recording beyond the design's letter,
+stands as built and is flagged for ratification in
+the staging report, with the reasoning in the
+as-built.
+
+The standards critical was this seat's own error,
+the invented-helper class again: the new core test
+named helpers that do not exist, where the test
+module's own are entry, signed_entry and
+fixture_keys. The test is rewritten on the real
+helpers. Its major on the end-to-end test converged
+with the spec axis's major: the planted manifest
+carried no readable expiry, so the envelope's own
+expiry judgment correctly drew a minor the test's
+blanket silence assertion denied; the plant now
+carries a far-future expiry, and its planted
+signature's payload segment is empty, so the keyed
+phase reaches the ES256 verdict it claims to test.
+The standards majors on structure are closed by the
+envelope_pass factoring (the two loops are one, and
+drift's claim of identical judgment now rests on
+shared code) and by moving the records helper above
+generate's documentation, which it had split from
+its function and its clippy exemption. The minors
+closed beside them: the baseline record's fields
+documented, the pre-slice parse test now pinning
+the trust default, envelope_findings returning the
+deterministic order its siblings return, one
+now_unix helper where check added a third copy of
+the snippet, the drift test naming its types as its
+file does, and a direct pin on the envelope hash
+against a hand-written canonical text. Semicolons
+in new comments stand, as the file's own precedent
+from the fourteenth slice stands; the reviewer
+named it standing debt, not a break.
+
+The red team's two majors, the plural slot's
+identity exemption and the unkeyed third-party
+silence, are recorded in the as-built as the
+draft's postures rather than repaired, with the
+reasoning there. Its minors: the suppression
+inheritance and the strip-to-regeneration window
+are recorded in the as-built; the duplicate
+manifest duplication is closed by the factored
+pass judging each manifest once; the unreadable
+predecessor is answered in the as-built (the
+legacy path is tried behind the current one);
+an envelope that cannot be canonicalized earns no
+record and no note, reachable only through a
+non-finite number, which parsed JSON cannot carry;
+renaming an entry orphans its record silently,
+accepted beside the entry classes that judge the
+rename's other faces; --fetch-keys in check is
+the operator's named choice, as in validate, and
+the usage text says what it does.
