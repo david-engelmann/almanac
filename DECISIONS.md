@@ -3971,3 +3971,147 @@ values, and asserts the declared set beside the
 required one. The sightings map is renamed
 seen_extensions so the function does not hold two
 maps under one name.
+
+## Twenty-fourth slice: MCP prompt contracts (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, its one question answered with the
+additive shape the record recommends. The MCP
+surface model records its three primitive
+kinds at three depths. A tool is recorded whole:
+name, description, and its input schema, hashed
+into the baseline, so a schema change reports at
+major per tool and a description change at minor.
+A prompt is recorded as a name in a set, and a
+resource as a uri in a set. A prompt's arguments
+are its input contract, the exact analog of a
+tool's input schema: a prompt that gains a
+required argument, or loses one, has changed what
+a client must supply to use it, and today that
+change produces an identical snapshot and no
+finding, while the same change to a tool beside
+it is a major. A prompt's description changing is
+likewise invisible, where a tool's is a minor.
+
+The design gives prompts the tool channels,
+mirrored. The probe's prompt walk records each
+prompt as a surface in the snapshot: name,
+description, and the arguments array as served.
+The baseline records per prompt a name, a
+description hash, and an arguments hash, the
+ToolBaseline shape. The comparison keeps set
+membership on the standing major,
+prompt-set-changed, and adds the two per-prompt
+channels at the tool severities: an arguments
+hash change is a major, prompt-arguments-changed,
+naming the prompt; a description change is a
+minor, prompt-description-changed. Resources stay
+set-only in this slice; their metadata is the
+same shape of gap and is named here as the
+following slice's candidate rather than folded
+in, so each surface's change stays attributable.
+
+One question rides with this design: how the
+baseline field lands. The prompts field today is
+a list of names; recording contracts in place
+changes the element type, and a baseline written
+before this slice would fail to parse unless the
+reader accepts both shapes. The record recommends
+the additive shape the fifteenth slice set as
+precedent: the name list stays as it is, still
+compared for membership, and a parallel
+prompt_contracts list, defaulted empty, carries
+the per-prompt hashes. A pre-slice baseline then
+parses untouched, gates membership as it always
+has, and leaves the contract channels ungated
+until the publisher regenerates, a one-time
+consequence of the standing shape. The in-place
+alternative, a tolerant reader accepting a bare
+string or an object per element, keeps one field
+and pays for it with a custom deserializer the
+record format has never needed. Main's call.
+
+### As built (2026-11-25)
+
+Built as designed on the additive shape Main
+approved. The probe's prompt walk records each
+prompt as a PromptSurface in the snapshot (name,
+description, and the arguments value as served),
+sorted by name on both transports beside the name
+list; the baseline records a PromptBaseline per
+prompt (description hash and arguments hash, the
+tool channel's own hash functions) in a parallel
+prompt_contracts field, serde-defaulted empty;
+the comparison keeps membership on the standing
+prompt-set-changed major and adds
+prompt-arguments-changed at major and
+prompt-description-changed at minor, each naming
+the prompt. Resources stay set-only, as designed.
+
+Two representation notes the reviews surfaced and
+this record owns. First, the design text says the
+parallel field is a "list"; as built it is a
+name-keyed map, because the same design paragraph
+invokes the ToolBaseline shape and tools are
+recorded as exactly such a map. No behavioral
+difference; the letter of one word against the
+shape the design also names. Second, a prompt
+whose arguments member is absent records an empty
+array: a server that later sends an explicit
+empty array shows no drift. The normalization is
+a chosen one, mirroring the tool channel's
+standing default for an absent inputSchema.
+
+The reviews ran in three seatings; the first two
+seatings' report bodies were lost to runtime
+interruptions (their verdict lines agreed: spec
+pass, one red-team major), and the third seating
+wrote its full report to a file the seat read
+firsthand. Final verdicts: spec fidelity PASS
+(0 critical, 0 major, 2 minor, the two notes
+above), standards PASS (0 critical, 1 major,
+3 minor), red team FAIL on one major with the
+rest of the surface confirmed sound (0 critical,
+1 major, 4 minor). The checkpoint fix pass closed
+both majors and two standards minors:
+
+- Duplicate prompt names (red-team major). The
+  baseline's map collect keeps the last duplicate's
+  hashes while the drift loop's find took the
+  first live surface, so an unchanged surface
+  serving one name twice with different arguments
+  fired the major against itself. The live side
+  now builds the same name-keyed map the tool
+  channel builds, with the same last-wins collect,
+  and the drift test pins the unchanged duplicated
+  surface silent.
+- Ordering stated three ways (standards major).
+  The snapshot field's doc said walk order, the
+  stdio walk sorted by name, and the HTTP walk did
+  not sort at all. The HTTP walk now sorts prompt
+  surfaces by name like the stdio walk, and the
+  field doc says sorted by name, so a snapshot no
+  longer differs by transport in this field.
+- The probe imports PromptSurface with its sibling
+  surface types instead of qualifying it at its
+  use sites (standards minor), and a baseline test
+  now pins prompt contract recording directly,
+  hashes and the empty-surfaces case (standards
+  minor).
+
+Recorded from the red team's minors, standing as
+postures rather than repairs: reordering a
+prompt's arguments array fires the major, because
+the hash reads the array as served, which the
+design's own wording orders; an argument's own
+description rides the arguments hash to major,
+mirroring property descriptions inside a tool's
+input schema; a present but non-array arguments
+member is hashed as served, faithfully on both
+sides, and the reduction does not name the
+malformation; and membership stays the standing
+sorted-vec comparison, duplicates included, as
+resources have always compared. None of these
+can hide a real contract change; the first two
+can over-report presentation movement as contract
+movement, the same trade the tool channels make.

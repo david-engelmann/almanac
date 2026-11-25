@@ -16,7 +16,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use almanac_core::snapshot::{
-    AuthSurface, CredentialOutcome, ProbeFailure, SurfaceSnapshot, ToolSurface,
+    AuthSurface, CredentialOutcome, ProbeFailure, PromptSurface, SurfaceSnapshot, ToolSurface,
 };
 use serde_json::{Value, json};
 
@@ -89,6 +89,7 @@ pub(crate) fn handshake_snapshot(
         tools: vec![],
         resources: vec![],
         prompts: vec![],
+        prompt_surfaces: vec![],
         auth: AuthSurface::Open,
         credential: CredentialOutcome::NotPresented,
         failure: None,
@@ -140,7 +141,10 @@ impl ListKind {
         match self {
             ListKind::Tools => snapshot.tools.extend(tool_surfaces(page)),
             ListKind::Resources => snapshot.resources.extend(resource_uris(page)),
-            ListKind::Prompts => snapshot.prompts.extend(prompt_names(page)),
+            ListKind::Prompts => {
+                snapshot.prompts.extend(prompt_names(page));
+                snapshot.prompt_surfaces.extend(prompt_surfaces(page));
+            }
         }
     }
 }
@@ -160,6 +164,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         tools: vec![],
         resources: vec![],
         prompts: vec![],
+        prompt_surfaces: vec![],
         auth: AuthSurface::Open,
         credential: CredentialOutcome::NotPresented,
         failure: Some(ProbeFailure {
@@ -228,6 +233,37 @@ pub fn prompt_names(result: &Value) -> Vec<String> {
         .unwrap_or_default();
     names.sort();
     names
+}
+
+/// Reduce a prompts/list result page to prompt surfaces:
+/// each prompt's name, description, and arguments array
+/// as served, in page order. A prompt without a name
+/// records nothing here either, as with the name list.
+pub fn prompt_surfaces(result: &Value) -> Vec<PromptSurface> {
+    result
+        .get("prompts")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name")?.as_str()?;
+                    Some(PromptSurface {
+                        name: name.to_string(),
+                        description: item
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: item
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([])),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// True when a JSON-RPC error is method-not-found, which for the
@@ -475,4 +511,5 @@ fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, statel
     }
     snapshot.resources.sort();
     snapshot.prompts.sort();
+    snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
 }

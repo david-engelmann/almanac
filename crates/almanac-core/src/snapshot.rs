@@ -47,6 +47,12 @@ pub struct SurfaceSnapshot {
     pub resources: Vec<String>,
     /// Prompt names, sorted by the probe.
     pub prompts: Vec<String>,
+    /// One surface per prompt, sorted by name by the
+    /// probe: the prompt's description and arguments,
+    /// the contract the name alone cannot carry. The
+    /// twenty-fourth slice's addition; the name list
+    /// above stays the membership record.
+    pub prompt_surfaces: Vec<PromptSurface>,
     pub auth: AuthSurface,
     /// How a publisher credential figured in this probe. A
     /// surface's auth posture and a run's credential are
@@ -103,6 +109,17 @@ pub struct ToolSurface {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// One prompt as served: its name, its description,
+/// and its arguments array as served, the prompt's
+/// input contract in the shape prompts/list carries
+/// it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptSurface {
+    pub name: String,
+    pub description: String,
+    pub arguments: serde_json::Value,
 }
 
 /// Where a probe stopped and how.
