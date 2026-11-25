@@ -30,12 +30,13 @@
 //! reference pointing into another document is never
 //! followed, because that is a fetch this crate never
 //! does, and a reference that does not resolve leaves
-//! the parameter invisible. Schemas referenced by $ref
-//! are not resolved; a schema carried by reference is
-//! covered only by the components hash, which reports
-//! that the shared pool changed without naming which
-//! operation it touches. The record in DECISIONS.md
-//! names both limits.
+//! the parameter invisible. Schemas referenced by a
+//! local $ref are resolved into each operation's
+//! contract before it is hashed, so a shared schema's
+//! change is attributed to the operations carrying it
+//! as well as reported by the components hash, which
+//! still covers the pool whole. The record in
+//! DECISIONS.md names the design.
 
 use std::collections::HashSet;
 
@@ -210,11 +211,12 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
             contract.remove("description");
             contract.remove("summary");
             contract.remove("parameters");
+            let contract = RefExpansion::new(root).expand(&Value::Object(contract));
             operations.push(OperationView {
                 id,
                 required,
                 description,
-                contract_sha256: hash::sha256_json(&Value::Object(contract)),
+                contract_sha256: hash::sha256_json(&contract),
             });
         }
     }
@@ -228,6 +230,107 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
         components_sha256,
         operations,
     })
+}
+
+/// The bounds on one operation's $ref expansion.
+/// A branch follows at most this many references,
+/// which also bounds the recursion's depth on a
+/// flat chain of references the document's own
+/// nesting does not. One operation's expansion
+/// produces at most this many nodes inside followed
+/// references; the operation's own inline content
+/// is not counted, being bounded by the document
+/// itself in the ordinary way. Both bounds fail
+/// safe the same way the cycle rule does: the node
+/// stays literal, still hashes as written, and the
+/// components hash still covers its target.
+const MAX_EXPANSION_DEPTH: usize = 64;
+const MAX_EXPANSION_NODES: usize = 100_000;
+
+/// Expand local $ref nodes in a value against the
+/// document itself, for the contract hash (the
+/// nineteenth slice's design in DECISIONS.md). A
+/// node whose $ref is a local pointer is replaced
+/// by the pointed value, expanded in turn; sibling
+/// keys beside the $ref overlay the pointed object,
+/// siblings winning, and a sibling beside a
+/// non-object target leaves the node unexpanded
+/// rather than inventing a merge. A pointer already
+/// being expanded on its own branch stays literal,
+/// so a self-referential schema terminates and its
+/// literal form still hashes. A reference into
+/// another document is not followed, and neither is
+/// one that does not resolve; the walk still visits
+/// such a node's other children. The expansion is a
+/// pure function of the document and feeds only the
+/// hash; the reduction's model stores nothing new.
+struct RefExpansion<'a> {
+    doc: &'a Value,
+    nodes_left: usize,
+    counting: bool,
+}
+
+impl<'a> RefExpansion<'a> {
+    fn new(doc: &'a Value) -> Self {
+        RefExpansion {
+            doc,
+            nodes_left: MAX_EXPANSION_NODES,
+            counting: false,
+        }
+    }
+
+    fn expand(&mut self, value: &Value) -> Value {
+        let mut branch = Vec::new();
+        self.walk(value, &mut branch)
+    }
+
+    fn walk(&mut self, value: &Value, branch: &mut Vec<String>) -> Value {
+        if self.counting {
+            self.nodes_left = self.nodes_left.saturating_sub(1);
+        }
+        match value {
+            Value::Object(map) => {
+                if let Some(reference) = map
+                    .get("$ref")
+                    .and_then(|v| v.as_str())
+                    .filter(|r| r.starts_with('#'))
+                    .filter(|r| !branch.iter().any(|p| p == r))
+                    && branch.len() < MAX_EXPANSION_DEPTH
+                    && self.nodes_left > 0
+                    && let Some(target) = resolve_local_pointer(self.doc, reference)
+                {
+                    branch.push(reference.to_string());
+                    let outer_counting = self.counting;
+                    self.counting = true;
+                    let expanded = self.walk(target, branch);
+                    let result = if map.len() == 1 {
+                        expanded
+                    } else if let Value::Object(mut base) = expanded {
+                        for (key, sibling) in map {
+                            if key != "$ref" {
+                                base.insert(key.clone(), self.walk(sibling, branch));
+                            }
+                        }
+                        Value::Object(base)
+                    } else {
+                        value.clone()
+                    };
+                    self.counting = outer_counting;
+                    branch.pop();
+                    return result;
+                }
+                Value::Object(
+                    map.iter()
+                        .map(|(k, v)| (k.clone(), self.walk(v, branch)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.walk(v, branch)).collect())
+            }
+            _ => value.clone(),
+        }
+    }
 }
 
 /// Resolve a local JSON pointer (a $ref of the form
@@ -552,5 +655,300 @@ mod tests {
         dup["paths"]["/charges"]["get"]["operationId"] = serde_json::json!("createCharge");
         let err = reduce_openapi(&dup).expect_err("duplicates refuse");
         assert!(err.contains("createCharge"), "error was {err}");
+    }
+
+    #[test]
+    fn local_ref_schemas_expand_into_the_contract_hash() {
+        // The nineteenth slice: a schema carried by a
+        // local $ref attributes its changes to the
+        // operations carrying it. Every posture below
+        // changes an expected hash if its behavior
+        // breaks, and each is supplied by exactly the
+        // route it names.
+        let mut document = doc();
+        document["components"] = serde_json::json!({
+            "schemas": {
+                "Widget": {
+                    "type": "object",
+                    "description": "pointed",
+                    "properties": {"name": {"type": "string"}},
+                },
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "children": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}},
+                    },
+                },
+            }
+        });
+        document["paths"]["/charges"]["post"]["responses"] = serde_json::json!({
+            "200": {
+                "description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}},
+            },
+            "201": {
+                "description": "made",
+                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget", "description": "sibling"}}},
+            },
+            "202": {
+                "description": "tree",
+                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Node"}}},
+            },
+            "203": {
+                "description": "far",
+                "content": {"application/json": {"schema": {"$ref": "https://example.com/x.json#/components/schemas/Widget"}}},
+            },
+        });
+        let contract_of = |d: &Value| {
+            reduce_openapi(d)
+                .expect("reduces")
+                .operations
+                .iter()
+                .find(|o| o.id == "createCharge")
+                .expect("the operation")
+                .contract_sha256
+                .clone()
+        };
+        let base = contract_of(&document);
+        // Deterministic: the self-referential Node
+        // terminates and the same document hashes the
+        // same twice.
+        assert_eq!(base, contract_of(&document));
+        // The referenced schema changes: the contract
+        // moves (attribution), where before this slice
+        // only the components hash could move.
+        let mut schema_changed = document.clone();
+        schema_changed["components"]["schemas"]["Widget"]["properties"]["size"] =
+            serde_json::json!({"type": "integer"});
+        assert_ne!(base, contract_of(&schema_changed));
+        // The self-referential schema's surroundings
+        // hash through the cycle: its label is outside
+        // the recursive reference, and changing it
+        // moves the contract.
+        let mut node_changed = document.clone();
+        node_changed["components"]["schemas"]["Node"]["properties"]["label"] =
+            serde_json::json!({"type": "integer"});
+        assert_ne!(base, contract_of(&node_changed));
+        // An external reference stays literal: a
+        // document whose only schema route is external
+        // does not move when components change.
+        let mut external_only = doc();
+        external_only["components"] = serde_json::json!({
+            "schemas": {"Widget": {"type": "object"}}
+        });
+        external_only["paths"]["/charges"]["post"]["responses"] = serde_json::json!({
+            "200": {
+                "description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "https://example.com/x.json#/components/schemas/Widget"}}},
+            },
+        });
+        let external_base = contract_of(&external_only);
+        external_only["components"]["schemas"]["Widget"] = serde_json::json!({"type": "array"});
+        assert_eq!(external_base, contract_of(&external_only));
+        // The sibling overlay itself: where a sibling
+        // covers the pointed description on every
+        // route, changing only that description cannot
+        // move the contract.
+        let mut overlaid = doc();
+        overlaid["components"] = serde_json::json!({
+            "schemas": {"Widget": {"type": "object", "description": "pointed"}}
+        });
+        overlaid["paths"]["/charges"]["post"]["responses"] = serde_json::json!({
+            "200": {
+                "description": "ok",
+                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget", "description": "sibling"}}},
+            },
+        });
+        let overlaid_base = contract_of(&overlaid);
+        overlaid["components"]["schemas"]["Widget"]["description"] = serde_json::json!("repointed");
+        assert_eq!(overlaid_base, contract_of(&overlaid));
+        // The golden form: the contract hash is the
+        // hash of exactly this expanded object, with
+        // the cycle's recursive edge literal inside
+        // it. Any other cycle rule (a substitute, a
+        // dropped edge) hashes differently.
+        let expected = serde_json::json!({
+            "operationId": "createCharge",
+            "responses": {
+                "200": {
+                    "description": "ok",
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "description": "pointed",
+                        "properties": {"name": {"type": "string"}},
+                    }}},
+                },
+                "201": {
+                    "description": "made",
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "description": "sibling",
+                        "properties": {"name": {"type": "string"}},
+                    }}},
+                },
+                "202": {
+                    "description": "tree",
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "children": {"type": "array", "items": {"$ref": "#/components/schemas/Node"}},
+                        },
+                    }}},
+                },
+                "203": {
+                    "description": "far",
+                    "content": {"application/json": {"schema": {"$ref": "https://example.com/x.json#/components/schemas/Widget"}}},
+                },
+            },
+        });
+        assert_eq!(base, hash::sha256_json(&expected));
+    }
+
+    #[test]
+    fn local_ref_expansion_bounds_and_literal_edges() {
+        // The expansion's bounds and the edges where a
+        // reference stays literal, each pinned by a
+        // change that moves the contract only if the
+        // behavior breaks.
+        let contract_of = |d: &Value| {
+            reduce_openapi(d)
+                .expect("reduces")
+                .operations
+                .iter()
+                .find(|o| o.id == "createCharge")
+                .expect("the operation")
+                .contract_sha256
+                .clone()
+        };
+        let with_schema = |schema: Value| {
+            let mut document = doc();
+            document["paths"]["/charges"]["post"]["responses"] = serde_json::json!({
+                "200": {
+                    "description": "ok",
+                    "content": {"application/json": {"schema": schema}},
+                },
+            });
+            document
+        };
+        // An unresolvable local pointer stays literal:
+        // the golden contract carries the node as
+        // written.
+        let missing = with_schema(serde_json::json!({"$ref": "#/components/schemas/Missing"}));
+        let expected = serde_json::json!({
+            "operationId": "createCharge",
+            "responses": {
+                "200": {
+                    "description": "ok",
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}},
+                },
+            },
+        });
+        assert_eq!(contract_of(&missing), hash::sha256_json(&expected));
+        // A sibling beside a non-object target leaves
+        // the node unexpanded: the target's change is
+        // invisible. The same reference bare expands,
+        // and the change moves the contract.
+        let mut sibling_doc = with_schema(
+            serde_json::json!({"$ref": "#/components/schemas/Text", "description": "sibling"}),
+        );
+        sibling_doc["components"] =
+            serde_json::json!({"schemas": {"Text": "a plain string schema"}});
+        let sibling_base = contract_of(&sibling_doc);
+        sibling_doc["components"]["schemas"]["Text"] = serde_json::json!("rewritten");
+        assert_eq!(sibling_base, contract_of(&sibling_doc));
+        let mut bare_doc = with_schema(serde_json::json!({"$ref": "#/components/schemas/Text"}));
+        bare_doc["components"] = serde_json::json!({"schemas": {"Text": "a plain string schema"}});
+        let bare_base = contract_of(&bare_doc);
+        bare_doc["components"]["schemas"]["Text"] = serde_json::json!("rewritten");
+        assert_ne!(bare_base, contract_of(&bare_doc));
+        // The depth bound: a flat chain of a hundred
+        // references stops following at the bound, so
+        // the leaf beyond it cannot move the contract
+        // and a link inside it can.
+        let mut chain = serde_json::Map::new();
+        for i in 1..100 {
+            chain.insert(
+                format!("A{i}"),
+                serde_json::json!({"$ref": format!("#/components/schemas/A{}", i + 1)}),
+            );
+        }
+        chain.insert(
+            "A100".into(),
+            serde_json::json!({"type": "string", "description": "leaf"}),
+        );
+        let mut chain_doc = with_schema(serde_json::json!({"$ref": "#/components/schemas/A1"}));
+        chain_doc["components"] = serde_json::json!({"schemas": Value::Object(chain)});
+        let chain_base = contract_of(&chain_doc);
+        let mut leaf_changed = chain_doc.clone();
+        leaf_changed["components"]["schemas"]["A100"]["description"] =
+            serde_json::json!("other leaf");
+        assert_eq!(chain_base, contract_of(&leaf_changed));
+        let mut link_changed = chain_doc.clone();
+        link_changed["components"]["schemas"]["A10"] = serde_json::json!({"type": "integer"});
+        assert_ne!(chain_base, contract_of(&link_changed));
+        // The node budget: a doubling chain of shared
+        // references would expand past it many times
+        // over; the reduction completes and is
+        // deterministic, which is the bound's whole
+        // claim against that shape.
+        let doubling = |levels: usize| {
+            let mut schemas = serde_json::Map::new();
+            schemas.insert("S0".into(), serde_json::json!({"type": "string"}));
+            for i in 1..=levels {
+                schemas.insert(
+                    format!("S{i}"),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "a": {"$ref": format!("#/components/schemas/S{}", i - 1)},
+                            "b": {"$ref": format!("#/components/schemas/S{}", i - 1)},
+                        },
+                    }),
+                );
+            }
+            let mut document =
+                with_schema(serde_json::json!({"$ref": format!("#/components/schemas/S{levels}")}));
+            document["components"] = serde_json::json!({"schemas": Value::Object(schemas)});
+            document
+        };
+        let deep = doubling(17);
+        assert_eq!(contract_of(&deep), contract_of(&deep));
+        // The budget's edge, made observable: a wide
+        // inline subtree inside a followed schema
+        // spends the budget (keys walk in sorted
+        // order, a before b), so the reference under b
+        // is never followed and its target cannot move
+        // the contract. The same document with a small
+        // a follows it, and the target's change moves
+        // the contract.
+        let wide = |fill: usize| {
+            let mut document =
+                with_schema(serde_json::json!({"$ref": "#/components/schemas/Root"}));
+            document["components"] = serde_json::json!({
+                "schemas": {
+                    "Root": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "array", "items": (0..fill).map(|_| serde_json::json!({"x": 1})).collect::<Vec<_>>()},
+                            "b": {"$ref": "#/components/schemas/Leaf"},
+                        },
+                    },
+                    "Leaf": {"type": "string"},
+                }
+            });
+            document
+        };
+        let spent = wide(60_000);
+        let spent_base = contract_of(&spent);
+        let mut spent_leaf = spent.clone();
+        spent_leaf["components"]["schemas"]["Leaf"] = serde_json::json!({"type": "integer"});
+        assert_eq!(spent_base, contract_of(&spent_leaf));
+        let unspent = wide(10);
+        let unspent_base = contract_of(&unspent);
+        let mut unspent_leaf = unspent.clone();
+        unspent_leaf["components"]["schemas"]["Leaf"] = serde_json::json!({"type": "integer"});
+        assert_ne!(unspent_base, contract_of(&unspent_leaf));
     }
 }
