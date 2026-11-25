@@ -3518,3 +3518,158 @@ bound caps the extra rounds. Shared schemas are
 re-expanded per occurrence rather than memoized,
 a conscious accept: the budget, not a cache, is
 the bound the gate needs.
+
+## Twentieth slice: the served catalog (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, and its one question is answered
+major, as designed: the critical band is reserved
+for integrity losses and third-party
+substitution, and a stale deploy is the
+publisher's own deployment lag, which is the
+major band's exact meaning; the finding exists
+and fails by default, which answers the
+consumers-read-the-served-copy argument. The gap
+this slice closes is the deployment the gate
+never looks at. Check compares three sides:
+the published catalog in the site, the baseline,
+and the live surface behind the entries. The
+catalog's own deployed copy is none of the three.
+A publisher can regenerate, commit, and pass
+every gate while the host keeps serving last
+month's ard.json, because nothing in the run ever
+reads the catalog as deployed; the tenth slice
+fetches it for its media type and deliberately
+does not compare its bytes. For a static catalog
+the stale deploy is the most ordinary drift there
+is, and today it is invisible.
+
+The design. In a fetching run (the standing
+engagement: an HTTP target named or resolved, or
+--fetch-remote), check also fetches the catalog
+at its own well-known paths on the catalog's
+domain, ard.json first and ai-catalog.json beside
+it, through the guarded fetcher the media type
+observation already rides. Each fetched document
+is parsed and re-serialized in the catalog's
+canonical form (sorted keys, two-space indent,
+LF, one trailing newline, the form generation
+writes) and compared against the site's published
+copy of the same path. A difference is a major
+under a new kind, catalog-served-differs, and the
+finding names the entry-level differences rather
+than the bare fact: identifiers served but not
+published, published but not served, and, for
+identifiers on both sides, the fields that differ
+(digest, version, url), so the reader sees what
+the stale deploy is missing. A served copy that
+does not parse is the same major naming that it
+could not be read. The posture is the media
+type's, best-effort in both directions: a path
+the run cannot fetch, or one answering
+non-success, draws no finding from this class,
+because the run's other classes already judge
+dead and missing surfaces and this class exists
+to judge content, not reachability. A legacy-only
+site compares its one path, mirroring the media
+type's legacy skip. The comparison is against the
+published copy in the site the run was given, in
+the same run, so a repo and its deployment are
+judged as one moment.
+
+One question for Main, with the record's
+recommendation. Severity: this design puts the
+class at major, the drift model's line for a
+surface that no longer matches what the publisher
+announced, failing by default like a removed
+operation. The alternative is critical, on the
+argument that consumers read the served catalog,
+not the repo, so a stale served catalog is the
+announced surface being wrong in the only place
+it is read. This design takes major: the served
+catalog is the publisher's own deployment lag,
+not a third party's substitution, and the
+critical band has so far been reserved for
+integrity losses and unannounced capability.
+Either ruling is a one-word change in one place.
+
+Scope lines. Fetching runs only; repo mode gains
+no network behavior. No comparison of the served
+catalog against the baseline (the published copy
+is the deployment's source, and published against
+baseline is the standing comparison). The media
+type observation is untouched and keeps its own
+posture. Nothing here needs David.
+
+### As built (2026-11-25)
+
+The comparison lives in the core as
+check_served_catalog beside the media type class:
+each served document is parsed to the catalog
+model (a byte order mark stripped first, a
+serving artifact rather than content) and
+compared as a model against the published copy
+of the same path, the legacy model standing for
+the legacy path when the site carries one. One
+major per differing path, detail naming served
+only, published only, and changed identifiers
+with their differing fields among digest,
+version, and url (other fields when an entry
+differs only elsewhere; the host block or the
+entries' order when no entry carries the
+difference). The CLI collects in fetching runs
+only, through a new fetcher method that keeps
+the media type observation's fallback posture
+exactly: http is tried only when the https
+request could not be made at all. The domain
+guard gains the backslash the WHATWG parser
+treats as a slash, in this collector and in the
+media type observation's identical guard. DESIGN
+section 6 gains the class in its major list. A
+core test and an end-to-end test carry it: the
+deployment serving the published bytes is
+silent, a lagging digest fails the run at major,
+and a run that does not fetch compares nothing.
+
+### Served catalog checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging: spec
+fidelity PASS, the red team clean at critical
+and major, standards with one critical the pass
+exists for. The model equality as first written
+compared serde_json's Result values directly,
+which does not compile (its Error carries no
+PartialEq); the comparison now unwraps both
+values and treats an unserializable model as
+differing. The same pass closed what the reviews
+found around it: the collector's insertion had
+stranded the cross-origin collector's doc
+comment on the new function (the function moved
+below its neighbor, doc restored, and the
+collector renamed served_catalog_documents after
+the file's idiom); a duplicated sentence tail in
+DESIGN's major list is removed; the comparison
+is per path against that path's published copy
+rather than the one model for both; the http
+fallback is the typed posture above rather than
+any-error; the detail no longer mislocates an
+entry's unnamed-field difference outside the
+entries; and the tests now exercise the version
+and url arms and the one-finding-per-path shape.
+
+### Served catalog hosted gate fix pass (2026-11-25)
+
+PR #22's first hosted run failed in the test step
+on the tenth slice's media type test, the only
+failure: a cross-slice premise of the same family
+as PR #20's round. That test's server answered
+every path with a placeholder body, which the
+tenth slice never read; a fetching run now also
+reads the served catalog, and the placeholder is
+a differing catalog at major on both paths. The
+product behaved as designed; the older fixture's
+premise is what changed. The test now serves the
+published catalog's own bytes after generation,
+so it judges the media type alone again, and the
+slice's own end-to-end test passed in the same
+run.

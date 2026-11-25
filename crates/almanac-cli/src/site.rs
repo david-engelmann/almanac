@@ -2092,7 +2092,7 @@ pub fn check(
     let domain = &published.host.domain;
     let catalog_media_type: Option<String> = if fetching
         && !legacy_only
-        && !domain.contains(['/', '?', '#', '@'])
+        && !domain.contains(['/', '?', '#', '@', '\\'])
         && !domain.chars().any(char::is_whitespace)
     {
         use probe_http::MediaTypeOutcome;
@@ -2136,6 +2136,17 @@ pub fn check(
     // silent.
     let descriptors: Vec<(String, String, String)> = if fetching || fetch_attestations {
         cross_origin_descriptors(&published, site, &fetcher)
+    } else {
+        Vec::new()
+    };
+    // The served catalog's evidence, in a fetching
+    // run: the catalog documents the deployment
+    // itself serves at its well-known paths, for the
+    // core to compare against the published pair. A
+    // path the run cannot fetch is absent, the
+    // best-effort posture the design records.
+    let served: Vec<(String, String)> = if fetching {
+        served_catalog_documents(&published, legacy_only, &fetcher)
     } else {
         Vec::new()
     };
@@ -2313,6 +2324,7 @@ pub fn check(
         pins: pins_held,
         descriptors: &descriptors,
         catalog_media_type: catalog_media_type.as_deref(),
+        served_catalogs: &served,
     });
     let mode = match &snapshot {
         None => "repo",
@@ -2438,6 +2450,47 @@ fn cross_origin_descriptors(
         }
     }
     descriptors
+}
+
+/// The catalog documents the deployment itself
+/// serves, for the served catalog comparison: the
+/// bytes at each of the catalog's well-known paths
+/// on its own domain, through the fetcher's
+/// fallback fetch (https, and http only when the
+/// https request could not be made at all, the
+/// media type observation's posture). A path the
+/// fetch cannot serve is absent, the class's
+/// best-effort posture; a legacy-only site serves
+/// the one path. A domain carrying characters that
+/// would change the address's shape is not fetched
+/// at all: the media type observation's guard, with
+/// the backslash the WHATWG parser treats as a
+/// slash added to it.
+fn served_catalog_documents(
+    published: &Catalog,
+    legacy_only: bool,
+    fetcher: &probe_http::DocumentFetcher,
+) -> Vec<(String, String)> {
+    let domain = &published.host.domain;
+    if domain.contains(['/', '?', '#', '@', '\\']) || domain.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let paths: &[&str] = if legacy_only {
+        &["ai-catalog.json"]
+    } else {
+        &["ard.json", "ai-catalog.json"]
+    };
+    let mut served = Vec::new();
+    for path in paths {
+        let url = format!("https://{domain}/.well-known/{path}");
+        if let Some(bytes) = fetcher.fetch_with_http_fallback(&url) {
+            served.push((
+                path.to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+    }
+    served
 }
 
 /// The attestation observations an engaged run
