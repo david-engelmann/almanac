@@ -3656,3 +3656,20 @@ any-error; the detail no longer mislocates an
 entry's unnamed-field difference outside the
 entries; and the tests now exercise the version
 and url arms and the one-finding-per-path shape.
+
+### Served catalog hosted gate fix pass (2026-11-25)
+
+PR #22's first hosted run failed in the test step
+on the tenth slice's media type test, the only
+failure: a cross-slice premise of the same family
+as PR #20's round. That test's server answered
+every path with a placeholder body, which the
+tenth slice never read; a fetching run now also
+reads the served catalog, and the placeholder is
+a differing catalog at major on both paths. The
+product behaved as designed; the older fixture's
+premise is what changed. The test now serves the
+published catalog's own bytes after generation,
+so it judges the media type alone again, and the
+slice's own end-to-end test passed in the same
+run.

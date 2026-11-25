@@ -2449,6 +2449,13 @@ fn catalog_served_with_a_generic_media_type_warns() {
     ]);
     assert_eq!(code, 0, "generate failed with {stderr}");
 
+    // The server now serves the published catalog
+    // itself, so the served catalog comparison (which
+    // a fetching run also makes) stays silent and this
+    // test judges the media type alone.
+    held.lock().expect("lock").0 =
+        std::fs::read(site.join(".well-known/ard.json")).expect("the published catalog");
+
     // Repo mode observes nothing and reports nothing
     // for the class.
     let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
