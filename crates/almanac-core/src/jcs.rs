@@ -188,9 +188,16 @@ mod tests {
     #[test]
     fn the_rfc_number_examples_serialize_as_the_rfc_prints_them() {
         // The values of the RFC 8785 appendix example,
-        // with the serializations the RFC prints.
+        // with the serializations the RFC prints. The
+        // first value is parsed from the RFC's printed
+        // text rather than written as a float literal:
+        // the text is the source, and the literal's
+        // precision is the point of the example.
         let cases = [
-            (json!(333333333.33333329), "333333333.3333333"),
+            (
+                serde_json::from_str("333333333.33333329").expect("the RFC value parses"),
+                "333333333.3333333",
+            ),
             (json!(1e30), "1e+30"),
             (json!(4.50), "4.5"),
             (json!(2e-3), "0.002"),
@@ -257,7 +264,10 @@ mod tests {
     #[test]
     fn the_rfc_object_example_canonicalizes() {
         let value = json!({
-            "numbers": [333333333.33333329, 1e30, 4.50, 2e-3, 1e-27],
+            "numbers": [
+                serde_json::from_str::<Value>("333333333.33333329").expect("the RFC value parses"),
+                1e30, 4.50, 2e-3, 1e-27,
+            ],
             "literals": [null, true, false],
         });
         assert_eq!(

@@ -178,7 +178,7 @@ pub fn validate_catalog(
     findings
 }
 
-fn sort_findings(findings: &mut Vec<Finding>) {
+fn sort_findings(findings: &mut [Finding]) {
     findings.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)

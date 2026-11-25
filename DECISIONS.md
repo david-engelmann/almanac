@@ -2389,3 +2389,19 @@ stayed write fault refused through the whole build;
 the slice stages on the hosted verdict under the
 Actions-first rule, with the format check verified
 clean firsthand before staging.
+
+### Trust verification hosted gate fix pass (2026-11-25)
+
+The first hosted attempt was the slice's first
+compile, as the staging report allowed for. The
+format step passed and the code compiled; clippy
+under the hosted toolchain refused four lints, all
+in slice code. A manual div_ceil in the base64url
+encoder's capacity arithmetic now calls div_ceil.
+The factored findings sort takes a slice rather
+than a vector reference. The RFC's first number
+example is parsed from the RFC's printed text in
+both tests that carry it instead of standing as a
+float literal, which keeps the text as the source
+and answers the excessive precision lint without
+an allowance. Nothing else changed.
