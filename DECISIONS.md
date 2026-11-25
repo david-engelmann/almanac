@@ -1868,3 +1868,40 @@ differ before the Minor replaces the Criticals; a
 core posture pins the identical-reduction case at
 Critical. The record's as built wording is
 corrected to match.
+
+## Eleventh slice: the target trigger, re-earned (2026-11-24)
+
+The fetching slice's closure note owes this slice:
+the HTTP target trigger (a check run with an HTTP
+target fetches remote artifacts without the flag)
+proved end to end as its own slice, with a local
+gate behind the test before it stages. The slice is
+one integration test and no product code; the
+trigger itself is the fetching slice's product,
+reviewed there. The test generates its site from
+the HTTP fixture itself, so the live comparison
+runs against the surface its baseline recorded;
+every contract it touches was read from the source
+this time (generate's required domain flag in
+main.rs, the fixture's default mode, the fetching
+derivation in check) rather than taken from a
+sibling test's shape, which is the habit the four
+hosted rounds indicted. It is recorded here after
+the tenth slice's design section because that
+design was written first; the build order follows
+the closure note, this slice first.
+
+As built, the local gate earned its place before
+any hosted round was spent: its first full run
+failed the test on a fifth assumption, that a run
+naming no target stays in repo mode. On a site
+generated over HTTP the catalog resolves its own
+target from the card, so the plain run probed the
+fixture live and fetched on its own. The test now
+removes the served card file after generation, so
+resolution finds no target and the plain run stays
+in repo mode for a reason the test itself states;
+the named run is then the only difference. With
+that shape the full local gate passes over the
+slice (format, clippy, and the whole suite), and
+the slice stages on that evidence.
