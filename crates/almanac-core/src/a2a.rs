@@ -82,9 +82,12 @@ pub struct A2aView {
     /// pushNotifications, and extendedAgentCard.
     pub capability_flags: Vec<String>,
     /// The extension identifiers the card declares under
-    /// capabilities.extensions, sorted. A required
-    /// extension changes what a client must implement, so
-    /// the set is gated beside the flags.
+    /// capabilities.extensions, sorted, gated beside the
+    /// flags. An extension item's own required flag is
+    /// not read in any spelling: the set records which
+    /// extensions are declared, not which are required,
+    /// a coverage gap the twenty-first slice's record
+    /// names for a later A2A slice.
     pub extensions: Vec<String>,
     /// True when the card demands security: a non-empty
     /// securityRequirements list or a non-empty
@@ -201,7 +204,7 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
     let mut extensions: Vec<String> = Vec::new();
     if let Some(capabilities) = doc.get("capabilities").and_then(|v| v.as_object()) {
         for flag in ["streaming", "pushNotifications", "extendedAgentCard"] {
-            if capabilities.get(flag).and_then(|v| v.as_bool()) == Some(true) {
+            if capabilities.get(flag).and_then(crate::read_bool) == Some(true) {
                 capability_flags.push(flag.to_string());
             }
         }
@@ -344,6 +347,21 @@ mod tests {
         // Skills come back sorted by identifier.
         assert_eq!(view.skills[0].id, "review-diff");
         assert_eq!(view.skills[1].id, "summarize-repo");
+    }
+
+    #[test]
+    fn boolean_spellings_read_at_the_capability_flags() {
+        // The card's capability flags are the other
+        // boolean position: the YAML spellings read as
+        // the booleans they mean there too.
+        let mut spelled = card();
+        spelled["capabilities"] = serde_json::json!({
+            "streaming": "yes",
+            "pushNotifications": "Off",
+            "extendedAgentCard": "y"
+        });
+        let view = reduce_agent_card(&spelled).expect("reduces");
+        assert_eq!(view.capability_flags, vec!["streaming".to_string()]);
     }
 
     #[test]

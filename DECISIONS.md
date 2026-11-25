@@ -3673,3 +3673,118 @@ published catalog's own bytes after generation,
 so it judges the media type alone again, and the
 slice's own end-to-end test passed in the same
 run.
+
+## Twenty-first slice: boolean spellings at boolean positions (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, and its one question is answered as
+designed: the single letters stay out, as stray
+data likelier than intent. The YAML slice
+recorded its limit plainly:
+serde_yaml reads YAML 1.2 core scalars, so the
+YAML 1.1 boolean spellings (yes, no, on, off)
+arrive as strings, and a parameter marked
+required: yes records as optional until the
+document is corrected to true, which the gate
+then reports as a required parameter added. The
+harm is not cosmetic. A required parameter is a
+major class when it changes; a publisher whose
+YAML uses the 1.1 spellings, which much real
+YAML in the wild does, gets a baseline that
+understates their contract, and a phantom major
+later when the document is modernized, for a
+change that never happened on the surface.
+
+The design. The reduction reads a boolean in
+exactly two places: a parameter's required flag
+in the OpenAPI reduction (openapi.rs, through
+the resolved parameter object, so $ref parameters
+are covered by the same read), and the A2A
+card's capability flags in reduce_agent_card
+(a2a.rs). Both reads gain one shared helper in
+the core: a value reads as a boolean when it is
+a JSON boolean, or when it is a string carrying
+one of the YAML 1.1 boolean spellings, the
+spec's case forms of yes, no, on, off, true, and
+false. Any other string, and any other type,
+reads as no boolean, exactly as today. The
+helper is format-blind, as the YAML slice made
+everything downstream of the parse: a JSON
+document writing "required": "yes" is invalid
+OpenAPI either way, and the lenient read at a
+boolean position is the same read. Nothing else
+changes: strings elsewhere in the document (a
+description reading "yes", a server url) are
+never converted, because the helper is consulted
+only where a boolean is being read.
+
+One question for Main, with the record's
+recommendation. The YAML 1.1 set also includes
+the single letters y and n. This design excludes
+them: the spellings real documents use are the
+word forms, and a one-letter string is likelier
+to be data that wandered into a boolean position
+than a boolean anyone wrote. Including them is
+a two-line change to the helper's table.
+
+Scope lines. The two read points only; the
+document-level security read is a presence read,
+not a boolean read, and is untouched. The
+unquoted-numeric-version half of the YAML
+record's limits stands as recorded (a version
+field is a string position, and inventing a
+number-to-string coercion there would rewrite
+data, not read a boolean). Baselines recorded
+under the old read report the newly visible
+required parameters as required-parameter-added
+at major until the publisher regenerates, the
+twelfth slice's one-time re-baseline shape,
+stated here so the record owns it. Nothing here
+needs David.
+
+### As built (2026-11-25)
+
+One helper, read_bool at the core's root, consulted
+at the two reads and nowhere else; a crate-wide
+grep confirms as_bool survives only inside it.
+The placement is a first of its kind in this
+crate, whose other shared helpers live in topical
+modules; it stands because the two consumers sit
+in unrelated modules and no existing module owns
+document scalar reading, and the record names it
+so the next cross-module helper chooses
+deliberately. Call-site tests sample the table at
+both positions, including a $ref parameter and
+the excluded single letter; a root test reads the
+full table. The re-baseline consequence the
+design states for required parameters holds
+identically on the A2A side: a baseline recorded
+under the old read from a YAML card carrying
+streaming: yes reports one a2a-capabilities
+change at major until regeneration. Recorded as
+postures: a spelling rewrite inside components
+still moves the pool hash, which hashes the
+parsed pool as it stands and can over-report a
+pool change on a modernization but can never hide
+a required parameter change, the channel this
+slice repairs; and an A2A extension item's own
+required flag is read in no spelling, a
+pre-existing coverage gap beside the flags call
+site, named here for a later A2A slice, with the
+extensions field's doc corrected in this pass to
+stop claiming the gating it does not do.
+
+### Boolean spellings checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging: spec
+fidelity PASS, standards PASS, the red team clean
+at critical and major. Their minors converge on
+two repairs, both made: the spelling table is
+now pinned exhaustively by a test of the helper
+itself (all eighteen word forms, the JSON
+passthrough, and the exclusions), where the
+call-site tests sample it; and the record owns
+the A2A-side re-baseline consequence, the
+components posture, and the extension gap above,
+with the extensions doc corrected to match the
+code.
