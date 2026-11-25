@@ -174,6 +174,13 @@ pub struct CheckInputs<'a> {
     /// evidence about the serving. An observed empty
     /// string means the answer carried no Content-Type.
     pub catalog_media_type: Option<&'a str>,
+    /// The catalog documents the run fetched from the
+    /// catalog's own well-known paths, as (path, text)
+    /// pairs, in a fetching run; empty in any other,
+    /// and a path the run could not fetch is absent,
+    /// the best-effort posture the served catalog
+    /// design records.
+    pub served_catalogs: &'a [(String, String)],
 }
 
 /// Run every drift class over the inputs. Findings come back
@@ -490,6 +497,7 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     // and the baseline's envelope records catch the
     // removal no content comparison sees.
     check_trust(inputs, &mut findings);
+    check_served_catalog(inputs, &mut findings);
 
     apply_suppressions(&mut findings, inputs.suppressions, inputs.today);
 
@@ -690,6 +698,136 @@ fn check_catalog_media_type(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
             };
             findings.push(finding(Severity::Minor, "catalog-media-type", None, detail));
         }
+    }
+}
+
+/// The served catalog comparison, the twentieth
+/// slice's design in DECISIONS.md. Each catalog
+/// document the run fetched from the catalog's own
+/// well-known paths is read as a catalog and
+/// compared with the published one as models, so
+/// formatting and fields outside the model cannot
+/// fire it; what fires it is a fact. The finding is
+/// one per path at major, the publisher's own
+/// deployment lagging what it published, and its
+/// detail names the entry-level differences: served
+/// only, published only, and per shared identifier
+/// the fields among digest, version, and url that
+/// differ (an entry differing only elsewhere is
+/// named as differing in other fields). A difference
+/// no entry carries, the host block or the entries'
+/// order, is named as outside the entry contents. A
+/// served document that does not read as a catalog
+/// is the same major, naming that it could not be
+/// read.
+fn check_served_catalog(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    for (path, text) in inputs.served_catalogs {
+        // Each path is compared against the published
+        // copy of the same path: the legacy model for
+        // the legacy path when the site carries one,
+        // the current model otherwise (which for a
+        // legacy-only site is the legacy catalog
+        // itself).
+        let published = if path == "ai-catalog.json" {
+            inputs.legacy.unwrap_or(inputs.published)
+        } else {
+            inputs.published
+        };
+        // A byte order mark is a serving artifact of
+        // the deployment's tooling, not catalog
+        // content; it is stripped before the read.
+        let served = match serde_json::from_str::<Catalog>(text.trim_start_matches('\u{feff}')) {
+            Ok(served) => served,
+            Err(error) => {
+                findings.push(finding(
+                    Severity::Major,
+                    "catalog-served-differs",
+                    None,
+                    format!(
+                        "the catalog served at /.well-known/{path} could not be read ({error})"
+                    ),
+                ));
+                continue;
+            }
+        };
+        let equal = match (
+            serde_json::to_value(&served),
+            serde_json::to_value(published),
+        ) {
+            (Ok(served_value), Ok(published_value)) => served_value == published_value,
+            _ => false,
+        };
+        if equal {
+            continue;
+        }
+        let served_by_id: BTreeMap<&str, &crate::catalog::Entry> = served
+            .entries
+            .iter()
+            .map(|e| (e.identifier.as_str(), e))
+            .collect();
+        let published_by_id: BTreeMap<&str, &crate::catalog::Entry> = published
+            .entries
+            .iter()
+            .map(|e| (e.identifier.as_str(), e))
+            .collect();
+        let mut groups: Vec<String> = Vec::new();
+        let served_only: Vec<&str> = served_by_id
+            .keys()
+            .filter(|id| !published_by_id.contains_key(*id))
+            .copied()
+            .collect();
+        if !served_only.is_empty() {
+            groups.push(format!("served only: {}", served_only.join(", ")));
+        }
+        let published_only: Vec<&str> = published_by_id
+            .keys()
+            .filter(|id| !served_by_id.contains_key(*id))
+            .copied()
+            .collect();
+        if !published_only.is_empty() {
+            groups.push(format!("published only: {}", published_only.join(", ")));
+        }
+        let mut changed: Vec<String> = Vec::new();
+        for (id, published_entry) in &published_by_id {
+            if let Some(served_entry) = served_by_id.get(id) {
+                if served_entry == published_entry {
+                    continue;
+                }
+                let mut fields: Vec<&str> = Vec::new();
+                if served_entry.digest != published_entry.digest {
+                    fields.push("digest");
+                }
+                if served_entry.version != published_entry.version {
+                    fields.push("version");
+                }
+                if served_entry.url != published_entry.url {
+                    fields.push("url");
+                }
+                if fields.is_empty() {
+                    fields.push("other fields");
+                }
+                changed.push(format!("{id} ({})", fields.join(", ")));
+            }
+        }
+        if !changed.is_empty() {
+            groups.push(format!("changed: {}", changed.join(", ")));
+        }
+        let detail = if groups.is_empty() {
+            format!(
+                "the catalog served at /.well-known/{path} differs from the published catalog outside its entry contents (the host block or the entries' order)"
+            )
+        } else {
+            format!(
+                "the catalog served at /.well-known/{path} differs from the published catalog: {}",
+                groups.join("; ")
+            )
+        };
+        findings.push(finding(
+            Severity::Major,
+            "catalog-served-differs",
+            None,
+            detail,
+        ));
     }
 }
 
@@ -1663,6 +1801,7 @@ mod tests {
             pins: None,
             descriptors: &[],
             catalog_media_type: None,
+            served_catalogs: &[],
         }
     }
 
@@ -2161,6 +2300,156 @@ mod tests {
         // No observation: the class does not run.
         let inp = inputs(&cat, &base, Some(&snap));
         assert!(check(&inp).is_empty());
+    }
+
+    #[test]
+    fn a_served_catalog_that_differs_from_the_published_one_is_major() {
+        let base = baseline_for(&snapshot(vec![ping()]));
+        let snap = snapshot(vec![ping()]);
+        let cat = catalog();
+        let kind = "catalog-served-differs";
+        let run = |served: &[(String, String)]| {
+            let mut inp = inputs(&cat, &base, Some(&snap));
+            inp.served_catalogs = served;
+            check(&inp)
+                .into_iter()
+                .filter(|f| f.kind == kind)
+                .collect::<Vec<_>>()
+        };
+
+        // The same catalog served, in different bytes:
+        // silent. The comparison is of models, not of
+        // formatting.
+        let served_text = serde_json::to_string_pretty(&cat).expect("serializes");
+        let served = vec![("ard.json".to_string(), served_text)];
+        assert!(run(&served).is_empty());
+
+        // A stale deploy, against a published catalog
+        // carrying a second entry the deployment never
+        // received: the served copy changed the demo
+        // entry's digest, lacks the late entry, and
+        // still carries a ghost the publisher removed.
+        // One major naming all three groups.
+        let blank_entry = |identifier: &str| Entry {
+            identifier: identifier.into(),
+            display_name: "Entry".into(),
+            media_type: "text/markdown".into(),
+            url: None,
+            data: None,
+            description: "Entry.".into(),
+            capabilities: vec![],
+            representative_queries: vec![],
+            tags: vec![],
+            version: None,
+            digest: None,
+            updated_at: None,
+            trust_manifest: None,
+            trust_manifests: vec![],
+        };
+        let mut published_two = cat.clone();
+        published_two
+            .entries
+            .push(blank_entry("urn:air:example.com:skill:late"));
+        let mut stale = cat.clone();
+        stale.entries[0].digest = Some(format!("sha256:{}", "f".repeat(64)));
+        stale.entries[0].version = Some("2.0".into());
+        stale.entries[0].url = Some("https://example.com/other".into());
+        stale
+            .entries
+            .push(blank_entry("urn:air:example.com:skill:ghost"));
+        let served = vec![(
+            "ard.json".to_string(),
+            serde_json::to_string(&stale).expect("serializes"),
+        )];
+        let mut inp = inputs(&published_two, &base, Some(&snap));
+        inp.served_catalogs = &served;
+        let findings: Vec<_> = check(&inp).into_iter().filter(|f| f.kind == kind).collect();
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].severity, Severity::Major);
+        assert!(
+            findings[0]
+                .detail
+                .contains("served only: urn:air:example.com:skill:ghost"),
+            "detail was {}",
+            findings[0].detail
+        );
+        assert!(
+            findings[0]
+                .detail
+                .contains("published only: urn:air:example.com:skill:late"),
+            "detail was {}",
+            findings[0].detail
+        );
+        assert!(
+            findings[0]
+                .detail
+                .contains("changed: urn:air:example.com:mcp:demo (digest, version, url)"),
+            "detail was {}",
+            findings[0].detail
+        );
+
+        // Both paths differing is one finding per path.
+        let served = vec![
+            (
+                "ard.json".to_string(),
+                serde_json::to_string(&stale).expect("serializes"),
+            ),
+            (
+                "ai-catalog.json".to_string(),
+                serde_json::to_string(&stale).expect("serializes"),
+            ),
+        ];
+        assert_eq!(run(&served).len(), 2);
+
+        // An entry differing only outside the three
+        // named fields is named as other fields, not
+        // mislocated outside the entries.
+        let mut redescribed = cat.clone();
+        redescribed.entries[0].description = "Rewritten.".into();
+        let served = vec![(
+            "ard.json".to_string(),
+            serde_json::to_string(&redescribed).expect("serializes"),
+        )];
+        let findings = run(&served);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert!(
+            findings[0]
+                .detail
+                .contains("changed: urn:air:example.com:mcp:demo (other fields)"),
+            "detail was {}",
+            findings[0].detail
+        );
+
+        // A difference outside the entries is named as
+        // such, on the path that carries it.
+        let mut renamed_host = cat.clone();
+        renamed_host.host.display_name = "Renamed".into();
+        let served = vec![(
+            "ai-catalog.json".to_string(),
+            serde_json::to_string(&renamed_host).expect("serializes"),
+        )];
+        let findings = run(&served);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert!(
+            findings[0].detail.contains("ai-catalog.json")
+                && findings[0].detail.contains("outside its entry contents"),
+            "detail was {}",
+            findings[0].detail
+        );
+
+        // A served document that does not read as a
+        // catalog is the same major, naming that.
+        let served = vec![("ard.json".to_string(), "{broken".to_string())];
+        let findings = run(&served);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert!(
+            findings[0].detail.contains("could not be read"),
+            "detail was {}",
+            findings[0].detail
+        );
+
+        // Nothing fetched: the class does not run.
+        assert!(run(&[]).is_empty());
     }
 
     #[test]

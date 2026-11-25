@@ -2482,6 +2482,70 @@ fn catalog_served_with_a_generic_media_type_warns() {
 }
 
 #[test]
+fn check_compares_the_served_catalog_with_the_published_one() {
+    // A fetching run also reads the catalog as the
+    // deployment serves it and compares it with the
+    // published pair. The site's domain is the serving
+    // address's authority, as in the media type test;
+    // the server answers every path with the held
+    // bytes, which suits the dual path pair, whose two
+    // copies are byte-identical.
+    let clean = fixture_binary("fixture_server");
+    let (base, held) = serve_typed(b"{}".to_vec(), "application/ard+json");
+    let authority = base.trim_start_matches("http://").to_string();
+    let site = temp_site("served-catalog");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        &authority,
+        "--name",
+        "Example",
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let published_bytes =
+        std::fs::read(site.join(".well-known/ard.json")).expect("the published catalog");
+
+    // The deployment serves what was published: the
+    // class is silent and the run is clean.
+    held.lock().expect("lock").0 = published_bytes.clone();
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 0, "check failed with {stdout}");
+    assert!(
+        !stdout.contains("catalog-served-differs"),
+        "report was {stdout}"
+    );
+
+    // The deployment lags: one entry's digest in the
+    // served copy is not the published one. The class
+    // fires once per path (the server answers both
+    // paths with the held bytes), and the run fails
+    // at the default severity.
+    let mut stale: serde_json::Value =
+        serde_json::from_slice(&published_bytes).expect("the published catalog parses");
+    stale["entries"][0]["digest"] = serde_json::json!(format!("sha256:{}", "f".repeat(64)));
+    held.lock().expect("lock").0 = serde_json::to_vec(&stale).expect("serializes");
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 1, "a major must fail the run, report was {stdout}");
+    assert!(
+        stdout.contains("catalog-served-differs") && stdout.contains("(digest)"),
+        "report was {stdout}"
+    );
+
+    // A run that does not fetch compares nothing, even
+    // while the deployment lags.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "repo mode check failed with {stdout}");
+    assert!(
+        !stdout.contains("catalog-served-differs"),
+        "report was {stdout}"
+    );
+}
+
+#[test]
 fn card_display_changes_warn_instead_of_failing() {
     // A card edited only in its display fields warns at
     // Minor and passes; a card edited in substance fails

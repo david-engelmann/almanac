@@ -406,6 +406,49 @@ impl DocumentFetcher {
             },
         }
     }
+
+    /// Fetch a document's bytes at an https address,
+    /// falling back to the same address over http only
+    /// when the https request could not be made at all
+    /// (a transport failure), the media type
+    /// observation's fallback posture with the outcomes
+    /// kept apart as that method keeps them. Any other
+    /// https outcome is final: an answer, a refusal, and
+    /// a dead redirect chain all mean the https surface
+    /// was the one to judge. None when neither attempt
+    /// serves the document, the best-effort shape its
+    /// one caller (the served catalog collection)
+    /// records.
+    pub(crate) fn fetch_with_http_fallback(&self, url: &str) -> Option<Vec<u8>> {
+        let response = match follow(&self.agent, url, true) {
+            FollowOutcome::Response(response) => response,
+            FollowOutcome::TransportFailed(_) => {
+                let http = url.replacen("https://", "http://", 1);
+                match follow(&self.agent, &http, true) {
+                    FollowOutcome::Response(response) => response,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let mut response = response;
+        use std::io::Read;
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take((LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > LIMIT {
+            return None;
+        }
+        Some(bytes)
+    }
 }
 
 /// The four outcomes of a media type observation

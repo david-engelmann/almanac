@@ -556,6 +556,12 @@ Major, fails by default and can be lowered by config.
   is the stranded state the migrate command exists to end. This
   class is what makes check useful to a publisher who has not
   migrated yet, before any other drift exists.
+- The catalog the deployment serves at its well-known paths
+  differing from the published catalog, in a run that fetches it:
+  the publisher's own deployment lagging what it published. The
+  finding names the entry-level differences. Added 2026-11-25 by
+  the twentieth slice, recorded here because section 6 presents
+  its list as fixed.
 
 Minor, warns by default.
 
