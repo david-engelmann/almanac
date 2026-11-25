@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::Severity;
-use crate::baseline::{AuthBaseline, Baseline, McpBaseline};
+use crate::baseline::{AuthBaseline, Baseline, CardDisplay, McpBaseline};
 use crate::catalog::Catalog;
 use crate::openapi::OpenApiView;
 use crate::snapshot::{AuthSurface, MetadataRecord, SurfaceSnapshot};
@@ -101,6 +101,10 @@ pub struct CheckInputs<'a> {
     /// there. Artifacts with no entry in this list are not
     /// checked.
     pub artifact_digests: &'a [(String, Option<String>)],
+    /// Display reductions of the server cards the checker
+    /// read, keyed by the artifact URL they were read from,
+    /// for the display comparison in the artifact pass.
+    pub card_displays: &'a [(String, CardDisplay)],
     /// Entry identifiers of skill files present on the site now,
     /// whether or not the baseline knows them.
     pub present_skill_ids: &'a [String],
@@ -239,27 +243,101 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
                     ),
                 )),
                 Some(current) => {
-                    if current != published_hex {
+                    // A server card whose substance is
+                    // unchanged has not drifted in any way
+                    // the gate fails on: when the baseline
+                    // recorded the card's display fields and
+                    // the served card's remainder still
+                    // matches them, with the primary endpoint
+                    // it names unchanged, the byte change is
+                    // display only and reports at Minor
+                    // instead of failing the digest binding.
+                    let display_pair = if current != published_hex || current != &artifact.sha256 {
+                        let recorded = baseline
+                            .mcp
+                            .as_ref()
+                            .and_then(|mcp| mcp.card_display.as_ref());
+                        let served = inputs
+                            .card_displays
+                            .iter()
+                            .find(|(url, _)| url == &artifact.url)
+                            .map(|(_, served)| served);
+                        match (entry.media_type.as_str(), recorded, served) {
+                            ("application/mcp-server-card+json", Some(recorded), Some(served))
+                                if served.remainder_sha256 == recorded.remainder_sha256
+                                    && served.endpoint == recorded.endpoint =>
+                            {
+                                Some((recorded, served))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    // The class covers display FIELD changes.
+                    // A byte change no recorded field explains
+                    // (a trailing newline, a key reordering in
+                    // the file) leaves the parsed card identical
+                    // and keeps the digest Criticals: nothing a
+                    // reader sees changed, so nothing here
+                    // excuses the bytes.
+                    let display_detail = display_pair.and_then(|(recorded, served)| {
+                        let mut changed: Vec<&str> = Vec::new();
+                        if served.title != recorded.title {
+                            changed.push("title");
+                        }
+                        if served.description != recorded.description {
+                            changed.push("description");
+                        }
+                        if served.icons != recorded.icons {
+                            changed.push("icons");
+                        }
+                        if served.website_url != recorded.website_url {
+                            changed.push("websiteUrl");
+                        }
+                        if served.remotes != recorded.remotes {
+                            changed.push("remotes");
+                        }
+                        if changed.is_empty() {
+                            None
+                        } else {
+                            Some(format!(
+                                "the server card at {} changed only in display fields ({})",
+                                artifact.url,
+                                changed.join(", ")
+                            ))
+                        }
+                    });
+                    if let Some(detail) = display_detail {
                         findings.push(finding(
-                            Severity::Critical,
-                            "digest-mismatch",
+                            Severity::Minor,
+                            "declared-display-changed",
                             Some(&artifact.entry_id),
-                            format!(
-                                "artifact at {} no longer matches the digest in its catalog entry",
-                                artifact.url
-                            ),
+                            detail,
                         ));
-                    }
-                    if current != &artifact.sha256 {
-                        findings.push(finding(
-                            Severity::Critical,
-                            "digest-mismatch",
-                            Some(&artifact.entry_id),
-                            format!(
-                                "artifact at {} no longer matches the hash recorded in the baseline at generation",
-                                artifact.url
-                            ),
-                        ));
+                    } else {
+                        if current != published_hex {
+                            findings.push(finding(
+                                Severity::Critical,
+                                "digest-mismatch",
+                                Some(&artifact.entry_id),
+                                format!(
+                                    "artifact at {} no longer matches the digest in its catalog entry",
+                                    artifact.url
+                                ),
+                            ));
+                        }
+                        if current != &artifact.sha256 {
+                            findings.push(finding(
+                                Severity::Critical,
+                                "digest-mismatch",
+                                Some(&artifact.entry_id),
+                                format!(
+                                    "artifact at {} no longer matches the hash recorded in the baseline at generation",
+                                    artifact.url
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -1343,7 +1421,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{ArtifactBaseline, McpBaseline};
+    use crate::baseline::{ArtifactBaseline, CardDisplay, McpBaseline};
     use crate::catalog::{Catalog, Entry, Host};
     use crate::snapshot::{CredentialOutcome, ToolSurface};
 
@@ -1360,6 +1438,7 @@ mod tests {
             snapshot,
             skill_hashes: &[],
             artifact_digests: &[],
+            card_displays: &[],
             present_skill_ids: &[],
             card: None,
             agents_json_endpoints: None,
@@ -1499,6 +1578,107 @@ mod tests {
                 .detail
                 .contains("https://example.com/mcp/server-card"),
             "the missing finding must name the missing copy, findings were {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_display_only_card_change_warns_instead_of_failing_the_digest() {
+        // The baseline recorded the card's display fields.
+        // The served card's bytes changed (its digest misses
+        // both bindings) but its remainder is the recorded
+        // one and only its description moved: one Minor, no
+        // Critical. A substantive change (a different
+        // remainder) keeps the digest Criticals, and a
+        // baseline with no display record does too.
+        let url = "https://example.com/.well-known/mcp/server-card.json";
+        let recorded = CardDisplay {
+            title: Some("Demo".into()),
+            description: Some("The demo server.".into()),
+            icons: vec![],
+            website_url: None,
+            remotes: vec![],
+            endpoint: None,
+            remainder_sha256: "rest".into(),
+        };
+        let mut cat = catalog();
+        cat.entries[0].digest = Some("sha256:aaaa".into());
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.mcp.as_mut().expect("mcp").card_display = Some(recorded.clone());
+        base.artifacts = vec![ArtifactBaseline {
+            entry_id: "urn:air:example.com:mcp:demo".into(),
+            url: url.into(),
+            sha256: "aaaa".into(),
+        }];
+        let digests = vec![(url.to_string(), Some("bbbb".to_string()))];
+
+        let mut served = recorded.clone();
+        served.description = Some("The demo server, described better.".into());
+        let displays = vec![(url.to_string(), served)];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        inp.card_displays = &displays;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        assert_eq!(findings[0].kind, "declared-display-changed");
+        assert!(
+            findings[0].detail.contains("description"),
+            "the detail names the field, findings were {findings:?}"
+        );
+
+        // Same record, a remainder that moved: substance
+        // changed, so the digest speaks at Critical.
+        let mut substantive = recorded.clone();
+        substantive.remainder_sha256 = "different".into();
+        let displays = vec![(url.to_string(), substantive)];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        inp.card_displays = &displays;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 2, "findings were {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == Severity::Critical && f.kind == "digest-mismatch"),
+            "findings were {findings:?}"
+        );
+
+        // A served reduction identical to the record, with
+        // the digest still missing: the parsed card is the
+        // recorded card and only its bytes moved (a
+        // trailing newline, a key reordering), which no
+        // display field explains, so the Criticals stand.
+        let displays = vec![(url.to_string(), recorded.clone())];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        inp.card_displays = &displays;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 2, "findings were {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == Severity::Critical && f.kind == "digest-mismatch"),
+            "findings were {findings:?}"
+        );
+
+        // No display record in the baseline: digest alone,
+        // as before the class existed.
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.artifacts = vec![ArtifactBaseline {
+            entry_id: "urn:air:example.com:mcp:demo".into(),
+            url: url.into(),
+            sha256: "aaaa".into(),
+        }];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        inp.card_displays = &displays;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 2, "findings were {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == Severity::Critical && f.kind == "digest-mismatch"),
+            "findings were {findings:?}"
         );
     }
 

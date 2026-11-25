@@ -1739,3 +1739,132 @@ trigger itself is product code the reviews verified
 and the flag test's sibling paths exercise; proving
 it end to end is owed as its own slice, with a local
 gate behind the test before it stages.
+
+## Ninth slice: display changes in a declared artifact (design, 2026-11-24)
+
+The last items on the recorded post-v1 list are the
+two Minor drift classes deferred at the milestone one
+checkpoint. The first, in the design's own words
+(section 6, Minor): display text, tags or ordering
+changes in a declared artifact. The deferral's gloss:
+the first needs field level card comparison beyond
+the digest. Today the server card is bound by digest
+alone, so a publisher who fixes a typo in the card's
+description, swaps an icon, or reorders its protocol
+versions fails the gate at Critical, the same as a
+publisher whose card was replaced wholesale. The
+digest cannot tell an editorial edit from a
+substantive one; fields can.
+
+The slice teaches check to tell them apart, for the
+server card specifically (the auth metadata documents
+are declared artifacts too, but their comparison is
+already field level for the fields that carry
+meaning, and their display fields stay unrecorded;
+that boundary is stated here rather than discovered
+later). The baseline's MCP record gains the card's
+display record: its title and description, its icons
+and website in order, its remote URLs in order, and
+a remainder hash, the card with those display fields
+removed, canonically hashed. A baseline written
+before this slice records none of it and keeps
+today's behavior exactly, the digest alone.
+
+At check, when a card artifact's served bytes miss
+the recorded digest, the served card is reduced the
+same way. If its remainder hash matches the recorded
+one, nothing substantive moved: the byte change is
+wholly display, so the run reports Minor
+declared-display-changed naming the fields that
+differ, and the digest Critical does not fire for
+that artifact. If the remainder differs, or the
+served card will not parse, or no display record
+exists, the digest Critical stands as today. Both
+card copies are judged independently, as the digest
+loop already judges them. The reduction lives where
+the card reduction already lives, the CLI side; the
+core receives the display record and the served
+reduction as plain values and stays network free,
+and the comparison joins the existing artifact pass.
+
+As built: the core gains a CardDisplay record
+(title, description, icons, website, remote URLs in
+order, remainder hash) on the MCP baseline, absent
+in baselines written before the slice. Generate and
+migrate reduce it from the card bytes in hand at the
+baseline's construction. The CLI's reduction removes
+the five display keys (title, displayName,
+description, icons, websiteUrl), sorts the remotes
+by canonical form so their order alone cannot move
+the remainder, and hashes what is left in a canonical
+JSON form (object keys sorted, arrays in order).
+Check reduces every served card artifact the same
+way and hands the reductions to the core beside the
+digests; the artifact pass reports Minor
+declared-display-changed, naming the fields that
+differ, in place of the digest Criticals whenever
+the remainder matches and at least one recorded
+display field moved, and keeps the Criticals
+otherwise. A core test walks the postures, and an integration
+test edits a generated card's description (passes,
+one Minor, no digest finding) and then its version
+(fails at Critical).
+
+### Display changes checkpoint fix pass (2026-11-24)
+
+The three reviews landed with no Critical on any
+axis. The standards Major was a duplicated canonical
+form: the CLI hand rolled a canonical JSON serializer
+for the remainder hash when the core hash module's
+canonical bytes are the standing definition every
+baseline hash uses. The hand rolled function is
+deleted; the remainder is hashed with the core's
+sha256_json, and the sort keys ride serde's own text
+form. The red team's endpoint point narrowed the
+class honestly: a remote reorder that moves the
+primary endpoint is substance, not display, because
+the card reading resolves the first streamable-http
+remote. The display record now carries the resolved
+primary endpoint, and an endpoint change defeats the
+display judgment outright, so remote order is
+display only while the endpoint it names is
+unchanged. Three record sentences the reviews found
+missing are stated here: the card carries no tags
+field in either shape the tool reads or writes, so
+the design's word tags has nothing to attach to
+inside a declared artifact (catalog entry tags are a
+different surface and stay unrecorded); display keys
+are read at the top level only, so display text
+nested inside another object rides in the remainder;
+and a remote's protocol versions past the first are
+a preference list normalized like the remote order,
+while the first names the version the card reading
+takes and stays substantive. Also closed: the
+changed list names the card's fields in the card's
+own words; the core
+test's Critical postures pin their finding counts;
+a parse pin covers a pre-slice baseline whose MCP
+record lacks the new field; the two recording sites
+share one helper; and the display key list carries a
+comment naming the extraction reads as its other
+half.
+
+### Display changes hosted gate fix pass (2026-11-24)
+
+The hosted gate caught a collision all three
+reviews missed: the milestone one test
+skill_digest_and_path_breaks plants its digest break
+by appending one newline to the served card, and
+the slice as staged read that as a serialization
+only change and passed it at Minor. The standing
+test is right and the slice's reach was wrong: the
+class covers display FIELD changes, and a byte
+change no recorded field explains (a trailing
+newline, a key reordering in the file) leaves the
+parsed card identical, with nothing a reader sees
+changed to excuse the bytes. The judgment now
+requires at least one recorded display field to
+differ before the Minor replaces the Criticals; a
+core posture pins the identical-reduction case at
+Critical. The record's as built wording is
+corrected to match.
