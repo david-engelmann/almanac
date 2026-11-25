@@ -1292,12 +1292,15 @@ fn check_a2a(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
                 "the card's security posture changed since generation".into(),
             ));
         }
-        if view.capability_flags != card.capability_flags || view.extensions != card.extensions {
+        if view.capability_flags != card.capability_flags
+            || view.extensions != card.extensions
+            || view.required_extensions != card.required_extensions
+        {
             findings.push(finding(
                 Severity::Major,
                 "a2a-capabilities-changed",
                 Some(&card.entry_id),
-                "the card's capability flags or declared extensions changed since generation"
+                "the card's capability flags, declared extensions, or required extensions changed since generation"
                     .into(),
             ));
         }
@@ -2723,6 +2726,35 @@ mod tests {
     fn a2a_agreement_produces_no_findings() {
         let (cat, base, _) = a2a_setup();
         assert!(a2a_check(&cat, &base, agent_doc()).is_empty());
+    }
+
+    #[test]
+    fn a2a_extension_requiredness_flip_is_major() {
+        // The baseline declares the extension without
+        // requiring it. Flipping the item's required
+        // flag, in either spelling, is the one major;
+        // leaving it alone is agreement.
+        let (cat, _, _) = a2a_setup();
+        let mut base_doc = agent_doc();
+        base_doc["capabilities"]["extensions"] =
+            serde_json::json!([{"uri": "https://example.com/ext/pay"}]);
+        let base_view = crate::a2a::reduce_agent_card(&base_doc).expect("reduces");
+        let mut base = baseline_for(&snapshot(vec![ping()]));
+        base.a2a = vec![crate::baseline::A2aBaseline::from_view(
+            A2A_ID,
+            "https://example.com/review-agent.json",
+            "00",
+            &base_view,
+        )];
+        assert!(a2a_check(&cat, &base, base_doc.clone()).is_empty());
+        for spelling in [serde_json::json!(true), serde_json::json!("yes")] {
+            let mut doc = base_doc.clone();
+            doc["capabilities"]["extensions"][0]["required"] = spelling;
+            let findings = a2a_check(&cat, &base, doc);
+            assert_eq!(findings.len(), 1, "findings were {findings:?}");
+            assert_eq!(findings[0].kind, "a2a-capabilities-changed");
+            assert_eq!(findings[0].severity, Severity::Major);
+        }
     }
 
     #[test]

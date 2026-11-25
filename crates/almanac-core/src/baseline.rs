@@ -271,6 +271,12 @@ pub struct A2aBaseline {
     /// The extension identifiers declared at generation,
     /// sorted.
     pub extensions: Vec<String>,
+    /// The identifiers among them marked required at
+    /// generation, sorted. Baselines written before the
+    /// twenty-second slice carry none, the serde
+    /// default's empty set.
+    #[serde(default)]
+    pub required_extensions: Vec<String>,
     /// Whether the card demanded security at generation.
     pub security_required: bool,
     /// The card's default input modes at generation,
@@ -334,6 +340,7 @@ impl A2aBaseline {
                 .collect(),
             capability_flags: view.capability_flags.clone(),
             extensions: view.extensions.clone(),
+            required_extensions: view.required_extensions.clone(),
             security_required: view.security_required,
             default_input_modes: view.default_input_modes.clone(),
             default_output_modes: view.default_output_modes.clone(),
@@ -437,6 +444,44 @@ mod tests {
         // The same document predates the trust records
         // too, and their default is empty as well.
         assert!(baseline.trust_manifests.is_empty());
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_required_extensions_slice_still_parses() {
+        // The twenty-second slice added required_extensions
+        // to the A2A record with a serde default. A committed
+        // baseline from before the slice has an A2A record
+        // with no such key, and it must still load with the
+        // set empty.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": null,
+            "skills": [],
+            "artifacts": [],
+            "provenance": [],
+            "a2a": [{
+                "entry_id": "urn:air:example.com:a2a:review",
+                "url": "https://example.com/review-agent.json",
+                "sha256": "00",
+                "version": "1.2.0",
+                "name": "Code Review Agent",
+                "description_sha256": "00",
+                "interfaces": [],
+                "capability_flags": [],
+                "extensions": ["https://example.com/ext/pay"],
+                "security_required": false,
+                "default_input_modes": [],
+                "default_output_modes": [],
+                "skills": []
+            }]
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        assert_eq!(baseline.a2a.len(), 1);
+        assert!(baseline.a2a[0].required_extensions.is_empty());
+        assert_eq!(
+            baseline.a2a[0].extensions,
+            vec!["https://example.com/ext/pay".to_string()]
+        );
     }
 
     #[test]

@@ -3788,3 +3788,96 @@ the A2A-side re-baseline consequence, the
 components posture, and the extension gap above,
 with the extensions doc corrected to match the
 code.
+
+## Twenty-second slice: A2A extension requiredness (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, no changes and no question
+outstanding. The twenty-first slice's red team
+named this gap
+beside its own call site, and the record took it
+as named future work: an A2A extension item's
+required flag is read in no spelling at all. The
+reduction takes only the item's uri into the
+extensions set, so a publisher who flips an
+extension from optional to required, which in the
+A2A spec changes what a client must implement to
+use the agent, produces an identical view and no
+finding. The gate watches the flags and the
+extension set beside them and is blind to the
+one bit on the item that carries an obligation.
+
+The design. The reduction reads each extension
+item's required flag through the twenty-first
+slice's read_bool, so the YAML spellings count
+here as everywhere a boolean is read, and records
+the required extensions' uris in a second sorted
+set on the view, required_extensions, beside the
+declared set. The baseline gains the same set as
+an additive field with a serde default, so
+pre-slice baselines parse with it empty. The
+drift comparison folds it into the standing
+condition: flags, declared extensions, or
+required extensions differing from the baseline
+report the one existing major,
+a2a-capabilities-changed, whose detail already
+names capability flags or declared extensions and
+gains the words for this set. No new finding
+kind. The declared set keeps recording every
+extension's uri, required or not, so the two
+sets answer different questions: what is
+declared, and what among it is obligatory.
+
+The recorded consequence follows the standing
+shape: a baseline recorded before this slice
+holds an empty required set, so a card whose
+extensions are required reports the one major
+until the publisher regenerates, a one-time
+re-baseline stated here as the twelfth and
+twenty-first slices stated theirs.
+
+Scope lines. The A2A reduction and its baseline
+and comparison only; the OpenAPI side has no
+analogous per-item obligation bit in what it
+reads. An extension item's other fields
+(description, params) stay unread, as today.
+Nothing here needs David, and no question rides
+with this one: the representation follows the
+view's own idiom of separate named sets, and the
+severity is the standing class's.
+
+### As built (2026-11-25)
+
+As designed. The view and the baseline each gain
+the required set beside the declared set, the
+baseline's with the serde default the additive
+precedent sets, and the comparison folds it into
+the one major, whose detail now names all three
+channels. Inherited postures the record names
+rather than repairs: duplicate extension items
+take union semantics, so a card contradicting
+itself over one uri's requiredness reduces to the
+stricter reading and the contradiction is
+invisible, where the same function's skills are
+refused on a repeated identifier; and an item
+carrying required with no usable uri records
+nothing in either set, the module's standing skip
+for partial entries. The single finding's
+granularity is the design's own choice: the three
+channels share one major, so a reader sees that
+the capability surface moved, and the baseline
+keeps the sets apart for whoever needs which.
+
+### Extension requiredness checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging: spec
+fidelity PASS at zero findings, standards PASS,
+the red team clean at critical and major. Two
+test assertions were strengthened on their
+minors: the reduction test asserts the declared
+set by exact vector rather than by count, and the
+drift flip test asserts the flip produces exactly
+one finding, the designed major, where it
+previously asserted only that the kind appears.
+The red team's remaining minors are the
+inherited postures recorded above.

@@ -83,12 +83,13 @@ pub struct A2aView {
     pub capability_flags: Vec<String>,
     /// The extension identifiers the card declares under
     /// capabilities.extensions, sorted, gated beside the
-    /// flags. An extension item's own required flag is
-    /// not read in any spelling: the set records which
-    /// extensions are declared, not which are required,
-    /// a coverage gap the twenty-first slice's record
-    /// names for a later A2A slice.
+    /// flags.
     pub extensions: Vec<String>,
+    /// The identifiers among them whose item marks
+    /// itself required, sorted: what a client must
+    /// implement, beside what is merely declared. The
+    /// twenty-second slice's addition.
+    pub required_extensions: Vec<String>,
     /// True when the card demands security: a non-empty
     /// securityRequirements list or a non-empty
     /// securitySchemes map.
@@ -202,6 +203,7 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
 
     let mut capability_flags: Vec<String> = Vec::new();
     let mut extensions: Vec<String> = Vec::new();
+    let mut required_extensions: Vec<String> = Vec::new();
     if let Some(capabilities) = doc.get("capabilities").and_then(|v| v.as_object()) {
         for flag in ["streaming", "pushNotifications", "extendedAgentCard"] {
             if capabilities.get(flag).and_then(crate::read_bool) == Some(true) {
@@ -216,6 +218,9 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
                     .filter(|s| !s.is_empty())
                 {
                     extensions.push(uri.to_string());
+                    if item.get("required").and_then(crate::read_bool) == Some(true) {
+                        required_extensions.push(uri.to_string());
+                    }
                 }
             }
         }
@@ -223,6 +228,8 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
     capability_flags.sort();
     extensions.sort();
     extensions.dedup();
+    required_extensions.sort();
+    required_extensions.dedup();
     let modes = |key: &str| -> Vec<String> {
         let mut values: Vec<String> = doc
             .get(key)
@@ -303,6 +310,7 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
         interfaces,
         capability_flags,
         extensions,
+        required_extensions,
         security_required,
         default_input_modes,
         default_output_modes,
@@ -347,6 +355,37 @@ mod tests {
         // Skills come back sorted by identifier.
         assert_eq!(view.skills[0].id, "review-diff");
         assert_eq!(view.skills[1].id, "summarize-repo");
+    }
+
+    #[test]
+    fn reduction_records_required_extensions_in_both_spellings() {
+        // The required set holds the extensions whose
+        // item marks itself required, as a JSON boolean
+        // or as a YAML spelling, and nothing else.
+        let mut spelled = card();
+        spelled["capabilities"]["extensions"] = serde_json::json!([
+            {"uri": "https://example.com/ext/plain"},
+            {"uri": "https://example.com/ext/json", "required": true},
+            {"uri": "https://example.com/ext/yaml", "required": "yes"},
+            {"uri": "https://example.com/ext/off", "required": "off"}
+        ]);
+        let view = reduce_agent_card(&spelled).expect("reduces");
+        assert_eq!(
+            view.extensions,
+            vec![
+                "https://example.com/ext/json".to_string(),
+                "https://example.com/ext/off".to_string(),
+                "https://example.com/ext/plain".to_string(),
+                "https://example.com/ext/yaml".to_string()
+            ]
+        );
+        assert_eq!(
+            view.required_extensions,
+            vec![
+                "https://example.com/ext/json".to_string(),
+                "https://example.com/ext/yaml".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -403,6 +442,10 @@ mod tests {
         let view = reduce_agent_card(&rich).expect("reduces");
         assert_eq!(
             view.extensions,
+            vec!["https://example.com/ext/pay".to_string()]
+        );
+        assert_eq!(
+            view.required_extensions,
             vec!["https://example.com/ext/pay".to_string()]
         );
         assert_eq!(
