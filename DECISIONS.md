@@ -3132,3 +3132,35 @@ that the kind is absent (standards); value_declares
 carries its doc line (standards). The remaining
 minors are the known postures and widenings
 recorded in the as-built above.
+
+Ratified by Main on 2026-11-25: both widenings
+stand. The engagement rule is the standing
+one-rule for network judgments approved with the
+sixteenth slice, and the design text's narrower
+phrasing was that rule's earlier draft; the
+descriptor read keeps provenance identical
+through the same mapping and fetcher, its
+possible duplicate fetch harmless against a
+judgment that must say exactly where its bytes
+came from.
+
+### Cross-origin hosted gate fix pass (2026-11-25)
+
+Round 1 (run 45604399580) failed in the test step
+only, format, clippy, compile, and the core suites
+green, 54 of 55 CLI tests green. The one failure
+was the slice's own end-to-end test, two
+test-side defects in its plant, both mine: the
+subject digest prefixed sha256: onto an entry
+digest that already carries its full form (the
+sixteenth slice's plant uses the digest verbatim,
+and this one should have), drawing a subject
+mismatch beside the expected cross-origin
+critical; and the declaring descriptor named a
+remembered identifier, mcp:demo, where the
+fixture's entry is mcp:telorama, so the declaring
+phase declared nothing and the class correctly
+fired. Both are fixed in the test alone: the
+subject digest stands verbatim, and the declaring
+descriptor is built from the identifier the plant
+actually read. No product code changed.

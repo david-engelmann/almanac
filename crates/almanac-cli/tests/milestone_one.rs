@@ -4437,6 +4437,7 @@ fn check_judges_cross_origin_descriptors_in_fetching_runs() {
     let (descriptor_url, held) = serve_bytes(serde_json::to_vec(&plain).expect("json"));
     let ard_path = site.join(".well-known/ard.json");
     let legacy_path = site.join(".well-known/ai-catalog.json");
+    let mut planted_id = String::new();
     for path in [&ard_path, &legacy_path] {
         let mut catalog: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("catalog")).expect("json");
@@ -4444,6 +4445,7 @@ fn check_judges_cross_origin_descriptors_in_fetching_runs() {
         let id = entry["identifier"].as_str().expect("id").to_string();
         let digest = entry["digest"].as_str().expect("digest").to_string();
         let media_type = entry["type"].as_str().expect("type").to_string();
+        planted_id = id.clone();
         entry["url"] = serde_json::Value::String(descriptor_url.clone());
         entry["trustManifest"] = serde_json::json!({
             "identity": "did:web:example.com",
@@ -4452,7 +4454,7 @@ fn check_judges_cross_origin_descriptors_in_fetching_runs() {
             "subject": {
                 "identifier": id,
                 "type": media_type,
-                "digest": format!("sha256:{digest}"),
+                "digest": digest,
             },
             "signature": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         });
@@ -4473,7 +4475,7 @@ fn check_judges_cross_origin_descriptors_in_fetching_runs() {
     let declaring = serde_json::json!({
         "name": "com.example/demo",
         "version": "0.1.0",
-        "description": "The card for urn:air:example.com:mcp:demo.",
+        "description": format!("The card for {planted_id}."),
     });
     *held.lock().expect("lock") = serde_json::to_vec(&declaring).expect("json");
     let (code, stdout, _) = check_fetch_remote(&site);
