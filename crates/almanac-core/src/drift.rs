@@ -145,6 +145,14 @@ pub struct CheckInputs<'a> {
     pub suppressions: &'a [Suppression],
     /// Today's date, YYYY-MM-DD, for suppression expiry.
     pub today: &'a str,
+    /// The media type the catalog itself was observed
+    /// served with, in a run that could observe it. None
+    /// when the run made no observation (repo mode, or
+    /// the serving could not be reached), and then the
+    /// class does not run: an unobserved serving is not
+    /// evidence about the serving. An observed empty
+    /// string means the answer carried no Content-Type.
+    pub catalog_media_type: Option<&'a str>,
 }
 
 /// Run every drift class over the inputs. Findings come back
@@ -448,6 +456,8 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
     // neighbouring agents.json, and never touches the surface.
     check_agents_json(inputs, &mut findings);
 
+    check_catalog_media_type(inputs, &mut findings);
+
     // The OpenAPI comparison runs in every mode too. The
     // document is a file surface, read in repo mode and live
     // mode alike, and compared operation by operation.
@@ -485,6 +495,34 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
 /// card without an endpoint never produces a phantom mismatch.
 /// Trailing slashes are normalized away; the two files are
 /// written by different tools and a slash is not a claim.
+/// The served media type, when the run observed it:
+/// the catalog served as anything but its own media
+/// type warns at Minor. Parameters are the same type
+/// wearing a parameter, and media types compare
+/// case-insensitively.
+fn check_catalog_media_type(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    if let Some(observed) = inputs.catalog_media_type {
+        let media = observed
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if media != "application/ard+json" {
+            let detail = if observed.trim().is_empty() {
+                "the catalog is served with no media type rather than application/ard+json"
+                    .to_string()
+            } else {
+                format!(
+                    "the catalog is served as {} rather than application/ard+json",
+                    observed.trim()
+                )
+            };
+            findings.push(finding(Severity::Minor, "catalog-media-type", None, detail));
+        }
+    }
+}
+
 fn check_agents_json(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
     if inputs.agents_json_broken {
         findings.push(finding(
@@ -1450,6 +1488,7 @@ mod tests {
             a2a_broken: &[],
             suppressions: &[],
             today: "2026-11-21",
+            catalog_media_type: None,
         }
     }
 
@@ -1722,6 +1761,44 @@ mod tests {
         assert!(findings.iter().all(|f| f.severity == Severity::Critical));
         assert!(findings.iter().any(|f| f.kind == "announced-tool-missing"));
         assert!(findings.iter().any(|f| f.kind == "unannounced-tool-served"));
+    }
+
+    #[test]
+    fn a_catalog_served_with_a_generic_media_type_warns() {
+        let base = baseline_for(&snapshot(vec![ping()]));
+        let snap = snapshot(vec![ping()]);
+        let cat = catalog();
+
+        // A generic type observed: one Minor, nothing else.
+        let mut inp = inputs(&cat, &base, Some(&snap));
+        inp.catalog_media_type = Some("application/json");
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        assert_eq!(findings[0].kind, "catalog-media-type");
+        assert!(findings[0].detail.contains("application/json"));
+
+        // The catalog's own type, with a parameter, is clean.
+        let mut inp = inputs(&cat, &base, Some(&snap));
+        inp.catalog_media_type = Some("application/ard+json; charset=utf-8");
+        assert!(check(&inp).is_empty());
+
+        // Media types compare case-insensitively.
+        let mut inp = inputs(&cat, &base, Some(&snap));
+        inp.catalog_media_type = Some("Application/ARD+JSON");
+        assert!(check(&inp).is_empty());
+
+        // An answer with no Content-Type observes as
+        // empty and warns as no media type.
+        let mut inp = inputs(&cat, &base, Some(&snap));
+        inp.catalog_media_type = Some("");
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert!(findings[0].detail.contains("no media type"));
+
+        // No observation: the class does not run.
+        let inp = inputs(&cat, &base, Some(&snap));
+        assert!(check(&inp).is_empty());
     }
 
     #[test]
