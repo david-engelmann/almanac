@@ -274,7 +274,14 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
                     } else {
                         None
                     };
-                    if let Some((recorded, served)) = display_pair {
+                    // The class covers display FIELD changes.
+                    // A byte change no recorded field explains
+                    // (a trailing newline, a key reordering in
+                    // the file) leaves the parsed card identical
+                    // and keeps the digest Criticals: nothing a
+                    // reader sees changed, so nothing here
+                    // excuses the bytes.
+                    let display_detail = display_pair.and_then(|(recorded, served)| {
                         let mut changed: Vec<&str> = Vec::new();
                         if served.title != recorded.title {
                             changed.push("title");
@@ -291,18 +298,17 @@ pub fn check(inputs: &CheckInputs) -> Vec<Finding> {
                         if served.remotes != recorded.remotes {
                             changed.push("remotes");
                         }
-                        let detail = if changed.is_empty() {
-                            format!(
-                                "the server card at {} changed only in its serialization",
-                                artifact.url
-                            )
+                        if changed.is_empty() {
+                            None
                         } else {
-                            format!(
+                            Some(format!(
                                 "the server card at {} changed only in display fields ({})",
                                 artifact.url,
                                 changed.join(", ")
-                            )
-                        };
+                            ))
+                        }
+                    });
+                    if let Some(detail) = display_detail {
                         findings.push(finding(
                             Severity::Minor,
                             "declared-display-changed",
@@ -1625,6 +1631,24 @@ mod tests {
         let mut substantive = recorded.clone();
         substantive.remainder_sha256 = "different".into();
         let displays = vec![(url.to_string(), substantive)];
+        let mut inp = inputs(&cat, &base, None);
+        inp.artifact_digests = &digests;
+        inp.card_displays = &displays;
+        let findings = check(&inp);
+        assert_eq!(findings.len(), 2, "findings were {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity == Severity::Critical && f.kind == "digest-mismatch"),
+            "findings were {findings:?}"
+        );
+
+        // A served reduction identical to the record, with
+        // the digest still missing: the parsed card is the
+        // recorded card and only its bytes moved (a
+        // trailing newline, a key reordering), which no
+        // display field explains, so the Criticals stand.
+        let displays = vec![(url.to_string(), recorded.clone())];
         let mut inp = inputs(&cat, &base, None);
         inp.artifact_digests = &digests;
         inp.card_displays = &displays;

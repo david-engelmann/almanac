@@ -1802,10 +1802,10 @@ Check reduces every served card artifact the same
 way and hands the reductions to the core beside the
 digests; the artifact pass reports Minor
 declared-display-changed, naming the fields that
-differ (or that only the serialization changed), in
-place of the digest Criticals whenever the remainder
-matches, and keeps the Criticals otherwise. A core
-test walks all three postures, and an integration
+differ, in place of the digest Criticals whenever
+the remainder matches and at least one recorded
+display field moved, and keeps the Criticals
+otherwise. A core test walks the postures, and an integration
 test edits a generated card's description (passes,
 one Minor, no digest finding) and then its version
 (fails at Critical).
@@ -1840,12 +1840,31 @@ and a remote's protocol versions past the first are
 a preference list normalized like the remote order,
 while the first names the version the card reading
 takes and stays substantive. Also closed: the
-serialization-only detail no longer claims every
-field is unchanged, and the changed list names the
-card's fields in the card's own words; the core
+changed list names the card's fields in the card's
+own words; the core
 test's Critical postures pin their finding counts;
 a parse pin covers a pre-slice baseline whose MCP
 record lacks the new field; the two recording sites
 share one helper; and the display key list carries a
 comment naming the extraction reads as its other
 half.
+
+### Display changes hosted gate fix pass (2026-11-24)
+
+The hosted gate caught a collision all three
+reviews missed: the milestone one test
+skill_digest_and_path_breaks plants its digest break
+by appending one newline to the served card, and
+the slice as staged read that as a serialization
+only change and passed it at Minor. The standing
+test is right and the slice's reach was wrong: the
+class covers display FIELD changes, and a byte
+change no recorded field explains (a trailing
+newline, a key reordering in the file) leaves the
+parsed card identical, with nothing a reader sees
+changed to excuse the bytes. The judgment now
+requires at least one recorded display field to
+differ before the Minor replaces the Criticals; a
+core posture pins the identical-reduction case at
+Critical. The record's as built wording is
+corrected to match.
