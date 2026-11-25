@@ -303,7 +303,7 @@ fn envelope_pass(
 /// The publisher segment of a domain anchored URN,
 /// urn:air:<publisher>:..., when the identifier has
 /// that shape.
-fn urn_publisher(identifier: &str) -> Option<&str> {
+pub fn urn_publisher(identifier: &str) -> Option<&str> {
     let rest = identifier.strip_prefix("urn:air:")?;
     let segment = rest.split(':').next()?;
     if segment.is_empty() {
@@ -311,6 +311,62 @@ fn urn_publisher(identifier: &str) -> Option<&str> {
     } else {
         Some(segment)
     }
+}
+
+/// The host a url names, lowercased, without scheme,
+/// userinfo, or port; None when the url carries no
+/// authority to name one. An IPv6 literal compares
+/// as written inside its brackets. The parse follows
+/// the WHATWG authority rules where they decide the
+/// host: a backslash terminates the authority for
+/// the special schemes, and slashes before the
+/// authority are skipped, so a spelling cannot name
+/// one host to this parser and another to a browser.
+/// A single trailing dot, the DNS root, is dropped.
+pub fn url_host(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let rest = rest.trim_start_matches(['/', '\\']);
+    let authority = rest.split(['/', '\\', '?', '#']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next()?
+    } else {
+        host_port.split(':').next()?
+    };
+    let host = if host.contains(':') {
+        host
+    } else {
+        host.strip_suffix('.').unwrap_or(host)
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
+}
+
+/// The host an entry's url names when the entry
+/// claims a resource cross-origin: the entry carries
+/// a publisher envelope in the singular slot, names
+/// a url, and the url's host differs from the
+/// publisher its identifier anchors to (the catalog
+/// host, port normalized away, standing in when the
+/// identifier is not a domain anchored URN). None
+/// for every other entry, which is most of them.
+/// The cross-origin judge and its collector share
+/// this one gate so the two cannot drift apart.
+pub fn cross_origin_host(entry: &crate::catalog::Entry, fallback_domain: &str) -> Option<String> {
+    entry
+        .trust_manifest
+        .as_ref()
+        .filter(|m| crate::trust::is_envelope(m))?;
+    let url = entry.url.as_deref()?;
+    let publisher = match urn_publisher(&entry.identifier) {
+        Some(segment) => segment.to_lowercase(),
+        None => url_host(&format!("https://{fallback_domain}"))?,
+    };
+    let host = url_host(url)?;
+    if host == publisher { None } else { Some(host) }
 }
 
 /// Whether an identity binds to a publisher domain, the

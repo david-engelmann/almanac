@@ -4412,3 +4412,86 @@ fn check_verifies_attestation_pins_when_the_run_fetches() {
         "stderr was {stderr}"
     );
 }
+
+#[test]
+fn check_judges_cross_origin_descriptors_in_fetching_runs() {
+    // The seventeenth slice end to end. The generated
+    // entry is repointed at a descriptor served from
+    // another host and given a bound envelope, as a
+    // publisher announcing a CDN hosted card would
+    // leave it. A fetching run retrieves the
+    // descriptor: while it declares neither the entry
+    // nor its signer the run fails at critical; once
+    // it names the entry the class is silent; and a
+    // run that does not fetch never judges the class
+    // at all.
+    let site = temp_site("cross-origin");
+    let fixture = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &fixture);
+    assert_eq!(code, 0, "generate failed: {stderr}");
+    let plain = serde_json::json!({
+        "name": "com.example/demo",
+        "version": "0.1.0",
+        "description": "A card that acknowledges no one.",
+    });
+    let (descriptor_url, held) = serve_bytes(serde_json::to_vec(&plain).expect("json"));
+    let ard_path = site.join(".well-known/ard.json");
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    let mut planted_id = String::new();
+    for path in [&ard_path, &legacy_path] {
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("catalog")).expect("json");
+        let entry = &mut catalog["entries"][0];
+        let id = entry["identifier"].as_str().expect("id").to_string();
+        let digest = entry["digest"].as_str().expect("digest").to_string();
+        let media_type = entry["type"].as_str().expect("type").to_string();
+        planted_id = id.clone();
+        entry["url"] = serde_json::Value::String(descriptor_url.clone());
+        entry["trustManifest"] = serde_json::json!({
+            "identity": "did:web:example.com",
+            "issuedAt": "2026-11-25T00:00:00Z",
+            "expiresAt": "2028-06-01T00:00:00Z",
+            "subject": {
+                "identifier": id,
+                "type": media_type,
+                "digest": digest,
+            },
+            "signature": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&catalog).expect("json"))
+            .expect("plant catalog");
+    }
+
+    // Fetching, the descriptor declares no one.
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 1, "cross-origin check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-cross-origin-unbound"),
+        "report was {stdout}"
+    );
+
+    // The descriptor names the entry: the class is
+    // silent (other classes judge their own terms).
+    let declaring = serde_json::json!({
+        "name": "com.example/demo",
+        "version": "0.1.0",
+        "description": format!("The card for {planted_id}."),
+    });
+    *held.lock().expect("lock") = serde_json::to_vec(&declaring).expect("json");
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_ne!(code, 2, "the declaring run could not run: {stdout}");
+    assert!(
+        !stdout.contains("trust-manifest-cross-origin-unbound"),
+        "report was {stdout}"
+    );
+
+    // Undeclared again, but the run does not fetch:
+    // the class makes no claim in either direction.
+    *held.lock().expect("lock") = serde_json::to_vec(&plain).expect("json");
+    let (code, stdout, _) = check_stdio(&site, &fixture);
+    assert_ne!(code, 2, "the unengaged run could not run: {stdout}");
+    assert!(
+        !stdout.contains("trust-manifest-cross-origin-unbound"),
+        "report was {stdout}"
+    );
+}
