@@ -4495,3 +4495,137 @@ fn check_judges_cross_origin_descriptors_in_fetching_runs() {
         "report was {stdout}"
     );
 }
+
+#[test]
+fn check_judges_attestation_statement_subjects() {
+    // The eighteenth slice end to end. A bound
+    // envelope is planted on the generated catalog
+    // whose attestation names a statement a local
+    // server holds, with no pin: the statement layer
+    // alone judges it. A statement binding by the
+    // entry's digest is clean; the same envelope
+    // pointing at a statement claiming another
+    // subject is the transplant at critical; a
+    // statement with no readable claim reports
+    // unverified and passes; and a run that does not
+    // fetch is silent throughout.
+    let site = temp_site("attestation-statements");
+    let fixture = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &fixture);
+    assert_eq!(code, 0, "generate failed: {stderr}");
+    let binding = |hex: &str| {
+        serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{ "name": "fixture", "digest": {"sha256": hex} }],
+            "predicateType": "https://slsa.dev/provenance/v1",
+        })
+        .to_string()
+        .into_bytes()
+    };
+    // A placeholder binds nothing; the entry's real
+    // digest is read from the generated catalog
+    // below and the served statement rebuilt around
+    // it before the first run.
+    let (statement_url, held) = serve_bytes(binding("placeholder"));
+    let ard_path = site.join(".well-known/ard.json");
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ard_path).expect("ard read")).expect("ard parses");
+    let entry = catalog["entries"]
+        .as_array_mut()
+        .expect("entries")
+        .iter_mut()
+        .find(|e| e["type"] == "application/mcp-server-card+json")
+        .expect("the MCP entry");
+    let digest = entry["digest"]
+        .as_str()
+        .expect("the entry digest")
+        .to_string();
+    let id = entry["identifier"]
+        .as_str()
+        .expect("the entry id")
+        .to_string();
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("the entry digest is sha256")
+        .to_string();
+    *held.lock().expect("lock") = binding(&hex);
+    let junk = format!(
+        "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..{}",
+        "A".repeat(86)
+    );
+    entry["trustManifest"] = serde_json::json!({
+        "identity": "did:web:example.com",
+        "expiresAt": "2028-06-01",
+        "subject": {
+            "identifier": id,
+            "type": "application/mcp-server-card+json",
+            "digest": digest,
+        },
+        "attestations": [{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": statement_url,
+        }],
+        "signature": junk,
+    });
+    let planted = serde_json::to_vec_pretty(&catalog).expect("serialize");
+    std::fs::write(&ard_path, &planted).expect("ard planted");
+    std::fs::write(&legacy_path, &planted).expect("legacy planted");
+
+    // Engaged, the statement binds this entry.
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "binding check: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+
+    // The statement now claims another artifact: the
+    // transplant, critical.
+    *held.lock().expect("lock") = binding(&"b".repeat(64));
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "transplanted check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-attestation-unbound"),
+        "report was {stdout}"
+    );
+
+    // A statement with no claim this build can read
+    // reports unverified and does not fail the run.
+    *held.lock().expect("lock") = b"a PDF compliance report, as served".to_vec();
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "unreadable check failed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-attestation-unverified"),
+        "report was {stdout}"
+    );
+    assert!(
+        !stdout.contains("trust-manifest-attestation-unbound"),
+        "report was {stdout}"
+    );
+
+    // The transplant served again, but the run does
+    // not fetch: the layer is silent.
+    *held.lock().expect("lock") = binding(&"b".repeat(64));
+    let (code, stdout, _) = check_stdio(&site, &fixture);
+    assert_eq!(code, 0, "unengaged check: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+}

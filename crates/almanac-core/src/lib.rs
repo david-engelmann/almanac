@@ -22,6 +22,7 @@ pub mod jcs;
 pub mod metadata;
 pub mod openapi;
 pub mod snapshot;
+pub mod statement;
 pub mod trust;
 pub mod validate;
 

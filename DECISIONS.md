@@ -3164,3 +3164,194 @@ fired. Both are fixed in the test alone: the
 subject digest stands verbatim, and the declaring
 descriptor is built from the identifier the plant
 actually read. No product code changed.
+
+## Attestation statement subject binding (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, and its two questions are answered
+with the record's recommendations: the severity
+split stands (a statement claiming another
+subject is the transplant at critical; a
+statement with no readable claim is unverified at
+minor), and the entry's url is accepted as a
+binding name beside its identifier. The scope
+line holds as drawn: the claim is judged, the
+attester's own signature is not built. The
+remaining binding from the attestation pinning
+design: section 3.5.2's first binding, restated
+for consumers at section 6.4.
+
+The research, read firsthand from
+draft-bu-dawn-ard-discovery-00 today. Section
+3.5.2 names two bindings; the sixteenth slice
+built the second (the pin). The first: to prevent
+attestation transplantation, where an attacker
+copies a valid attestation from one agent into
+another entry's metadata, each third-party
+attestation statement MUST either be a direct
+cryptographic signature over the artifact or
+include a signed subject claim that identifies
+the resource's identifier and/or the artifact's
+content digest. Section 6.4 gives the consumer
+its side: signed attestations MUST either
+directly sign the target artifact or bind to the
+resource's identifier and/or the artifact's
+algorithm-prefixed digest, and when an entry
+delivers its artifact by reference, consumers
+MUST compute the digest of the retrieved artifact
+and verify that it matches the entry's digest and
+the attestation subject before honoring any audit
+or provenance claims.
+
+What this build can and cannot judge, stated
+before the design. The statement's own signature
+is the attester's cryptography (a DSSE envelope,
+a sigstore bundle), verified against the
+attester's keys, which are not the publisher's
+and are nowhere in this system; verifying it is a
+second verification stack and is NOT built here,
+the same line Amendment D drew at signing. What
+the gate can judge, on the fetched statement the
+pin layer already retrieves, is the claim itself:
+whether the statement's subject names this entry,
+by its identifier or by the digest of its
+artifact. A transplanted attestation fails
+exactly there: it is a perfectly valid statement
+about a different artifact, and its subject says
+so. The layer judges the claim as published, as
+every envelope layer does.
+
+The judgment, inside judge_attestations in the
+runs that already engage the pin layer, over the
+same observations (the collector widens to fetch
+every attestation item carrying a uri, pinned or
+not; the fetched text rides the observation into
+the core, which stays network-free). The core
+reduces a fetched statement to its subject
+claims: the in-toto subject form the draft's own
+examples name (a subject array whose items carry
+a name and a digest object), an ARD-shaped
+subject object (identifier and digest as the
+envelope's own subject carries them), through
+one DSSE unwrap when the document is an envelope
+whose payload decodes to the statement. A
+statement binds when any claimed digest equals
+the entry's digest or any claimed name equals
+the entry's identifier or its url. Three
+outcomes per item in an engaged run: the
+statement claims a subject and none of it binds
+this entry, a Critical under a new kind,
+trust-manifest-attestation-unbound, the
+transplant positively identified; the statement
+carries no subject claim this build can read (a
+PDF report, a SARIF file, a bundle form it does
+not unwrap), a Minor under
+trust-manifest-attestation-unverified naming
+that limit, never a silent honoring and never a
+critical on a format the draft itself names as
+an attestation document; the statement binds,
+silence. A failed fetch keeps the pin layer's
+unverified minor and adds nothing here.
+
+Two questions for Main, with the record's
+recommendations. (1) The severity split above:
+a statement that positively claims another
+subject is the transplant at Critical, a
+statement with no readable claim is unverified
+at Minor. The alternative, every unbound
+statement at Critical, fails the draft's own
+named examples (PDF compliance reports carry no
+readable subject) on every catalog that uses
+them. This design takes the split. (2) The
+subject name accepted as an identifier claim: an
+in-toto subject name is usually an artifact name
+or uri, so the design accepts the entry's url as
+well as its identifier as a binding name. The
+alternative, identifier only, is stricter and
+would leave most real SLSA statements to bind on
+their digest claim alone, which they also carry;
+this design accepts both and names it.
+
+Scope lines. No attester signature verification,
+no sigstore bundle parsing beyond the one DSSE
+unwrap, no new engagement rule (the pin layer's
+runs, both commands), no change to the pin
+judgments themselves. The dusk.fm catalog stays
+parked. Nothing here needs David.
+
+### As built (2026-11-25)
+
+A new core module, statement.rs, reduces a fetched
+statement to its subject claims (digests normalized
+to <alg>:<hex> with a lowercase algorithm through
+one shared helper, names as written) from an
+in-toto subject array, an ARD-shaped subject
+object, or a DSSE envelope typed for in-toto whose
+payload decodes to the statement; the core stays
+network-free and the statement's own signature is
+never read. PinOutcome::Fetched now carries the
+served bytes' text beside their sha256, and
+judge_attestations judges every item carrying a
+uri in an engaged run: the pin comparison where a
+well-formed pin stands, then judge_statement,
+which binds on a claimed digest equal to the
+entry's digest or a claimed name equal to its
+identifier or its url. A contradicted claim is
+critical under trust-manifest-attestation-unbound;
+no readable claim is minor under
+trust-manifest-attestation-unverified. The
+collector fetches every attestation item carrying
+a uri in an envelope, pinned or not. Tests: the
+statement module's own reduction tests, a core
+test walking every binding route, the transplant,
+the unreadable statement, the unengaged run, and
+the digest-less entry below, and an end-to-end
+test driving the same phases against the binary;
+the pin test's served document is now a binding
+statement, as the layer requires.
+
+### Statement binding checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging. Spec
+fidelity PASS, no critical or major findings;
+red team none either; standards one major, a doc
+defect. All of it is closed here. The header of
+judge_attestations still closed with the
+sixteenth slice's sentence that an item without
+a digest is silent; it now records the statement
+judgment, and a stale test comment beside it is
+corrected the same way. A malformed pin no
+longer shields the statement behind it: the
+shape major stands and the item is judged on its
+claim with no pin, which also makes the
+collector's widened fetch honest, since the
+fetched document is consumed for every item the
+collector fetches. The DSSE unwrap now requires
+the in-toto payload type, so a document carrying
+payload keys for another format is read at its
+own top level. One outcome refinement came out
+of the red team's reading, flagged to Main with
+the staging report for ratification: a statement
+claiming only digests, to an entry that records
+no digest, cannot be answered on any channel the
+entry holds, and reads unverified at minor rather
+than the transplant at critical; a claim
+contradicted on a channel the entry can answer
+(names against its identifier or url, digests
+against a recorded digest) keeps the critical.
+Recorded as observations: the reduction reads
+name, identifier, string digests, and object
+digests in both subject positions, a benign
+superset of the record's two named shapes that
+only accepts more binding claims; a non-sha256
+pin whose fetch failed now reports the fetch
+reason rather than the algorithm, same kind and
+severity; a statement-only item whose fetch fails
+draws the unverified minor, the never-silent
+reading; the end-to-end test binds by digest,
+with name, url, and DSSE routes covered at core
+level. The owner's own pass caught one further
+defect before the reviews: the base64
+accumulator grew unmasked and would have
+overflowed on a real payload in a debug build; it
+now keeps only the bits not yet pushed.

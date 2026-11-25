@@ -2440,14 +2440,17 @@ fn cross_origin_descriptors(
     descriptors
 }
 
-/// The attestation observations a pin engaged run
-/// collects: for every pinned attestation (an item
-/// carrying both a uri and a digest) in every envelope
-/// an entry carries, the fetched document's sha256 or
+/// The attestation observations an engaged run
+/// collects: for every attestation item carrying a
+/// uri in every envelope an entry carries, the
+/// fetched document's sha256 and its text (lossy
+/// where the bytes are not UTF-8, after which the
+/// statement simply reads as carrying no claim), or
 /// the reason the fetch failed, through the guarded
-/// fetcher, which refuses a literal non-public address
-/// before any request, a bound that matters here
-/// because attestation uris are catalog content. Each
+/// fetcher,
+/// which refuses a literal non-public address before
+/// any request, a bound that matters here because
+/// attestation uris are catalog content. Each
 /// (entry, uri) pair is fetched once, however many
 /// envelopes repeat it.
 fn pin_observations(
@@ -2464,9 +2467,12 @@ fn pin_observations(
             .chain(entry.trust_manifests.iter());
         for manifest in manifests {
             // The collector mirrors the judge's gates:
-            // envelopes only, and pins in the form the
-            // judge will compare. Anything else is a
-            // shape finding's business, not a fetch's.
+            // envelopes only. Every item carrying a uri
+            // is fetched, pinned or not, because the
+            // statement layer reads the document the
+            // pin layer only hashes. A malformed pin is
+            // a shape finding's business; its document
+            // is still the statement's evidence.
             if !almanac_core::trust::is_envelope(manifest) {
                 continue;
             }
@@ -2474,27 +2480,21 @@ fn pin_observations(
                 continue;
             };
             for item in items {
-                let (Some(uri), true) = (
-                    item.get("uri")
-                        .and_then(|v| v.as_str())
-                        .filter(|text| !text.trim().is_empty()),
-                    item.get("digest")
-                        .and_then(|d| d.as_str())
-                        .is_some_and(|digest| {
-                            digest.split_once(':').is_some_and(|(alg, hex)| {
-                                !alg.is_empty()
-                                    && !hex.is_empty()
-                                    && hex.chars().all(|c| c.is_ascii_hexdigit())
-                            })
-                        }),
-                ) else {
+                let Some(uri) = item
+                    .get("uri")
+                    .and_then(|v| v.as_str())
+                    .filter(|text| !text.trim().is_empty())
+                else {
                     continue;
                 };
                 if !seen.insert((entry.identifier.clone(), uri.to_string())) {
                     continue;
                 }
                 let outcome = match fetcher.fetch(uri) {
-                    Ok(bytes) => PinOutcome::Fetched(hash::sha256_hex(&bytes)),
+                    Ok(bytes) => PinOutcome::Fetched {
+                        sha256: hash::sha256_hex(&bytes),
+                        text: String::from_utf8_lossy(&bytes).into_owned(),
+                    },
                     Err(reason) => PinOutcome::Failed(reason),
                 };
                 observations.push(PinObservation {

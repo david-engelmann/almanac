@@ -578,7 +578,11 @@ fn verify_envelope(
 /// (a failed fetch, an algorithm this build does not
 /// compute) is a minor naming why, never a silent
 /// pass. An item without a digest carries no pin and
-/// is silent, as unsigned content is.
+/// is judged on its statement's subject claim alone,
+/// as judge_statement records; a malformed digest is
+/// a shape finding and the item is still judged on
+/// that claim, so a broken pin never shields the
+/// statement behind it.
 fn judge_attestations(
     manifest: &serde_json::Value,
     entry: &Entry,
@@ -647,60 +651,81 @@ fn judge_attestations(
             ));
             continue;
         };
-        let Some(digest) = digest else {
-            continue;
-        };
-        let Some(digest) = digest.as_str() else {
-            findings.push(finding(
-                Severity::Major,
-                "trust-manifest-shape",
-                Some(id),
-                "an attestation digest in the trust manifest is not a string".into(),
-            ));
-            continue;
-        };
-        let well_formed = digest.split_once(':').filter(|(alg, hex)| {
-            !alg.is_empty() && !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit())
-        });
-        let Some((alg, hex)) = well_formed else {
-            findings.push(finding(
-                Severity::Major,
-                "trust-manifest-shape",
-                Some(id),
-                format!("the attestation digest {digest} is not in <alg>:<hex> form"),
-            ));
-            continue;
+        // The digest, when the item carries one, must
+        // be a well-formed pin before it is compared.
+        // A malformed digest is a shape finding above
+        // its own item and the pin simply does not
+        // stand; the item still reaches the statement
+        // judgment below, as an item carrying no digest
+        // does.
+        let pin = match digest {
+            None => None,
+            Some(digest) => {
+                let as_str = digest.as_str();
+                if as_str.is_none() {
+                    findings.push(finding(
+                        Severity::Major,
+                        "trust-manifest-shape",
+                        Some(id),
+                        "an attestation digest in the trust manifest is not a string".into(),
+                    ));
+                }
+                let well_formed = as_str.and_then(|digest| {
+                    digest.split_once(':').filter(|(alg, hex)| {
+                        !alg.is_empty()
+                            && !hex.is_empty()
+                            && hex.chars().all(|c| c.is_ascii_hexdigit())
+                    })
+                });
+                match (as_str, well_formed) {
+                    (Some(digest), Some((alg, hex))) => Some((digest, alg, hex)),
+                    (Some(digest), None) => {
+                        findings.push(finding(
+                            Severity::Major,
+                            "trust-manifest-shape",
+                            Some(id),
+                            format!("the attestation digest {digest} is not in <alg>:<hex> form"),
+                        ));
+                        None
+                    }
+                    _ => None,
+                }
+            }
         };
         let Some(pins) = pins else {
             continue;
         };
-        if alg != "sha256" {
-            findings.push(finding(
-                Severity::Minor,
-                "trust-manifest-attestation-unverified",
-                Some(id),
-                format!(
-                    "the attestation pin for {uri} names {alg}, and this build computes sha256 only"
-                ),
-            ));
-            continue;
-        }
         match pins
             .iter()
             .find(|o| o.entry_id == id && o.uri == uri)
             .map(|o| &o.outcome)
         {
-            Some(PinOutcome::Fetched(served)) => {
-                if !served.eq_ignore_ascii_case(hex) {
-                    findings.push(finding(
-                        Severity::Critical,
-                        "trust-manifest-attestation-mismatch",
-                        Some(id),
-                        format!(
-                            "the attestation document at {uri} hashes to sha256:{served}, not the pinned {digest}"
-                        ),
-                    ));
+            Some(PinOutcome::Fetched {
+                sha256: served,
+                text,
+            }) => {
+                if let Some((digest, alg, hex)) = pin {
+                    if alg != "sha256" {
+                        findings.push(finding(
+                            Severity::Minor,
+                            "trust-manifest-attestation-unverified",
+                            Some(id),
+                            format!(
+                                "the attestation pin for {uri} names {alg}, and this build computes sha256 only"
+                            ),
+                        ));
+                    } else if !served.eq_ignore_ascii_case(hex) {
+                        findings.push(finding(
+                            Severity::Critical,
+                            "trust-manifest-attestation-mismatch",
+                            Some(id),
+                            format!(
+                                "the attestation document at {uri} hashes to sha256:{served}, not the pinned {digest}"
+                            ),
+                        ));
+                    }
                 }
+                judge_statement(text, entry, uri, findings);
             }
             Some(PinOutcome::Failed(reason)) => findings.push(finding(
                 Severity::Minor,
@@ -715,6 +740,85 @@ fn judge_attestations(
                 format!("the attestation document at {uri} was not fetched"),
             )),
         }
+    }
+}
+
+/// The statement layer of the attestation judgments,
+/// the subject binding of the draft's sections
+/// 3.5.2 and 6.4 as the attestation statement
+/// section of DECISIONS.md records it. The fetched
+/// statement's subject claims are read against this
+/// entry: a claimed digest equal to the entry's
+/// digest, or a claimed name equal to its identifier
+/// or its url, binds the statement to the entry. A
+/// statement claiming a different subject on a
+/// channel this entry can answer (names against its
+/// identifier or url, digests against a digest it
+/// records) is the transplant those sections exist
+/// to prevent, at critical. A statement carrying no
+/// subject claim this build can read, or claiming
+/// only digests to an entry that records none, is
+/// unverified at minor, never silently honored. The
+/// statement's own signature is the attester's and
+/// is not judged.
+fn judge_statement(text: &str, entry: &Entry, uri: &str, findings: &mut Vec<Finding>) {
+    let id = entry.identifier.as_str();
+    let claims = crate::statement::reduce_statement(text);
+    let digest_binds = entry.digest.as_deref().is_some_and(|own| {
+        let own = own
+            .split_once(':')
+            .map(|(alg, hex)| crate::statement::normalize_digest(alg, hex))
+            .unwrap_or_else(|| own.to_string());
+        claims
+            .digests
+            .iter()
+            .any(|claimed| claimed.eq_ignore_ascii_case(&own))
+    });
+    let name_binds = claims
+        .names
+        .iter()
+        .any(|name| name == id || entry.url.as_deref() == Some(name.as_str()));
+    if digest_binds || name_binds {
+        return;
+    }
+    if claims.digests.is_empty() && claims.names.is_empty() {
+        findings.push(finding(
+            Severity::Minor,
+            "trust-manifest-attestation-unverified",
+            Some(id),
+            format!(
+                "the attestation statement at {uri} carries no subject claim this build can read"
+            ),
+        ));
+    } else if claims.names.is_empty() && entry.digest.is_none() {
+        findings.push(finding(
+            Severity::Minor,
+            "trust-manifest-attestation-unverified",
+            Some(id),
+            format!(
+                "the attestation statement at {uri} claims a digest this entry does not record"
+            ),
+        ));
+    } else {
+        let claimed = claims
+            .names
+            .first()
+            .map(|name| format!("subject {name}"))
+            .or_else(|| {
+                claims
+                    .digests
+                    .first()
+                    .map(|digest| format!("subject digest {digest}"))
+            })
+            .unwrap_or_default();
+        findings.push(finding(
+            Severity::Critical,
+            "trust-manifest-attestation-unbound",
+            Some(id),
+            format!(
+                "the attestation statement at {uri} claims {claimed}, which does not bind {id}"
+            ),
+        ));
     }
 }
 
@@ -1080,7 +1184,21 @@ mod tests {
     #[test]
     fn attestation_shape_stands_always_and_pins_only_in_engaged_runs() {
         let uri = "https://example.com/attestations/slsa.json";
-        let served = crate::hash::sha256_hex(b"the attestation document");
+        // The served document is a statement binding
+        // this entry by its digest, so the statement
+        // layer is silent wherever this test does not
+        // exercise it.
+        let document = serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{
+                "name": "demo",
+                "digest": {"sha256": "a".repeat(64)},
+            }],
+            "predicateType": "https://slsa.dev/provenance/v1",
+        })
+        .to_string();
+        let served = crate::hash::sha256_hex(document.as_bytes());
+        let fetched = |sha256: String, text: String| PinOutcome::Fetched { sha256, text };
         let mut pinned = signed_entry();
         pinned.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([{
             "type": "https://slsa.dev/provenance/v1",
@@ -1107,7 +1225,7 @@ mod tests {
             "2026-11-25",
             NOW,
             None,
-            Some(&observation(PinOutcome::Fetched(served.clone()))),
+            Some(&observation(fetched(served.clone(), document.clone()))),
         );
         assert!(
             matched.iter().all(|f| !f.kind.contains("attestation")),
@@ -1120,9 +1238,10 @@ mod tests {
             "2026-11-25",
             NOW,
             None,
-            Some(&observation(PinOutcome::Fetched(crate::hash::sha256_hex(
-                b"a different document",
-            )))),
+            Some(&observation(fetched(
+                crate::hash::sha256_hex(b"a different document"),
+                "a different document".into(),
+            ))),
         );
         assert!(
             swapped
@@ -1148,7 +1267,10 @@ mod tests {
         );
         // Shape stands in every run: a digest with no
         // uri and a digest outside the pinned form are
-        // majors; an item with no digest is silent.
+        // majors; an item with no digest draws no shape
+        // finding (in an engaged run it is fetched and
+        // judged on its statement, the next test's
+        // ground).
         let mut shapeless = signed_entry();
         shapeless.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([
             { "type": "https://slsa.dev/provenance/v1", "digest": format!("sha256:{served}") },
@@ -1190,7 +1312,7 @@ mod tests {
             "2026-11-25",
             NOW,
             None,
-            Some(&observation(PinOutcome::Fetched(served.clone()))),
+            Some(&observation(fetched(served.clone(), document.clone()))),
         );
         assert!(
             engaged
@@ -1203,6 +1325,130 @@ mod tests {
         assert!(
             unengaged.iter().all(|f| !f.kind.contains("attestation")),
             "{unengaged:?}"
+        );
+    }
+
+    #[test]
+    fn attestation_statements_bind_by_their_subject_claims() {
+        // The statement layer over a statement-only
+        // item (a uri, no pin): a statement binding by
+        // digest, by identifier, or by the entry's url
+        // is silent; a statement claiming another
+        // subject is the transplant at critical; a
+        // statement with no readable claim is
+        // unverified at minor; and none of it speaks
+        // in an unengaged run.
+        let uri = "https://example.com/attestations/slsa.json";
+        let mut stated = signed_entry();
+        stated.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": uri,
+        }]);
+        let catalog = catalog_with(stated);
+        let run = |text: &str| {
+            let observations = vec![PinObservation {
+                entry_id: "urn:air:example.com:mcp:demo".into(),
+                uri: uri.into(),
+                outcome: PinOutcome::Fetched {
+                    sha256: crate::hash::sha256_hex(text.as_bytes()),
+                    text: text.into(),
+                },
+            }];
+            envelope_findings(&catalog, "2026-11-25", NOW, None, Some(&observations))
+        };
+        let by_digest = run(&serde_json::json!({
+            "subject": [{"name": "demo", "digest": {"sha256": "a".repeat(64)}}],
+        })
+        .to_string());
+        assert!(
+            by_digest.iter().all(|f| !f.kind.contains("attestation")),
+            "{by_digest:?}"
+        );
+        let by_identifier = run(&serde_json::json!({
+            "subject": {"identifier": "urn:air:example.com:mcp:demo", "digest": "sha256:ff"},
+        })
+        .to_string());
+        assert!(
+            by_identifier
+                .iter()
+                .all(|f| !f.kind.contains("attestation")),
+            "{by_identifier:?}"
+        );
+        let by_url = run(&serde_json::json!({
+            "subject": [{"name": "https://example.com/mcp", "digest": {"sha256": "ff"}}],
+        })
+        .to_string());
+        assert!(
+            by_url.iter().all(|f| !f.kind.contains("attestation")),
+            "{by_url:?}"
+        );
+        let transplant = run(&serde_json::json!({
+            "subject": [{"name": "someone else", "digest": {"sha256": "b".repeat(64)}}],
+        })
+        .to_string());
+        assert!(
+            transplant.iter().any(|f| {
+                f.kind == "trust-manifest-attestation-unbound" && f.severity == Severity::Critical
+            }),
+            "{transplant:?}"
+        );
+        let unreadable = run("a PDF compliance report, as served");
+        assert!(
+            unreadable.iter().any(|f| {
+                f.kind == "trust-manifest-attestation-unverified" && f.severity == Severity::Minor
+            }),
+            "{unreadable:?}"
+        );
+        assert!(
+            unreadable
+                .iter()
+                .all(|f| f.kind != "trust-manifest-attestation-unbound"),
+            "{unreadable:?}"
+        );
+        let unengaged = envelope_findings(&catalog, "2026-11-25", NOW, None, None);
+        assert!(
+            unengaged.iter().all(|f| !f.kind.contains("attestation")),
+            "{unengaged:?}"
+        );
+        // A statement claiming only digests, to an
+        // entry recording none, cannot be answered
+        // either way: unverified, not the transplant.
+        let mut digestless = signed_entry();
+        digestless.digest = None;
+        digestless.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": uri,
+        }]);
+        let text = serde_json::json!({
+            "subject": [{"digest": {"sha256": "b".repeat(64)}}],
+        })
+        .to_string();
+        let observations = vec![PinObservation {
+            entry_id: "urn:air:example.com:mcp:demo".into(),
+            uri: uri.into(),
+            outcome: PinOutcome::Fetched {
+                sha256: crate::hash::sha256_hex(text.as_bytes()),
+                text,
+            },
+        }];
+        let unanswered = envelope_findings(
+            &catalog_with(digestless),
+            "2026-11-25",
+            NOW,
+            None,
+            Some(&observations),
+        );
+        assert!(
+            unanswered.iter().any(|f| {
+                f.kind == "trust-manifest-attestation-unverified" && f.severity == Severity::Minor
+            }),
+            "{unanswered:?}"
+        );
+        assert!(
+            unanswered
+                .iter()
+                .all(|f| f.kind != "trust-manifest-attestation-unbound"),
+            "{unanswered:?}"
         );
     }
 }
