@@ -3382,3 +3382,139 @@ statement the statement layer honors. The failure
 was read firsthand from the job log; format,
 clippy, compile, and the core suites were green,
 and the slice's own end-to-end test passed.
+
+## Nineteenth slice: local $ref schemas resolved (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25: the twelfth slice's own move applied
+to the surface it left standing, with the
+termination rule, the sibling-overlay reading,
+and external references staying literal, and the
+one-time re-baseline consequence named in the
+open. The OpenAPI reduction's remaining named limit,
+recorded by the twelfth slice when it resolved
+parameters and left schemas standing: a schema
+carried by reference is covered only by the
+components hash, which reports that the shared
+pool changed without naming which operation it
+touches, and attribution without resolution would
+be invented. The twelfth slice's own move retires
+the limit the same way it retired the parameter
+one. The refusal's reasoning was that resolution
+means following pointers into other documents,
+which is a fetch the core never does; a local
+reference resolves against the document already
+in hand, and external references stay literal and
+unfollowed, exactly as they do for parameters.
+
+The design. Each operation's contract hash is
+computed over the operation object with its
+description, summary, and parameters removed, as
+today; before hashing, local $ref nodes inside
+that object are expanded in place, each replaced
+by the value its fragment pointer names in the
+same document, recursively. A pointer already
+being expanded on its own branch stays literal,
+so a self-referential schema terminates and its
+literal form still hashes. Where an expanded node
+carries sibling keys beside the $ref, the pointed
+object takes them overlaid, siblings winning, the
+OpenAPI 3.1 reading in which siblings augment the
+reference; a sibling beside a non-object target
+leaves the node unexpanded rather than inventing
+a merge. The expansion is a pure function of the
+document feeding only the hash; the model stores
+nothing new. The components hash stands as it is:
+it still covers the pool whole, including schemas
+no operation references, whose change would
+otherwise be invisible, so a referenced schema's
+change now reports both the attributed operation
+change at major and the pool change, the same
+double report a shared parameter's change already
+produces through its own channels.
+
+The recorded consequence, the twelfth slice's
+exact precedent: contract hashes change for every
+operation carrying a local $ref, so pre-slice
+baselines report those operations changed at
+major until the publisher regenerates. It is a
+one-time re-baseline, stated here rather than
+discovered by the first publisher who hits it.
+
+Scope lines. Local fragment pointers only;
+external references, file or URL, stay literal.
+Resolution feeds the contract hash only, not the
+parameter channels (the twelfth slice's ground)
+and not the description channel. No new finding
+kinds: an attributed schema change arrives as the
+standing openapi-operation-changed at major,
+which is the point of the slice, since that class
+already names the operation the pool hash cannot.
+The dusk.fm catalog stays parked. Nothing here
+needs David.
+
+### As built (2026-11-25)
+
+The expansion lives in openapi.rs as a small
+RefExpansion walk over the contract object after
+the three removals, reusing the twelfth slice's
+resolve_local_pointer and feeding only the
+contract hash; the module header's limit
+paragraph now records schemas resolved beside
+parameters. Two tests carry it: one walking
+attribution, determinism over the self-cycle, the
+external literal, the sibling overlay, and a
+golden hash of the hand-built expanded contract
+with the cycle's recursive edge literal inside
+it; and one pinning the literal edges and bounds
+below.
+
+### Schema resolution checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging. Spec
+fidelity PASS and standards clean at critical and
+major; the red team's one major is the pass's
+substance. The expansion as first built had no
+budget: a doubling chain of shared references,
+each schema referencing the last twice, expands
+exponentially from a few kilobytes of input, and
+a flat chain of references recurses one frame per
+link with nothing bounding the depth. The walk
+now carries two bounds, both failing safe the way
+the cycle rule does (the node stays literal,
+still hashes, and the components hash still
+covers its target): a branch follows at most 64
+references, and one operation's expansion
+produces at most 100,000 nodes inside followed
+references, the operation's own inline content
+uncounted because the document already bounds it.
+The bounds are pinned by tests built to trip
+them observably: a hundred-link chain whose leaf
+beyond the depth bound cannot move the contract
+while a link inside it can, and a wide inline
+subtree that spends the node budget before a
+later reference is reached, with the same
+document under budget as its control. The
+reviews' test gaps are closed in the same pass:
+the golden hash above, a sibling beside a
+non-object target staying unexpanded while the
+bare reference expands, and an unresolvable
+pointer pinned literal by its own golden hash.
+The nested conditionals are restructured as a let
+chain, and the doc now says a reference is not
+followed rather than stays literal, since the
+walk still visits such a node's other children.
+Recorded as postures, not built: expansion
+follows the design's letter for any local
+pointer, so a reference pointing outside
+schema-shaped places (the document root, another
+operation) pulls that subtree into the contract;
+such a reference is not valid OpenAPI, and the
+failure direction is false attribution, never
+missed drift. Aliased spellings of one target are
+distinct strings to the cycle guard; termination
+still holds on the finite document, and the depth
+bound caps the extra rounds. Shared schemas are
+re-expanded per occurrence rather than memoized,
+a conscious accept: the budget, not a cache, is
+the bound the gate needs.
