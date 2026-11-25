@@ -673,8 +673,10 @@ Rust, the fleet default, with no exception requested.
   as the check integration section of DECISIONS.md records.
   Attestation pins are verified in the runs that fetch, the
   digest an envelope seals against the document its uri
-  serves, as the attestation pinning section of DECISIONS.md
-  records. A check that fetches, by target or by
+  serves, and the statement's own subject claim is
+  judged against the entry it attests in the same
+  runs, as the attestation sections of DECISIONS.md
+  record. A check that fetches, by target or by
   flag, also judges cross-origin binding: an enveloped
   entry whose url names another host fails at
   critical when the descriptor served there declares
