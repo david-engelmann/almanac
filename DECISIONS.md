@@ -3881,3 +3881,93 @@ one finding, the designed major, where it
 previously asserted only that the kind appears.
 The red team's remaining minors are the
 inherited postures recorded above.
+
+## Twenty-third slice: conflicting duplicate A2A extensions (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, its one question answered with the
+narrow answer the record recommends: refuse on
+conflicting duplicates only. The twenty-second
+slice's as-built recorded the
+posture this slice takes up: duplicate extension
+items in an A2A card take union semantics, so a
+card that contradicts itself over one uri's
+requiredness, one item marking it required and
+another not, reduces to the stricter reading and
+the contradiction is invisible. The same
+function's skills take the opposite posture: a
+repeated skill identifier refuses the reduction
+outright, because an identity collision makes the
+baseline ambiguous, and the record named the
+inconsistency rather than repairing it in a slice
+about something else.
+
+The ambiguity is the harm, and it is narrower
+than the repetition. Two items naming one uri
+whose required flags agree record identically
+under any reading, so nothing is ambiguous and
+nothing is hidden that the gate could act on. Two
+items whose flags disagree leave the baseline
+unable to say which obligation was recorded, and
+whichever way a later card resolves the pair, the
+comparison against that baseline can pass a real
+requiredness change or invent one.
+
+The design. The reduction tracks the extensions
+it has seen by uri, with the requiredness each
+carried. A repeated uri whose requiredness
+agrees with the first sighting reduces exactly as
+today. A repeated uri whose requiredness
+disagrees refuses the reduction with an error
+naming the uri, the same surface a duplicate
+skill identifier refuses on, so generate declines
+the card and check reports it through the
+standing a2a-card-unreadable critical rather than
+comparing against a guess. The declared and
+required sets themselves do not change.
+
+One question rides with this design, and the
+record recommends the narrow answer above:
+refuse on conflicting duplicates only. The broad
+answer, refusing any repeated uri the way skills
+refuse any repeated identifier, buys consistency
+with the skills posture and catches an authoring
+error the gate is not otherwise charged with
+seeing, at the price of refusing cards the gate
+has read without harm since the A2A slice landed.
+The narrow answer repairs exactly the ambiguity
+and nothing else. Main's call.
+
+### As built (2026-11-25)
+
+As designed, in the one file. The extensions loop
+tracks each uri's first-sighting requiredness and
+refuses on a conflicting repeat with the error in
+the skills refusal's voice; pushes now happen on
+first sighting only, which leaves the two dedup
+calls after the loop unable to remove anything.
+They stand as harmless symmetry with the
+pre-slice code, recorded here so a future reader
+does not hunt for a duplicate path they imply.
+One consequence the record states in the open: a
+self-contradicting card baselined under the old
+union semantics refuses at check with the
+critical unreadable after this slice, rather than
+comparing against the stricter reading. That is
+the design's stated intent, the same treatment a
+duplicate skill identifier already received.
+
+### Conflicting duplicates checkpoint fix pass (2026-11-25)
+
+The three reviews ran before staging: spec
+fidelity PASS, standards PASS, the red team clean
+at critical and major. Their minors converge on
+test breadth, closed here: the agreement side now
+pins agreement across spellings, a JSON true
+beside a spelled yes and a spelled off beside no
+flag, the posture that distinguishes judging
+agreement on the read flag from comparing raw
+values, and asserts the declared set beside the
+required one. The sightings map is renamed
+seen_extensions so the function does not hold two
+maps under one name.
