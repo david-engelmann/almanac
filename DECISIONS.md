@@ -2913,3 +2913,222 @@ the new layer and input; the core test's name
 says what it proves. The remaining minors are
 the known postures recorded in the as-built
 above.
+
+## Cross-origin url binding (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, and its three questions are answered
+with the record's recommendations: the boundary
+is the host, the layer engages on the envelope's
+presence and bindings rather than on a verified
+signature, and a declaration is read by substring,
+named in the open as the weak form it is. The
+consequence is accepted knowingly: the normal
+deployment shape is cross-origin by this rule and
+its descriptors must declare their entries for
+the gate to pass them. The last named follow-up
+from the trust design: the draft's cross-origin
+target binding, sections 4.3.1 and 6.2.
+
+The research, read firsthand from
+draft-bu-dawn-ard-discovery-00 today. Section
+4.3.1 names the boundary exactly: a valid
+trustManifest signature from <publisher> proves
+<publisher> authorized the entry, but if url
+points to a different origin (the draft's example
+is urn:air:attacker.example claiming a url on
+victim.example.com), the signature alone does not
+prove the target origin consented to host the
+resource. When the origin of url differs from
+https://<publisher>, consumers and verifying
+registries MUST verify that the artifact
+descriptor retrieved from url matches the entry's
+signed cryptographic digest and explicitly
+declares the matching identifier
+(urn:air:<publisher>:...) or publisher identity
+(trustManifest.identity). Section 6.2 restates it
+as the cross-origin target url binding duty.
+
+Half of the duty already stands. In a fetching
+run, check compares the served artifact's bytes
+against the entry's digest at critical, which is
+the digest half, and the envelope's subject
+binding seals that digest to the signer. The new
+judgment is the declaration half: the descriptor
+at the target does not merely hash to the sealed
+bytes, it names the entry or its signer back.
+
+The honest difficulty, stated before the design:
+no descriptor format almanac reads defines a
+field for this declaration. The server card
+(SEP-2127 Final) carries name, websiteUrl,
+repository, remotes; the A2A card carries name,
+url, a provider object; an OpenAPI document
+carries info and servers; SKILL.md carries
+frontmatter. None carries an ARD identifier. So
+the declaration is read the only way it can be
+read mechanically: a string in the descriptor
+equal to the entry's identifier or to the
+envelope's identity. For a JSON descriptor the
+strings are its values, searched recursively; for
+a text descriptor (SKILL.md) the text itself. A
+descriptor that declares neither, retrieved for
+an entry that claims a cross-origin url under a
+publisher envelope, fails at critical under a new
+kind, trust-manifest-cross-origin-unbound: the
+signed claim points at an origin that nowhere
+acknowledges it, the impersonation shape section
+4.3.1 exists to catch, at the severity of the
+other binding failures.
+
+Scope. Check only, in fetching runs: validate
+retrieves no artifact descriptors, and the
+descriptor must be in hand for the judgment to
+mean anything; a descriptor the run could not
+retrieve draws no finding from this class (the
+artifact classes already judge unreachability and
+digest failure on their own terms). The CLI hands
+the core the descriptor text for each enveloped
+cross-origin entry from the same bytes its
+artifact handling already reads or fetches, the
+pin layer's pattern of plain values in,
+judgments out. Entries with data instead of url
+are out of scope. Same-origin entries are silent.
+Entries with no publisher envelope are silent:
+the duty's premise is a signed claim, and an
+unsigned cross-origin entry is already an
+unverified discovery hint under the standing
+posture.
+
+Three questions for Main, with the record's
+recommendations. (1) Origin or host? The draft
+says origin, and its example is a different host.
+This design reads the boundary at the host: url
+is cross-origin when its host differs from the
+publisher domain (case-insensitive, port and
+scheme ignored), because the consent being
+tested is the host operator's, and an https
+catalog entry pointing at its own host over http
+is a transport defect other classes judge, not
+an unconsenting third party. The alternative,
+the RFC origin triple, is the more literal
+reading. (2) Signature premise. Section 4.3.1
+premises a valid signature; the gate often runs
+unkeyed. This design engages on the envelope's
+presence and bindings, verified or not, as the
+other envelope layers judge the claim as
+published; a keyed-only scoping would leave the
+class nearly unreachable in CI. (3) Declaration
+by value. A descriptor string containing the
+identifier or the identity as a substring counts
+as declaring it (equality included); the
+alternative, whole-value equality only, is
+stricter and would miss a declaration carried in
+a sentence or a longer field. This design takes
+the substring reading and names it, because a
+descriptor that mentions the entry's URN at all
+is acknowledging the entry in the only way any
+current format can.
+
+The dusk.fm catalog stays parked, and the
+deployment shape this class will meet there is
+worth naming in the open: a catalog on one host
+announcing an MCP endpoint on another is the
+normal cross-origin shape, and its server card
+will need to declare the entry or its signer for
+this gate to pass it, which is the draft's
+intention, not an accident. Nothing here needs
+David.
+
+### As built (2026-11-25)
+
+The declaration half stands as designed. Check's
+trust pass judges it in check_cross_origin over
+descriptor texts the CLI collects in the runs
+that fetch, handed in as plain (identifier, url,
+text) triples on the pin layer's pattern. The
+gate (singular envelope, url present, host
+differs from the identifier's publisher segment,
+the catalog host standing in for a non-URN
+identifier) is one core predicate,
+cross_origin_host in validate.rs, which judge and
+collector share. A JSON descriptor declares
+through any of its string values, a text
+descriptor through its text, by substring, with
+an empty name declaring nothing. Validate holds
+no part of it.
+
+Two widenings against the design text, recorded
+for Main's ratification. The engagement follows
+the standing rule for network judgments rather
+than the design's narrower phrase: a check run
+engages the class when it fetches for any reason,
+a target or --fetch-remote or
+--fetch-attestations, not only in the runs the
+record called fetching. And the descriptor bytes
+come through the same local-first mapping and
+guarded fetcher the artifact handling uses, read
+for this class rather than reused from the
+artifact loop's hands, so a cross-origin baseline
+artifact can be fetched twice in one run;
+provenance is identical, the cost is one fetch.
+
+Known postures, recorded rather than repaired.
+The class reads the singular slot only, the
+standing model in which trustManifest is the
+publisher's own and the plural array carries
+third parties; an envelope living only in the
+plural slot is judged there as a third-party
+attestation, here not at all. A descriptor read
+for a federated entry whose url sits on the
+catalog host comes from the checker's own site
+directory, the artifact classes' standing
+premise. Redirects are judged on the landing
+bytes, the fetcher's standing posture.
+
+### Cross-origin checkpoint fix pass (2026-11-25)
+
+All three reviews ran before staging. Spec
+fidelity PASS, no critical or major, four minor.
+Standards PASS, no critical or major, four minor.
+Red team no critical, one major, eight minor, and
+a confirmed convergence between collector and
+judge on every route it traced but one. Every
+major and the repairable minors are closed here.
+
+The major was a parser differential, and it was
+real: url_host was hand-rolled and did not treat
+a backslash as an authority terminator, so a url
+spelled victim.example.com\@example.com named
+the publisher to this parser and the victim to a
+WHATWG parser, and the class skipped it as
+same-origin; the empty-authority spelling
+(https:///host) disengaged it the same way. The
+artifact classes backstopped baselined entries,
+which kept it major rather than critical, but a
+class whose defense rests on another parser's
+strictness is not defended. url_host now follows
+the WHATWG authority rules where they decide the
+host (backslash terminates, leading slashes are
+skipped), drops the DNS root dot, and the core
+test judges both spellings at the host a browser
+would name. The same test now pins the boundary's
+insensitivities (scheme, case, port, root dot on
+the publisher's own host stay silent), which the
+spec review found implemented but untested.
+
+Also closed: the duplicated gate composition the
+standards review flagged is now the single
+cross_origin_host predicate (which also
+normalizes a port out of the fallback publisher,
+a red team minor); descriptors are keyed by
+identifier and url together, so two entries
+sharing an identifier no longer judge against one
+descriptor (red team); an empty identifier or
+identity no longer declares everything by
+containing the empty string (red team); the e2e's
+silent phases assert the run could run, not only
+that the kind is absent (standards); value_declares
+carries its doc line (standards). The remaining
+minors are the known postures and widenings
+recorded in the as-built above.

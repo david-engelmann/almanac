@@ -159,6 +159,13 @@ pub struct CheckInputs<'a> {
     /// naming --fetch-attestations); without them the
     /// pin layer makes no claim.
     pub pins: Option<&'a [crate::trust::PinObservation]>,
+    /// The descriptor texts the run retrieved for
+    /// entries whose url names a different host than
+    /// their publisher, as (entry identifier, url,
+    /// text) triples, in a fetching run; empty in any
+    /// other, and an entry absent from it draws
+    /// nothing from the cross-origin class.
+    pub descriptors: &'a [(String, String, String)],
     /// The media type the catalog itself was observed
     /// served with, in a run that could observe it. None
     /// when the run made no observation (repo mode, or
@@ -545,6 +552,97 @@ fn check_trust(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
                 "the baseline records a trust manifest for this entry, and the published catalog carries none".into(),
             ));
         }
+    }
+    check_cross_origin(inputs, findings);
+}
+
+/// The cross-origin declaration judgment, the draft's
+/// sections 4.3.1 and 6.2 as the cross-origin section
+/// of DECISIONS.md records it. An entry carrying a
+/// publisher envelope whose url names a different
+/// host than its publisher claims a resource on an
+/// origin the signature cannot speak for; the
+/// descriptor served there must declare the entry
+/// back, naming its identifier or its signer, in the
+/// only form any current descriptor format offers, a
+/// string that mentions one of them. The digest half
+/// of the same duty is the artifact comparison's and
+/// already stands. The boundary is the host, the
+/// consent of the host's operator being what is
+/// tested. An entry whose descriptor the run did not
+/// retrieve draws nothing here: unreachability is
+/// the artifact classes' finding, not this one's.
+fn check_cross_origin(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
+    let published = inputs.published;
+    for entry in &published.entries {
+        if crate::validate::cross_origin_host(entry, &published.host.domain).is_none() {
+            continue;
+        }
+        let manifest = entry.trust_manifest.as_ref();
+        let url = entry.url.as_deref().unwrap_or_default();
+        let Some((_, _, text)) = inputs
+            .descriptors
+            .iter()
+            .find(|(id, at, _)| id == &entry.identifier && at == url)
+        else {
+            continue;
+        };
+        let identity = manifest
+            .and_then(|m| m.get("identity"))
+            .and_then(|v| v.as_str());
+        if descriptor_declares(text, &entry.identifier, identity) {
+            continue;
+        }
+        let detail = match identity {
+            Some(identity) => format!(
+                "the descriptor at {url} declares neither {} nor its signer {identity}",
+                entry.identifier
+            ),
+            None => format!(
+                "the descriptor at {url} does not declare {}",
+                entry.identifier
+            ),
+        };
+        findings.push(finding(
+            Severity::Critical,
+            "trust-manifest-cross-origin-unbound",
+            Some(&entry.identifier),
+            detail,
+        ));
+    }
+}
+
+/// Whether a descriptor declares an entry: a JSON
+/// descriptor declares through any of its string
+/// values, a text descriptor through its text, in
+/// both cases by mentioning the identifier or the
+/// signer's identity. An empty name declares
+/// nothing: every string contains the empty string,
+/// and a blank needle is no declaration.
+fn descriptor_declares(text: &str, identifier: &str, identity: Option<&str>) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        return value_declares(&value, identifier, identity);
+    }
+    mentions(text, identifier, identity)
+}
+
+/// The one mention test both declaration forms use.
+fn mentions(text: &str, identifier: &str, identity: Option<&str>) -> bool {
+    (!identifier.is_empty() && text.contains(identifier))
+        || identity.is_some_and(|name| !name.is_empty() && text.contains(name))
+}
+
+/// Recursively, any string value in a JSON descriptor.
+fn value_declares(value: &serde_json::Value, identifier: &str, identity: Option<&str>) -> bool {
+    match value {
+        serde_json::Value::String(text) => mentions(text, identifier, identity),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| value_declares(item, identifier, identity)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .any(|item| value_declares(item, identifier, identity)),
+        _ => false,
     }
 }
 
@@ -1563,6 +1661,7 @@ mod tests {
             now_unix: 1_800_000_000,
             trust_keys: None,
             pins: None,
+            descriptors: &[],
             catalog_media_type: None,
         }
     }
@@ -1689,6 +1788,132 @@ mod tests {
         let findings = check(&inputs(&cat, &plain, None));
         assert!(
             findings.iter().all(|f| f.kind != "trust-manifest-removed"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_cross_origin_descriptor_must_declare_the_entry() {
+        // An enveloped entry whose url names another
+        // host: the descriptor served there must name
+        // the entry or its signer back. Declaring
+        // either is silent; declaring neither is the
+        // critical; a descriptor the run never
+        // retrieved, a same-host url in any spelling,
+        // and an entry with no envelope are all silent;
+        // and a url spelling that names one host to a
+        // lenient parser and another to this one is
+        // judged at the host the WHATWG rules name.
+        let envelope = serde_json::json!({
+            "identity": "did:web:example.com",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+            },
+            "signature": "eyJhbGciOiJFUzI1NiJ9..AAAA",
+        });
+        let on = |url: &str| {
+            let mut cat = catalog();
+            cat.entries[0].url = Some(url.into());
+            cat.entries[0].trust_manifest = Some(envelope.clone());
+            cat
+        };
+        let base = baseline_for(&snapshot(vec![ping()]));
+        let run = |cat: &Catalog, descriptors: &[(String, String, String)]| {
+            let mut owned = inputs(cat, &base, None);
+            owned.descriptors = descriptors;
+            check(&owned)
+        };
+        let at = |url: &str, text: &str| {
+            vec![(
+                "urn:air:example.com:mcp:demo".to_string(),
+                url.to_string(),
+                text.to_string(),
+            )]
+        };
+        let cross = "https://cdn.other.example/card.json";
+        let cat = on(cross);
+        let by_id = run(
+            &cat,
+            &at(
+                cross,
+                r#"{"name": "x", "notes": "serves urn:air:example.com:mcp:demo"}"#,
+            ),
+        );
+        assert!(
+            by_id
+                .iter()
+                .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
+            "{by_id:?}"
+        );
+        let by_signer = run(&cat, &at(cross, r#"{"websiteUrl": "did:web:example.com"}"#));
+        assert!(
+            by_signer
+                .iter()
+                .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
+            "{by_signer:?}"
+        );
+        let neither = run(&cat, &at(cross, r#"{"name": "someone else's card"}"#));
+        assert!(
+            neither.iter().any(|f| {
+                f.kind == "trust-manifest-cross-origin-unbound" && f.severity == Severity::Critical
+            }),
+            "{neither:?}"
+        );
+        let text_form = run(
+            &cat,
+            &at(cross, "frontmatter naming did:web:example.com as publisher"),
+        );
+        assert!(
+            text_form
+                .iter()
+                .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
+            "{text_form:?}"
+        );
+        let unretrieved = run(&cat, &[]);
+        assert!(
+            unretrieved
+                .iter()
+                .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
+            "{unretrieved:?}"
+        );
+        // The boundary is the host: scheme, case, and
+        // port spellings of the publisher's own host
+        // are the same host and stay silent.
+        for own in [
+            "https://example.com/mcp",
+            "http://EXAMPLE.com:8443/card.json",
+            "https://example.com./card.json",
+        ] {
+            let findings = run(&on(own), &at(own, r#"{"name": "no declaration"}"#));
+            assert!(
+                findings
+                    .iter()
+                    .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
+                "{own}: {findings:?}"
+            );
+        }
+        // The spellings a WHATWG parser reads as
+        // another host are judged at that host.
+        for foreign in [
+            "https://victim.example.com\\@example.com/card.json",
+            "https:///other.example/card.json",
+        ] {
+            let findings = run(&on(foreign), &at(foreign, r#"{"name": "no declaration"}"#));
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.kind == "trust-manifest-cross-origin-unbound"),
+                "{foreign}: {findings:?}"
+            );
+        }
+        let mut unsigned = catalog();
+        unsigned.entries[0].url = Some(cross.into());
+        let findings = run(&unsigned, &at(cross, r#"{"name": "no declaration"}"#));
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "trust-manifest-cross-origin-unbound"),
             "{findings:?}"
         );
     }

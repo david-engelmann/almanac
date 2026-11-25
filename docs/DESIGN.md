@@ -674,7 +674,12 @@ Rust, the fleet default, with no exception requested.
   Attestation pins are verified in the runs that fetch, the
   digest an envelope seals against the document its uri
   serves, as the attestation pinning section of DECISIONS.md
-  records.
+  records. A check that fetches, by target or by
+  flag, also judges cross-origin binding: an enveloped
+  entry whose url names another host fails at
+  critical when the descriptor served there declares
+  neither the entry nor its signer, as the
+  cross-origin section of DECISIONS.md records.
 - Distribution. The binary is named almanac and the crates are
   almanac-core and almanac-cli, the bare crate name belonging to a
   dormant calendar tool, as section 1 records. The crates publish to

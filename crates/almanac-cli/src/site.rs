@@ -2127,6 +2127,18 @@ pub fn check(
         } else {
             None
         };
+    // The cross-origin class's evidence, gathered in
+    // the runs that fetch, the pin layer's engagement
+    // rule (a fetching run, or --fetch-attestations):
+    // the descriptor texts at the urls of enveloped
+    // entries pointing at other hosts. A run that
+    // fetches nothing holds none and the class is
+    // silent.
+    let descriptors: Vec<(String, String, String)> = if fetching || fetch_attestations {
+        cross_origin_descriptors(&published, site, &fetcher)
+    } else {
+        Vec::new()
+    };
     let mut artifact_digests: Vec<(String, Option<String>)> = Vec::new();
     let mut card_displays: Vec<(String, CardDisplay)> = Vec::new();
     for artifact in &baseline.artifacts {
@@ -2299,6 +2311,7 @@ pub fn check(
         now_unix,
         trust_keys: trust_keys_held,
         pins: pins_held,
+        descriptors: &descriptors,
         catalog_media_type: catalog_media_type.as_deref(),
     });
     let mode = match &snapshot {
@@ -2389,6 +2402,42 @@ fn did_web_document_url(identity: &str) -> Option<String> {
     } else {
         Some(format!("https://{domain}/{}/did.json", path.join("/")))
     }
+}
+
+/// The descriptor texts a fetching check run holds
+/// for the cross-origin judgment: for each entry
+/// carrying a publisher envelope whose url names a
+/// different host than its publisher, the bytes at
+/// the url, read from the site where the url maps
+/// into it and fetched through the guarded fetcher
+/// where it does not. An entry whose descriptor
+/// cannot be read either way is absent from the
+/// result, and the class draws nothing for it.
+fn cross_origin_descriptors(
+    published: &Catalog,
+    site: &Path,
+    fetcher: &probe_http::DocumentFetcher,
+) -> Vec<(String, String, String)> {
+    let mut descriptors = Vec::new();
+    for entry in &published.entries {
+        if almanac_core::validate::cross_origin_host(entry, &published.host.domain).is_none() {
+            continue;
+        }
+        let Some(url) = entry.url.as_deref() else {
+            continue;
+        };
+        let bytes = url_to_path(site, &published.host.domain, url)
+            .and_then(|path| std::fs::read(path).ok())
+            .or_else(|| fetcher.fetch(url).ok());
+        if let Some(bytes) = bytes {
+            descriptors.push((
+                entry.identifier.clone(),
+                url.to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+    }
+    descriptors
 }
 
 /// The attestation observations a pin engaged run
