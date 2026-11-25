@@ -2381,7 +2381,6 @@ fn check_with_an_http_target_fetches_remote_artifacts() {
     assert_eq!(code, 0, "targeted check failed with {stdout}");
 }
 
-
 #[test]
 fn yaml_openapi_documents_generate_and_drift() {
     // A YAML OpenAPI document generates exactly as its
