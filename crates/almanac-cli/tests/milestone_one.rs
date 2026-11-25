@@ -2316,6 +2316,8 @@ fn check_with_an_http_target_fetches_remote_artifacts() {
         "generate",
         "--site",
         &site_arg(&site),
+        "--domain",
+        "example.com",
         "--name",
         "Example",
         "--openapi",
