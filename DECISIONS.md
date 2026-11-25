@@ -2114,3 +2114,52 @@ assignment (the walk now binds each hop
 directly). Both are fixed in the slice as staged,
 and the hosted gate carries the verdict on the
 staged tree.
+
+## Thirteenth slice: one redirect walk (design, 2026-11-25)
+
+Two reviews banked the same debt: the media type
+slice's redirect walk was the third copy of one hop
+loop (the metadata walk in get_bytes, the fetcher's
+fetch, and the observation walk), recorded as
+accumulated duplication for a future factoring.
+This slice pays it. One follow function performs
+the hop machinery for all three: request, follow a
+redirect by hand, at most three, and refuse a
+literal non-public address before every request on
+a guarded walk.
+
+The factoring unifies the machinery and nothing
+else. The guard stays a per-walk choice, because
+the postures differ on the record: the fetcher's
+walks are guarded (a fetching run must not become
+a way to make CI read a metadata endpoint), and
+the metadata walk is not (it reads the surface's
+own OAuth documents, where a privately resolving
+name is the operator's infrastructure question).
+Each consumer keeps its failure vocabulary exactly:
+fetch's named reasons ride inside the walk's
+outcomes, the media observation maps them onto its
+four cases one for one, and get_bytes still reads
+every non-success as absence. Terminal handling
+stays with the consumers: fetch enforces its size
+cap as a refusal on the returned response, the
+metadata walk truncates silently as it always has,
+and the observation reads only the Content-Type.
+Behavior is unchanged, and the existing suite,
+which pins all three walks end to end, is the
+proof.
+
+As built: follow and its FollowOutcome enum sit
+above get_bytes in probe_http.rs, and the file now
+holds exactly one hop loop where it held three.
+get_bytes rides it unguarded, fetch and
+fetch_media_type guarded, and each consumer's
+terminal handling and failure strings are
+character for character what they were. The
+standards review's two Minors closed in the fix
+pass: the shared walk reports dead ends as neutral
+kinds (no location, unresolvable, too many
+redirects) and fetch words them, so no consumer's
+prose lives in the shared machinery, and the
+outcome type takes the file's Outcome naming
+beside RpcOutcome and MediaTypeOutcome.

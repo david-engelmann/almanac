@@ -168,39 +168,99 @@ fn rpc(
     })
 }
 
+/// How a redirect walk ends, before the caller reads
+/// anything from it. The walks in this module differ in
+/// what they do with an answer and in how they name a
+/// failure, but the hop machinery is one: request,
+/// follow a redirect by hand, at most three, and, on a
+/// guarded walk, refuse a literal non-public address
+/// before every request.
+enum FollowOutcome {
+    /// A terminal answer: a success, or any status the
+    /// walk does not follow.
+    Response(ureq::http::Response<ureq::Body>),
+    /// A guarded walk met an address, or a redirect
+    /// target, naming a non-public literal.
+    Refused,
+    /// A request could not be made; the value is the
+    /// transport error as the transport reported it,
+    /// for the caller to name as it names its failures.
+    TransportFailed(String),
+    /// The chain went nowhere usable; the kind says
+    /// which way, and the caller words it.
+    DeadEnd(DeadEnd),
+}
+
+/// The ways a redirect chain goes nowhere usable.
+enum DeadEnd {
+    /// A redirect answer named no location, or one in
+    /// bytes the checker will not read.
+    NoLocation,
+    /// The location named could not be resolved
+    /// against the address that produced it.
+    Unresolvable,
+    /// The chain ran past the three redirects the
+    /// walk follows.
+    TooManyRedirects,
+}
+
+/// The module's one redirect walk. The guard is the
+/// caller's choice because the postures differ on the
+/// record: the fetcher's walks are guarded, and the
+/// metadata walk is not.
+fn follow(agent: &Agent, url: &str, guarded: bool) -> FollowOutcome {
+    let mut current = url.to_string();
+    for _ in 0..4 {
+        if guarded && host_is_non_public(&current) {
+            return FollowOutcome::Refused;
+        }
+        let response = match agent.get(&current).call() {
+            Ok(response) => response,
+            Err(e) => return FollowOutcome::TransportFailed(format!("{e}")),
+        };
+        let status = response.status().as_u16();
+        if (300..400).contains(&status) {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok());
+            match location {
+                None => return FollowOutcome::DeadEnd(DeadEnd::NoLocation),
+                Some(location) => match resolve_location(&current, location) {
+                    Some(next) => {
+                        current = next;
+                        continue;
+                    }
+                    None => return FollowOutcome::DeadEnd(DeadEnd::Unresolvable),
+                },
+            }
+        }
+        return FollowOutcome::Response(response);
+    }
+    FollowOutcome::DeadEnd(DeadEnd::TooManyRedirects)
+}
+
 /// Fetch a document's bytes, following a short redirect chain
 /// by hand. Metadata documents sit behind redirects often
 /// enough that a document the agent would not follow reads as
 /// absent, and absence is a fact the drift engine acts on, so
 /// the ladder follows up to three.
 fn get_bytes(agent: &Agent, url: &str) -> Option<Vec<u8>> {
-    let mut current = url.to_string();
-    for _ in 0..4 {
-        let mut response = agent.get(&current).call().ok()?;
-        let status = response.status().as_u16();
-        if status == 200 {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            response
-                .body_mut()
-                .as_reader()
-                .take(16 * 1024 * 1024)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            return Some(bytes);
-        }
-        if (300..400).contains(&status) {
-            let location = response
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from)?;
-            current = resolve_location(&current, &location)?;
-            continue;
-        }
+    let FollowOutcome::Response(mut response) = follow(agent, url, false) else {
+        return None;
+    };
+    if response.status().as_u16() != 200 {
         return None;
     }
-    None
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(16 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
 }
 
 fn get_json(agent: &Agent, url: &str) -> Option<Value> {
@@ -253,9 +313,9 @@ fn ipv4_is_non_public(v4: &std::net::Ipv4Addr) -> bool {
 
 /// The checker's fetcher for public documents the catalog
 /// announces: one agent built once for a run's fetches,
-/// against the module's build-once convention. The walk
-/// is the metadata walk's shape (redirects followed by
-/// hand, up to three) but with every failure named,
+/// against the module's build-once convention. Its walks
+/// ride the module's one redirect walk, guarded, with
+/// every failure named,
 /// because the checker reports the reason, and with the
 /// size cap enforced as a refusal rather than a silent
 /// truncation. No credential is ever attached: announced
@@ -279,45 +339,40 @@ impl DocumentFetcher {
     pub(crate) fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
         use std::io::Read;
         const LIMIT: usize = 16 * 1024 * 1024;
-        let mut current = url.to_string();
-        for _ in 0..4 {
-            if host_is_non_public(&current) {
+        let mut response = match follow(&self.agent, url, true) {
+            FollowOutcome::Response(response) => response,
+            FollowOutcome::Refused => {
                 return Err(
                     "the URL names a non-public address, which the checker will not fetch".into(),
                 );
             }
-            let mut response = self
-                .agent
-                .get(&current)
-                .call()
-                .map_err(|e| format!("the fetch failed with {e}"))?;
-            let status = response.status().as_u16();
-            if status == 200 {
-                let mut bytes = Vec::new();
-                response
-                    .body_mut()
-                    .as_reader()
-                    .take((LIMIT + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| format!("the fetch failed with {e}"))?;
-                if bytes.len() > LIMIT {
-                    return Err("the document is over the 16 MiB reading limit".into());
+            FollowOutcome::TransportFailed(reason) => {
+                return Err(format!("the fetch failed with {reason}"));
+            }
+            FollowOutcome::DeadEnd(kind) => {
+                return Err(match kind {
+                    DeadEnd::NoLocation => "the redirect named no location",
+                    DeadEnd::Unresolvable => "the redirect location could not be resolved",
+                    DeadEnd::TooManyRedirects => "the fetch followed more than three redirects",
                 }
-                return Ok(bytes);
+                .into());
             }
-            if (300..400).contains(&status) {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or("the redirect named no location")?;
-                current = resolve_location(&current, location)
-                    .ok_or("the redirect location could not be resolved")?;
-                continue;
-            }
+        };
+        let status = response.status().as_u16();
+        if status != 200 {
             return Err(format!("the server answered status {status}"));
         }
-        Err("the fetch followed more than three redirects".into())
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take((LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("the fetch failed with {e}"))?;
+        if bytes.len() > LIMIT {
+            return Err("the document is over the 16 MiB reading limit".into());
+        }
+        Ok(bytes)
     }
 
     /// Observe the media type a URL is served with, for
@@ -331,44 +386,25 @@ impl DocumentFetcher {
     /// non-public literal), which is final. Redirects
     /// are followed as in fetch.
     pub(crate) fn fetch_media_type(&self, url: &str) -> MediaTypeOutcome {
-        let mut current = url.to_string();
-        for _ in 0..4 {
-            if host_is_non_public(&current) {
-                return MediaTypeOutcome::Refused;
-            }
-            let Ok(response) = self.agent.get(&current).call() else {
-                return MediaTypeOutcome::CouldNotBeMade;
-            };
-            let status = response.status().as_u16();
-            if status == 200 {
-                return match response.headers().get("content-type") {
-                    None => MediaTypeOutcome::Observed(String::new()),
-                    Some(value) => match value.to_str() {
-                        Ok(text) => MediaTypeOutcome::Observed(text.to_string()),
-                        // A header in bytes the checker
-                        // will not read is not an
-                        // observation of no type; it is
-                        // no observation.
-                        Err(_) => MediaTypeOutcome::Unobserved,
-                    },
-                };
-            }
-            if (300..400).contains(&status) {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok());
-                match location.and_then(|loc| resolve_location(&current, loc)) {
-                    Some(next) => {
-                        current = next;
-                        continue;
-                    }
-                    None => return MediaTypeOutcome::Unobserved,
-                }
-            }
+        let response = match follow(&self.agent, url, true) {
+            FollowOutcome::Response(response) => response,
+            FollowOutcome::Refused => return MediaTypeOutcome::Refused,
+            FollowOutcome::TransportFailed(_) => return MediaTypeOutcome::CouldNotBeMade,
+            FollowOutcome::DeadEnd(_) => return MediaTypeOutcome::Unobserved,
+        };
+        if response.status().as_u16() != 200 {
             return MediaTypeOutcome::Unobserved;
         }
-        MediaTypeOutcome::Unobserved
+        match response.headers().get("content-type") {
+            None => MediaTypeOutcome::Observed(String::new()),
+            Some(value) => match value.to_str() {
+                Ok(text) => MediaTypeOutcome::Observed(text.to_string()),
+                // A header in bytes the checker will
+                // not read is not an observation of no
+                // type; it is no observation.
+                Err(_) => MediaTypeOutcome::Unobserved,
+            },
+        }
     }
 }
 
