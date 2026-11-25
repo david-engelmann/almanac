@@ -118,6 +118,14 @@ pub struct McpBaseline {
     pub tools: BTreeMap<String, ToolBaseline>,
     pub resources: Vec<String>,
     pub prompts: Vec<String>,
+    /// Prompt name to its recorded hashes, the contract
+    /// channels beside the name list's membership.
+    /// Baselines written before the twenty-fourth slice
+    /// carry none, the serde default's empty map, and
+    /// their prompts are judged on membership alone
+    /// until regeneration.
+    #[serde(default)]
+    pub prompt_contracts: BTreeMap<String, PromptBaseline>,
     /// True when the recorded tool, resource and prompt
     /// lists are the surface's own enumeration. A baseline
     /// recorded from a SEP-2127 Final shape server card
@@ -149,6 +157,14 @@ fn enumerated_by_default() -> bool {
 pub struct ToolBaseline {
     pub description_sha256: String,
     pub schema_sha256: String,
+}
+
+/// One prompt's recorded hashes, the ToolBaseline
+/// shape for the prompt's own contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptBaseline {
+    pub description_sha256: String,
+    pub arguments_sha256: String,
 }
 
 /// The auth posture at generation time, in baseline form. It
@@ -381,6 +397,19 @@ impl McpBaseline {
             tools,
             resources: snapshot.resources.clone(),
             prompts: snapshot.prompts.clone(),
+            prompt_contracts: snapshot
+                .prompt_surfaces
+                .iter()
+                .map(|prompt| {
+                    (
+                        prompt.name.clone(),
+                        PromptBaseline {
+                            description_sha256: crate::hash::sha256_str(&prompt.description),
+                            arguments_sha256: crate::hash::sha256_json(&prompt.arguments),
+                        },
+                    )
+                })
+                .collect(),
             capabilities_enumerated: snapshot.capabilities_enumerated,
             card_display: None,
             auth: AuthBaseline::from(&snapshot.auth),
@@ -391,7 +420,7 @@ impl McpBaseline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{CredentialOutcome, ToolSurface};
+    use crate::snapshot::{CredentialOutcome, PromptSurface, ToolSurface};
 
     #[test]
     fn baseline_records_tool_hashes() {
@@ -409,6 +438,7 @@ mod tests {
             }],
             resources: vec![],
             prompts: vec![],
+            prompt_surfaces: vec![],
             auth: AuthSurface::Open,
             credential: CredentialOutcome::NotPresented,
             failure: None,
@@ -424,6 +454,46 @@ mod tests {
             crate::hash::sha256_json(&serde_json::json!({"type": "object"}))
         );
         assert_eq!(baseline.server_name, "demo");
+    }
+
+    #[test]
+    fn baseline_records_prompt_contract_hashes() {
+        let mut snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec![],
+            prompts: vec!["review".into()],
+            prompt_surfaces: vec![PromptSurface {
+                name: "review".into(),
+                description: "Review a diff.".into(),
+                arguments: serde_json::json!([{"name": "diff", "required": true}]),
+            }],
+            auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
+            failure: None,
+        };
+        let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        let contract = baseline
+            .prompt_contracts
+            .get("review")
+            .expect("prompt contract recorded");
+        assert_eq!(
+            contract.description_sha256,
+            crate::hash::sha256_str("Review a diff.")
+        );
+        assert_eq!(
+            contract.arguments_sha256,
+            crate::hash::sha256_json(&serde_json::json!([{"name": "diff", "required": true}]))
+        );
+        assert_eq!(baseline.prompts, vec!["review".to_string()]);
+        snapshot.prompt_surfaces.clear();
+        let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert!(bare.prompt_contracts.is_empty());
     }
 
     #[test]
@@ -482,6 +552,35 @@ mod tests {
             baseline.a2a[0].extensions,
             vec!["https://example.com/ext/pay".to_string()]
         );
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_prompt_contracts_slice_still_parses() {
+        // The twenty-fourth slice added prompt_contracts to
+        // the MCP record with a serde default. A committed
+        // baseline from before the slice has an MCP record
+        // with no such key, and it must still load with the
+        // map empty and the name list intact.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": {
+                "entry_id": "urn:air:example.com:mcp:demo",
+                "server_name": "demo",
+                "server_version": "0.1.0",
+                "protocol_version": "2025-06-18",
+                "tools": {},
+                "resources": [],
+                "prompts": ["review"],
+                "auth": "Open"
+            },
+            "skills": [],
+            "artifacts": [],
+            "provenance": []
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        let mcp = baseline.mcp.expect("mcp record");
+        assert_eq!(mcp.prompts, vec!["review".to_string()]);
+        assert!(mcp.prompt_contracts.is_empty());
     }
 
     #[test]

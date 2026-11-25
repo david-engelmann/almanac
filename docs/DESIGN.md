@@ -551,6 +551,11 @@ Major, fails by default and can be lowered by config.
   its list as fixed. Prompts are part of the surface the probe
   records, and the class rides the same footing as the resource set
   change above.
+- A prompt's arguments change on the MCP surface, at major, and its
+  description change at minor below. Added 2026-11-25 by the
+  twenty-fourth slice, on the same recorded-here footing: a prompt's
+  arguments are its input contract, and the channels mirror the tool
+  schema and description channels exactly.
 - A catalog served only on the legacy path, with no ard.json beside
   it. The publisher is invisible to conformant ARD registries, which
   is the stranded state the migrate command exists to end. This
@@ -566,6 +571,9 @@ Major, fails by default and can be lowered by config.
 Minor, warns by default.
 
 - A tool description changed since baseline.
+- A prompt description changed since baseline. Added 2026-11-25 by
+  the twenty-fourth slice, the minor half of the prompt contract
+  channels recorded in the major list above.
 - Display text, tags or ordering changes in a declared artifact.
 - The catalog served with a generic JSON media type rather than
   application/ard+json. Most publishers get this wrong today, so it

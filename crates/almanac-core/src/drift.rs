@@ -1625,6 +1625,31 @@ fn check_live_primitive_sets(
             "the MCP prompt set changed since generation".into(),
         ));
     }
+    let live_prompts: BTreeMap<&str, &crate::snapshot::PromptSurface> = snapshot
+        .prompt_surfaces
+        .iter()
+        .map(|prompt| (prompt.name.as_str(), prompt))
+        .collect();
+    for (name, recorded) in &mcp.prompt_contracts {
+        if let Some(prompt) = live_prompts.get(name.as_str()) {
+            if crate::hash::sha256_json(&prompt.arguments) != recorded.arguments_sha256 {
+                findings.push(finding(
+                    Severity::Major,
+                    "prompt-arguments-changed",
+                    Some(&mcp.entry_id),
+                    format!("prompt {name} arguments changed since generation"),
+                ));
+            }
+            if crate::hash::sha256_str(&prompt.description) != recorded.description_sha256 {
+                findings.push(finding(
+                    Severity::Minor,
+                    "prompt-description-changed",
+                    Some(&mcp.entry_id),
+                    format!("prompt {name} description changed since generation"),
+                ));
+            }
+        }
+    }
 }
 
 /// The authentication comparisons, measured against the metadata
@@ -1844,6 +1869,7 @@ mod tests {
             tools,
             resources: vec![],
             prompts: vec![],
+            prompt_surfaces: vec![],
             auth: AuthSurface::Open,
             credential: CredentialOutcome::NotPresented,
             failure: None,
@@ -2473,6 +2499,88 @@ mod tests {
         let findings = check(&inputs(&cat, &base, Some(&snap)));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Minor);
+    }
+
+    #[test]
+    fn prompt_contract_changes_report_on_the_tool_severities() {
+        // A prompt's arguments are its contract: a change
+        // there is the one major, a description change the
+        // one minor, agreement silent, and a baseline
+        // recorded before the slice leaves both channels
+        // ungated.
+        let surface = |description: &str, arguments: serde_json::Value| {
+            let mut snap = snapshot(vec![ping()]);
+            snap.prompts = vec!["review".into()];
+            snap.prompt_surfaces = vec![crate::snapshot::PromptSurface {
+                name: "review".into(),
+                description: description.into(),
+                arguments,
+            }];
+            snap
+        };
+        let args = serde_json::json!([{"name": "diff", "required": true}]);
+        let base = baseline_for(&surface("Review a diff.", args.clone()));
+        let cat = catalog();
+        assert!(
+            check(&inputs(
+                &cat,
+                &base,
+                Some(&surface("Review a diff.", args.clone()))
+            ))
+            .is_empty()
+        );
+        let more_args = serde_json::json!([
+            {"name": "diff", "required": true},
+            {"name": "depth", "required": false}
+        ]);
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface("Review a diff.", more_args.clone())),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "prompt-arguments-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface("Review it again.", args.clone())),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "prompt-description-changed");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        let mut old_base = base.clone();
+        old_base
+            .mcp
+            .as_mut()
+            .expect("mcp baseline")
+            .prompt_contracts
+            .clear();
+        assert!(
+            check(&inputs(
+                &cat,
+                &old_base,
+                Some(&surface("Other.", more_args))
+            ))
+            .is_empty()
+        );
+        // A surface serving one name twice records the last
+        // item's contract on both sides of the gate: the
+        // baseline's map collect and the live lookup map
+        // both take the last, so the unchanged duplicated
+        // surface stays silent.
+        let mut dup = surface("Review a diff.", args.clone());
+        dup.prompts = vec!["review".into(), "review".into()];
+        dup.prompt_surfaces.push(crate::snapshot::PromptSurface {
+            name: "review".into(),
+            description: "Review a diff.".into(),
+            arguments: serde_json::json!([
+                {"name": "diff", "required": true},
+                {"name": "depth", "required": false}
+            ]),
+        });
+        let dup_base = baseline_for(&dup);
+        assert!(check(&inputs(&cat, &dup_base, Some(&dup))).is_empty());
     }
 
     #[test]
