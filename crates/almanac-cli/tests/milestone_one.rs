@@ -2302,6 +2302,60 @@ fn check_fetches_remote_artifacts() {
 }
 
 #[test]
+fn card_display_changes_warn_instead_of_failing() {
+    // A card edited only in its display fields warns at
+    // Minor and passes; a card edited in substance fails
+    // the digest at Critical, as it always has.
+    let clean = fixture_binary("fixture_server");
+    let site = temp_site("card-display");
+    let (code, _, stderr) = generate_stdio(&site, &clean);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let baseline_text = std::fs::read_to_string(site.join("baseline.json")).expect("baseline");
+    assert!(
+        baseline_text.contains("\"card_display\""),
+        "the baseline records the card's display fields"
+    );
+    let card_path = site.join(".well-known/mcp/server-card.json");
+    let mut card: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&card_path).expect("card")).expect("card json");
+    card["description"] = serde_json::Value::String("A better description.".into());
+    std::fs::write(
+        &card_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&card).expect("serialize")
+        ),
+    )
+    .expect("write card");
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "a display change must pass, report was {stdout}");
+    assert!(
+        stdout.contains("declared-display-changed") && stdout.contains("description"),
+        "report was {stdout}"
+    );
+    assert!(
+        !stdout.contains("digest-mismatch"),
+        "no digest finding may fire, report was {stdout}"
+    );
+
+    card["version"] = serde_json::Value::String("9.9.9".into());
+    std::fs::write(
+        &card_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&card).expect("serialize")
+        ),
+    )
+    .expect("write card");
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(
+        code, 1,
+        "a substantive change must fail, report was {stdout}"
+    );
+    assert!(stdout.contains("digest-mismatch"), "report was {stdout}");
+}
+
+#[test]
 fn yaml_openapi_documents_generate_and_drift() {
     // A YAML OpenAPI document generates exactly as its
     // JSON twin would: same entry, same capabilities,

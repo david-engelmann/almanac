@@ -63,7 +63,9 @@ Generation is the on-ramp. The gate is the product.
   with --fetch-remote, also fetches the artifacts, OpenAPI
   documents and agent cards the catalog announces at URLs outside
   the site, so a document hosted on a docs domain is gated where
-  it lives. It also cross checks the
+  it lives. A server card changed only in its display
+  fields warns instead of failing its digest, because an
+  editorial edit is not a replaced card. It also cross checks the
   MCP endpoints a site's agents.json names against the ones the
   catalog announces, because two public claims about one surface
   should not disagree.

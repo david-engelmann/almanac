@@ -58,6 +58,31 @@ pub struct EntryProvenance {
     pub overruled: Vec<String>,
 }
 
+/// A server card's display record: the fields a reader
+/// sees, kept apart from the card's substance so a check
+/// can tell an editorial edit from a substantive one.
+/// The remainder hash covers the card with the display
+/// fields removed and its remotes order-normalized, so
+/// two cards with the same remainder differ, if at all,
+/// only in display.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CardDisplay {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub icons: Vec<String>,
+    pub website_url: Option<String>,
+    /// The card's remote URLs, in the order it lists
+    /// them. Order is display here only while the
+    /// primary endpoint below is unchanged; a remote's
+    /// own content rides in the remainder.
+    pub remotes: Vec<String>,
+    /// The endpoint the card names as primary, the one
+    /// the card reading resolves. A change here is
+    /// substance, never display, however it is reached.
+    pub endpoint: Option<String>,
+    pub remainder_sha256: String,
+}
+
 /// What generation recorded about one MCP server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpBaseline {
@@ -81,6 +106,13 @@ pub struct McpBaseline {
     /// field defaults to true for them.
     #[serde(default = "enumerated_by_default")]
     pub capabilities_enumerated: bool,
+    /// The server card's display record, when generation
+    /// had the card document in hand. Baselines written
+    /// before the display comparison existed record none,
+    /// and their cards are judged by digest alone, as
+    /// they always were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_display: Option<CardDisplay>,
     /// The auth posture at generation time, with metadata records.
     pub auth: AuthBaseline,
 }
@@ -320,6 +352,7 @@ impl McpBaseline {
             resources: snapshot.resources.clone(),
             prompts: snapshot.prompts.clone(),
             capabilities_enumerated: snapshot.capabilities_enumerated,
+            card_display: None,
             auth: AuthBaseline::from(&snapshot.auth),
         }
     }
@@ -378,5 +411,33 @@ mod tests {
         }"#;
         let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
         assert!(baseline.openapi.is_empty());
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_display_slice_still_parses() {
+        // The display slice added card_display to the MCP
+        // record with a serde default. A committed baseline
+        // from before the slice has an MCP record with no
+        // such key, and it must still load with the field
+        // absent, or every existing baseline breaks.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": {
+                "entry_id": "urn:air:example.com:mcp:demo",
+                "server_name": "demo",
+                "server_version": "0.1.0",
+                "protocol_version": "2025-06-18",
+                "tools": {},
+                "resources": [],
+                "prompts": [],
+                "auth": "Open"
+            },
+            "skills": [],
+            "artifacts": [],
+            "provenance": []
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        let mcp = baseline.mcp.expect("mcp record");
+        assert!(mcp.card_display.is_none());
     }
 }

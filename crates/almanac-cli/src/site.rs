@@ -18,8 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use almanac_core::Severity;
 use almanac_core::a2a::{A2aView, reduce_agent_card};
 use almanac_core::baseline::{
-    A2aBaseline, ArtifactBaseline, Baseline, EntryProvenance, McpBaseline, OpenApiBaseline,
-    SkillBaseline,
+    A2aBaseline, ArtifactBaseline, Baseline, CardDisplay, EntryProvenance, McpBaseline,
+    OpenApiBaseline, SkillBaseline,
 };
 use almanac_core::catalog::{Catalog, Entry, Host};
 use almanac_core::drift::{self, CardView, CheckInputs, Report, Suppression};
@@ -281,6 +281,100 @@ struct CardFields {
 /// card carrying neither speaks the earlier shape.
 fn final_shaped(card: &serde_json::Value) -> bool {
     card.get("$schema").is_some() || card.get("remotes").is_some()
+}
+
+/// The display keys a server card carries, the fields a
+/// reader sees rather than a consumer depends on. The
+/// extraction reads in card_display below are this
+/// list's other half: a key read there and not removed
+/// here would leave its edits inside the remainder,
+/// silently reclassifying them as substantive.
+const DISPLAY_KEYS: [&str; 5] = ["title", "displayName", "description", "icons", "websiteUrl"];
+
+/// A server card's display record, the reduction the
+/// baseline keeps and check compares: the display
+/// fields read plainly, the primary endpoint the card
+/// reading resolves, and a hash of the remainder, the
+/// card with the display keys removed and its remotes
+/// sorted, so a pure reorder of the remote list leaves
+/// the remainder unchanged while any change to a
+/// remote's own content moves it. The hash is the core
+/// hash module's canonical JSON hash, the same bytes
+/// every other baseline hash is taken over.
+fn card_display(card: &serde_json::Value) -> CardDisplay {
+    let text = |key: &str| {
+        card.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let icons = card
+        .get("icons")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|icon| {
+                    icon.get("src")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| serde_json::to_string(icon).expect("an icon serializes"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let remotes = card
+        .get("remotes")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|r| r.get("url").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut remainder = card.clone();
+    if let Some(object) = remainder.as_object_mut() {
+        for key in DISPLAY_KEYS {
+            object.remove(key);
+        }
+        if let Some(remotes) = object.get_mut("remotes").and_then(|v| v.as_array_mut()) {
+            remotes.sort_by_key(|r| serde_json::to_string(r).expect("a remote serializes"));
+            // A remote's protocol versions past the first
+            // are a preference list, as the remote order
+            // is; the first names the version the card
+            // reading takes, so it stays in place and any
+            // change to it moves the remainder.
+            for remote in remotes.iter_mut() {
+                if let Some(versions) = remote
+                    .get_mut("supportedProtocolVersions")
+                    .and_then(|v| v.as_array_mut())
+                    && versions.len() > 1
+                {
+                    versions[1..].sort_by_key(|v| v.as_str().unwrap_or_default().to_string());
+                }
+            }
+        }
+    }
+    CardDisplay {
+        title: text("title").or_else(|| text("displayName")),
+        description: text("description"),
+        icons,
+        website_url: text("websiteUrl"),
+        remotes,
+        endpoint: card_fields(card).endpoint,
+        remainder_sha256: hash::sha256_json(&remainder),
+    }
+}
+
+/// Record a server card's display fields on a baseline
+/// built from its snapshot, from the card bytes in hand.
+/// Shared by generate and migrate, as every other step
+/// the two commands both take is shared.
+fn record_card_display(mut baseline: McpBaseline, card_bytes: &[u8]) -> McpBaseline {
+    if let Ok(card) = serde_json::from_slice::<serde_json::Value>(card_bytes) {
+        baseline.card_display = Some(card_display(&card));
+    }
+    baseline
 }
 
 fn card_fields(card: &serde_json::Value) -> CardFields {
@@ -837,7 +931,10 @@ pub fn generate(
                 updated_at: None,
                 trust_manifest: None,
             });
-            mcp_baseline = Some(McpBaseline::from_snapshot(&entry_id, &snapshot));
+            mcp_baseline = Some(record_card_display(
+                McpBaseline::from_snapshot(&entry_id, &snapshot),
+                &card_bytes,
+            ));
             artifacts.push(ArtifactBaseline {
                 entry_id: entry_id.clone(),
                 url: card_url,
@@ -1871,9 +1968,24 @@ pub fn check(
     let fetching = fetch_remote || matches!(target, Some(ProbeTarget::Http(_)));
     let fetcher = probe_http::DocumentFetcher::new();
     let mut artifact_digests: Vec<(String, Option<String>)> = Vec::new();
+    let mut card_displays: Vec<(String, CardDisplay)> = Vec::new();
     for artifact in &baseline.artifacts {
+        // A server card's bytes are also reduced to their
+        // display record, so the core can tell a display
+        // only change from a substantive one.
+        let is_card = published.entries.iter().any(|e| {
+            e.identifier == artifact.entry_id && e.media_type == "application/mcp-server-card+json"
+        });
+        let mut record_display = |bytes: &[u8]| {
+            if is_card && let Ok(card) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                card_displays.push((artifact.url.clone(), card_display(&card)));
+            }
+        };
         if let Some(path) = url_to_path(site, &published.host.domain, &artifact.url) {
-            let digest = fs::read(&path).ok().map(|bytes| hash::sha256_hex(&bytes));
+            let digest = fs::read(&path).ok().map(|bytes| {
+                record_display(&bytes);
+                hash::sha256_hex(&bytes)
+            });
             artifact_digests.push((artifact.url.clone(), digest));
         } else if fetching {
             // The digest channel carries no reason, so a
@@ -1888,7 +2000,10 @@ pub fn check(
                 fetching,
                 "the artifact is missing where its catalog entry points",
             ) {
-                Ok(bytes) => Some(hash::sha256_hex(&bytes)),
+                Ok(bytes) => {
+                    record_display(&bytes);
+                    Some(hash::sha256_hex(&bytes))
+                }
                 Err(reason) => {
                     eprintln!("note, for the artifact at {}, {reason}", artifact.url);
                     None
@@ -1995,6 +2110,7 @@ pub fn check(
         snapshot: snapshot.as_ref(),
         skill_hashes: &skill_hashes,
         artifact_digests: &artifact_digests,
+        card_displays: &card_displays,
         present_skill_ids: &present_skill_ids,
         card: card.as_ref(),
         agents_json_endpoints: agents_json_endpoints.as_deref(),
@@ -2412,7 +2528,10 @@ pub fn migrate_site(
                     ));
                 }
                 kept.version = Some(snap.server_version.clone());
-                mcp_baseline = Some(McpBaseline::from_snapshot(id, snap));
+                mcp_baseline = Some(record_card_display(
+                    McpBaseline::from_snapshot(id, snap),
+                    bytes,
+                ));
                 artifacts.push(ArtifactBaseline {
                     entry_id: id.to_string(),
                     url: card_url,
