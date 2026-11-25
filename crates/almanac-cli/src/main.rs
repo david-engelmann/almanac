@@ -53,6 +53,10 @@ or a skill instead: a REST only site is generated from those
 inputs alone, with no MCP entry and no server card. A generate
 run that names no target and no inputs at all refuses.
 Validate reads a whole site, or one catalog file with --file PATH.
+Validate verifies trust manifest signatures with keys from
+--trust-keys PATH (a JWKS document or a single JWK), and with
+--fetch-keys it also resolves a did:web identity's document
+over HTTPS to find its keys.
 Migrate writes CI wiring to --ci PATH when it migrates a site.
 A protected surface is probed live when a publisher credential
 is available. The token is read from the environment variable
@@ -75,6 +79,8 @@ struct Flags {
     queries: Vec<String>,
     token_env: Option<String>,
     fetch_remote: bool,
+    trust_keys: Option<String>,
+    fetch_keys: bool,
     command: Vec<String>,
 }
 
@@ -89,6 +95,11 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         if arg == "--fetch-remote" {
             flags.fetch_remote = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--fetch-keys" {
+            flags.fetch_keys = true;
             i += 1;
             continue;
         }
@@ -114,6 +125,7 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--ci" => flags.ci = Some(value(i)?),
             "--fail-at" => flags.fail_at = Some(value(i)?),
             "--token-env" => flags.token_env = Some(value(i)?),
+            "--trust-keys" => flags.trust_keys = Some(value(i)?),
             "--queries" => {
                 flags.queries = value(i)?.split(',').map(|q| q.trim().to_string()).collect()
             }
@@ -153,6 +165,21 @@ fn token(flags: &Flags) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The trust key flags belong to validate alone. Another
+/// command refuses them outright rather than accepting
+/// and silently ignoring them, which would let an
+/// operator believe signatures were gated when no
+/// verification ran.
+fn refuse_trust_flags(flags: &Flags) -> Result<(), String> {
+    if flags.trust_keys.is_some() {
+        return Err("--trust-keys applies to validate only".into());
+    }
+    if flags.fetch_keys {
+        return Err("--fetch-keys applies to validate only".into());
+    }
+    Ok(())
+}
+
 fn fail_at(flags: &Flags) -> Result<Severity, String> {
     match flags.fail_at.as_deref() {
         None | Some("major") => Ok(Severity::Major),
@@ -175,6 +202,7 @@ fn run() -> Result<i32, String> {
         }
         "generate" => {
             let flags = parse_flags(&args[1..])?;
+            refuse_trust_flags(&flags)?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let domain = flags
                 .domain
@@ -199,6 +227,7 @@ fn run() -> Result<i32, String> {
         }
         "check" => {
             let flags = parse_flags(&args[1..])?;
+            refuse_trust_flags(&flags)?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let target = target(&flags)?;
             site::check(
@@ -211,16 +240,22 @@ fn run() -> Result<i32, String> {
         }
         "validate" => {
             let flags = parse_flags(&args[1..])?;
+            let trust_keys = flags.trust_keys.as_deref().map(PathBuf::from);
             match &flags.file {
-                Some(file) => site::validate_file(&PathBuf::from(file)),
+                Some(file) => site::validate_file(
+                    &PathBuf::from(file),
+                    trust_keys.as_deref(),
+                    flags.fetch_keys,
+                ),
                 None => {
                     let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
-                    site::validate_site(&site)
+                    site::validate_site(&site, trust_keys.as_deref(), flags.fetch_keys)
                 }
             }
         }
         "migrate" => {
             let flags = parse_flags(&args[1..])?;
+            refuse_trust_flags(&flags)?;
             let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
             let target = target(&flags)?;
             let ci = PathBuf::from(

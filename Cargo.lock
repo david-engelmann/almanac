@@ -24,6 +24,8 @@ dependencies = [
 name = "almanac-core"
 version = "0.1.0"
 dependencies = [
+ "ring",
+ "ryu",
  "serde",
  "serde_json",
  "sha2",

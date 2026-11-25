@@ -930,6 +930,7 @@ pub fn generate(
                 digest: Some(hash::digest_field(&card_bytes)),
                 updated_at: None,
                 trust_manifest: None,
+                trust_manifests: vec![],
             });
             mcp_baseline = Some(record_card_display(
                 McpBaseline::from_snapshot(&entry_id, &snapshot),
@@ -1015,6 +1016,7 @@ pub fn generate(
                 digest: Some(hash::digest_field(&bytes)),
                 updated_at: None,
                 trust_manifest: None,
+                trust_manifests: vec![],
             });
             skills.push(SkillBaseline {
                 entry_id: skill_id.clone(),
@@ -1209,6 +1211,7 @@ pub fn generate(
             digest: Some(hash::digest_field(&plan.bytes)),
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         });
         openapi.push(OpenApiBaseline::from_view(
             &plan.api_id,
@@ -1384,6 +1387,7 @@ pub fn generate(
             digest: Some(hash::digest_field(&plan.bytes)),
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         });
         a2a.push(A2aBaseline::from_view(
             &plan.card_id,
@@ -2198,7 +2202,11 @@ pub fn check(
 /// Exit 1 when any finding is major or above, 0 when the
 /// catalog is sound or only warns. An Err is a catalog that
 /// could not be read, exit 2 at the caller.
-pub fn validate_site(site: &Path) -> Result<i32, String> {
+pub fn validate_site(
+    site: &Path,
+    trust_keys: Option<&Path>,
+    fetch_keys: bool,
+) -> Result<i32, String> {
     let published: Catalog = read_json(&site.join(".well-known/ard.json"))?;
     let legacy_path = site.join(".well-known/ai-catalog.json");
     let legacy: Option<Catalog> = if legacy_path.exists() {
@@ -2206,13 +2214,104 @@ pub fn validate_site(site: &Path) -> Result<i32, String> {
     } else {
         None
     };
-    Ok(report_validation(&published, legacy.as_ref()))
+    report_validation(&published, legacy.as_ref(), trust_keys, fetch_keys)
 }
 
 /// The validate command over one catalog file.
-pub fn validate_file(path: &Path) -> Result<i32, String> {
+pub fn validate_file(
+    path: &Path,
+    trust_keys: Option<&Path>,
+    fetch_keys: bool,
+) -> Result<i32, String> {
     let published: Catalog = read_json(path)?;
-    Ok(report_validation(&published, None))
+    report_validation(&published, None, trust_keys, fetch_keys)
+}
+
+/// The DID document URL a did:web identity resolves at:
+/// the plain form at the domain's well-known path, the
+/// path form with its segments as directories.
+fn did_web_document_url(identity: &str) -> Option<String> {
+    let rest = identity.strip_prefix("did:web:")?;
+    let mut segments = rest.split(':');
+    let domain = segments.next()?;
+    if domain.is_empty() {
+        return None;
+    }
+    let path: Vec<&str> = segments.collect();
+    if path.iter().any(|segment| segment.is_empty()) {
+        return None;
+    }
+    if path.is_empty() {
+        Some(format!("https://{domain}/.well-known/did.json"))
+    } else {
+        Some(format!("https://{domain}/{}/did.json", path.join("/")))
+    }
+}
+
+/// The verification keys a validate run holds: the keys
+/// file's, when one is named (a JWKS document or a single
+/// JWK), and, when the run fetches keys, the keys each
+/// did:web identity's document carries, resolved through
+/// the guarded fetcher. A document that cannot be fetched
+/// or read contributes no keys and says why on stderr;
+/// the signature it would have judged then reports
+/// unverified, naming the key it could not find.
+fn validation_keys(
+    published: &Catalog,
+    trust_keys: Option<&Path>,
+    fetch_keys: bool,
+) -> Result<Vec<almanac_core::trust::TrustKey>, String> {
+    let mut keys = Vec::new();
+    if let Some(path) = trust_keys {
+        let raw = std::fs::read(path).map_err(|e| {
+            format!(
+                "the trust keys file {} could not be read: {e}",
+                path.display()
+            )
+        })?;
+        let document: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| format!("the trust keys file {} is not JSON: {e}", path.display()))?;
+        keys.extend(almanac_core::trust::trust_keys_from_jwks(&document));
+    }
+    if fetch_keys {
+        let fetcher = probe_http::DocumentFetcher::new();
+        let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let manifests = published
+            .entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .trust_manifest
+                    .iter()
+                    .chain(entry.trust_manifests.iter())
+            })
+            .collect::<Vec<_>>();
+        for manifest in manifests {
+            let Some(identity) = manifest.get("identity").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(url) = did_web_document_url(identity) else {
+                continue;
+            };
+            if !resolved.insert(url.clone()) {
+                continue;
+            }
+            match fetcher.fetch(&url) {
+                Ok(raw) => match serde_json::from_slice::<serde_json::Value>(&raw) {
+                    Ok(document) => {
+                        keys.extend(almanac_core::trust::trust_keys_from_did_document(&document));
+                    }
+                    Err(e) => {
+                        eprintln!("note, for the DID document at {url}, it is not JSON ({e})");
+                    }
+                },
+                Err(reason) => {
+                    eprintln!("note, for the DID document at {url}, {reason}");
+                }
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// One entry migration could not verify, with the reason.
@@ -2971,13 +3070,24 @@ fn write_ci(
     Ok(())
 }
 
-fn report_validation(published: &Catalog, legacy: Option<&Catalog>) -> i32 {
+fn report_validation(
+    published: &Catalog,
+    legacy: Option<&Catalog>,
+    trust_keys: Option<&Path>,
+    fetch_keys: bool,
+) -> Result<i32, String> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let findings =
-        almanac_core::validate::validate_catalog(published, legacy, &today_utc(), now_unix);
+    let keys = validation_keys(published, trust_keys, fetch_keys)?;
+    let findings = almanac_core::validate::validate_catalog_with_keys(
+        published,
+        legacy,
+        &today_utc(),
+        now_unix,
+        &keys,
+    );
     let report = Report::new(findings, Severity::Major);
     let printed = PrintedReport {
         mode: "validate",
@@ -2987,7 +3097,7 @@ fn report_validation(published: &Catalog, legacy: Option<&Catalog>) -> i32 {
         "{}",
         serde_json::to_string_pretty(&printed).expect("the report always serializes")
     );
-    drift::exit_code(&report.findings, Severity::Major)
+    Ok(drift::exit_code(&report.findings, Severity::Major))
 }
 
 #[cfg(test)]

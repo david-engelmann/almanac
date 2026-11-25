@@ -4048,3 +4048,91 @@ fn credentialed_probe_walks_a_protected_surface() {
         "stderr was {stderr}"
     );
 }
+
+#[test]
+fn validate_verifies_a_trust_manifest_signature_with_supplied_keys() {
+    // The core suite's ES256 fixture, end to end through
+    // the binary: the same JWK, the same signed manifest.
+    let dir = temp_site("trust-validate");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let signature = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ.._JNWqS8t8CWplUrJOvIPW_UiNQ_6pwTC8NTbZyEJEHivmugANeHTwTDP3UYw7SU6Yirz5DknxMsRln6MIdFdXw";
+    let catalog = format!(
+        r#"{{
+  "host": {{"displayName": "Example", "domain": "example.com"}},
+  "entries": [{{
+    "identifier": "urn:air:example.com:mcp:demo",
+    "displayName": "Demo",
+    "type": "application/mcp-server-card+json",
+    "url": "https://example.com/mcp",
+    "description": "A demo server.",
+    "representativeQueries": ["one", "two"],
+    "digest": "{digest}",
+    "trustManifest": {{
+      "identity": "did:web:example.com",
+      "issuedAt": "2026-11-20T00:00:00Z",
+      "expiresAt": "2027-06-01",
+      "subject": {{
+        "identifier": "urn:air:example.com:mcp:demo",
+        "type": "application/mcp-server-card+json",
+        "digest": "{digest}"
+      }},
+      "signature": "{signature}"
+    }}
+  }}]
+}}"#
+    );
+    let catalog_path = dir.join("catalog.json");
+    std::fs::write(&catalog_path, &catalog).expect("write catalog");
+    let keys_path = dir.join("keys.json");
+    std::fs::write(
+        &keys_path,
+        r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"did:web:example.com#key-1","x":"KFvtK60fJVnMb4stS4hJSzf4U37o4zyW2oy0fuOL_Ow","y":"C43rXNNfvh4McIabWEirso0xH2eDtSDCVfupwMHs7mE"}]}"#,
+    )
+    .expect("write keys");
+
+    // With the key, the envelope verifies and validate
+    // is clean.
+    let (code, stdout, _) = run(&[
+        "validate",
+        "--file",
+        &catalog_path.to_string_lossy(),
+        "--trust-keys",
+        &keys_path.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "signed validate failed with {stdout}");
+    assert!(!stdout.contains("trust-manifest"), "report was {stdout}");
+
+    // Without a key the signature reports unverified, a
+    // warning, and validate still passes.
+    let (code, stdout, _) = run(&["validate", "--file", &catalog_path.to_string_lossy()]);
+    assert_eq!(code, 0, "keyless validate failed with {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-signature-unverified"),
+        "report was {stdout}"
+    );
+
+    // A tampered subject digest breaks both the binding
+    // and the signature, and validate fails.
+    let tampered = catalog.replace(
+        &format!("\"digest\": \"{digest}\"\n      }},"),
+        &format!("\"digest\": \"sha256:{}\"\n      }},", "b".repeat(64)),
+    );
+    assert_ne!(tampered, catalog, "the tamper must change the file");
+    std::fs::write(&catalog_path, &tampered).expect("write tampered catalog");
+    let (code, stdout, _) = run(&[
+        "validate",
+        "--file",
+        &catalog_path.to_string_lossy(),
+        "--trust-keys",
+        &keys_path.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "tampered validate passed with {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-subject-mismatch"),
+        "report was {stdout}"
+    );
+    assert!(
+        stdout.contains("trust-manifest-signature-invalid"),
+        "report was {stdout}"
+    );
+}

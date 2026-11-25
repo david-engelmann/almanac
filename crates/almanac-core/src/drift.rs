@@ -1512,6 +1512,7 @@ mod tests {
                 digest: None,
                 updated_at: None,
                 trust_manifest: None,
+                trust_manifests: vec![],
             }],
         }
     }
@@ -2002,6 +2003,7 @@ mod tests {
             digest: None,
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         });
         (cat, base, view)
     }
@@ -2054,6 +2056,7 @@ mod tests {
             digest: None,
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         });
         (cat, base, view)
     }

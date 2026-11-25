@@ -664,7 +664,10 @@ Rust, the fleet default, with no exception requested.
   core, and hashes over canonical bytes for schemas, cards and skill
   files. Where trust manifest verification arrives later, RFC 8785
   canonicalisation is the known requirement and the fleet already
-  carries that experience in verirun.
+  carries that experience in verirun. It has since arrived. The core
+  carries an RFC 8785 module, and validate verifies trust manifest
+  signatures over the canonical bytes, as the trust manifest
+  verification section of DECISIONS.md records.
 - Distribution. The binary is named almanac and the crates are
   almanac-core and almanac-cli, the bare crate name belonging to a
   dormant calendar tool, as section 1 records. The crates publish to
@@ -739,7 +742,13 @@ hashed into the baseline. C is approved, the agents.json cross check
 joins version 1 as a minor drift class, read and cross checked, never
 generated in version 1. D is approved, trust manifest signing is
 deferred, version 1 validates shape and expiry only, with no JWS and
-no key management. E is approved, representative queries are
+no key management. A later ruling narrows D without lifting it.
+Main approved the verification design on 2026-11-25, and validate
+now also verifies the signatures publishers place on their trust
+manifests, subject binding, identity binding, and the ES256
+signature itself, under the IETF draft's rules. Signing and key
+management remain deferred in full. The design and the build are
+recorded in DECISIONS.md under trust manifest verification. E is approved, representative queries are
 templated or configured and never model generated, and determinism
 binds in full. Main also accepted the test's stated limits as stated.
 The source level rename with a rebuild is owed as the stronger

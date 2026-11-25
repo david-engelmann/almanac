@@ -60,11 +60,23 @@ pub struct Entry {
     #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     /// The trust manifest, carried as the draft defines it.
-    /// Almanac validates its shape and expiry only, per
-    /// Amendment D. It never verifies the signature in version 1
-    /// and holds no key material.
+    /// Almanac validates its shape and expiry and, in the
+    /// validate command, verifies its signature under the
+    /// draft's rules. Signing stays outside the tool, per
+    /// Amendment D.
     #[serde(rename = "trustManifest", skip_serializing_if = "Option::is_none")]
     pub trust_manifest: Option<serde_json::Value>,
+    /// Third-party trust manifests, the draft's
+    /// trustManifests array: signed envelopes from
+    /// evaluators other than the publisher, carried so
+    /// they survive a parse and can be verified, never
+    /// silently dropped.
+    #[serde(
+        rename = "trustManifests",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub trust_manifests: Vec<serde_json::Value>,
 }
 
 impl Entry {
@@ -120,6 +132,7 @@ mod tests {
             digest: None,
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         }
     }
 

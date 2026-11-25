@@ -18,9 +18,11 @@ pub mod baseline;
 pub mod catalog;
 pub mod drift;
 pub mod hash;
+pub mod jcs;
 pub mod metadata;
 pub mod openapi;
 pub mod snapshot;
+pub mod trust;
 pub mod validate;
 
 use serde::{Deserialize, Serialize};
