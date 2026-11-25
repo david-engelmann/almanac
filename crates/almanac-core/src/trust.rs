@@ -10,6 +10,46 @@
 
 use serde_json::Value;
 
+use crate::catalog::Entry;
+use crate::hash;
+use crate::jcs;
+
+/// Whether a manifest presents itself as the draft's
+/// signed envelope: it carries any of the envelope's
+/// defining members. A manifest carrying none of them
+/// is the earlier expiry-only form, judged on expiry
+/// alone wherever it surfaces.
+pub fn is_envelope(manifest: &Value) -> bool {
+    manifest.get("identity").is_some()
+        || manifest.get("subject").is_some()
+        || manifest.get("signature").is_some()
+}
+
+/// The hashes a baseline records for one entry's
+/// trust envelopes: the sha256 of each envelope's
+/// JCS canonical bytes, the singular manifest first
+/// and then the plural array's, sorted so the record
+/// is stable under reordering of the array. Only
+/// envelopes are recorded; an expiry-only manifest
+/// is not an envelope and earns no record, so the
+/// removal class it feeds measures envelopes, as it
+/// promises. An envelope that cannot be
+/// canonicalized is not recorded; the envelope
+/// layers report it on their own terms wherever it
+/// is judged.
+pub fn trust_manifest_hashes(entry: &Entry) -> Vec<String> {
+    let mut hashes: Vec<String> = entry
+        .trust_manifest
+        .iter()
+        .chain(entry.trust_manifests.iter())
+        .filter(|manifest| is_envelope(manifest))
+        .filter_map(|manifest| jcs::canonicalize(manifest).ok())
+        .map(|bytes| hash::sha256_hex(&bytes))
+        .collect();
+    hashes.sort();
+    hashes
+}
+
 /// One P-256 verification key, with the identifier a
 /// JWS header names it by when it names one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +300,35 @@ mod tests {
         assert_eq!(b64url_decode("Zg==").unwrap(), b"f");
         // A lone character is 1 mod 4, no encoding at all.
         assert!(b64url_decode("Z").is_none());
+    }
+
+    #[test]
+    fn manifest_hashes_record_envelopes_only_over_canonical_bytes() {
+        // The record pins the sha256 of the envelope's
+        // canonical form, the canonical text written by
+        // hand here, so the pin does not ride on the
+        // canonicalizer it also exercises. An expiry-only
+        // manifest is not an envelope and earns no hash.
+        let mut entry = Entry {
+            identifier: "urn:air:example.com:mcp:demo".into(),
+            display_name: "Demo".into(),
+            media_type: "application/mcp-server-card+json".into(),
+            url: None,
+            data: None,
+            description: "A demo server.".into(),
+            capabilities: vec![],
+            representative_queries: vec![],
+            tags: vec![],
+            version: None,
+            digest: None,
+            updated_at: None,
+            trust_manifest: Some(json!({"identity": "did:web:example.com"})),
+            trust_manifests: vec![json!({"expiresAt": "2999-01-01"})],
+        };
+        let expected = hash::sha256_hex(b"{\"identity\":\"did:web:example.com\"}");
+        assert_eq!(trust_manifest_hashes(&entry), vec![expected]);
+        entry.trust_manifest = None;
+        assert!(trust_manifest_hashes(&entry).is_empty());
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::Severity;
 use crate::catalog::{Catalog, Entry};
 use crate::drift::Finding;
 use crate::jcs;
-use crate::trust::{SignatureVerdict, TrustKey, verify_detached_jws};
+use crate::trust::{SignatureVerdict, TrustKey, is_envelope, verify_detached_jws};
 
 fn finding(severity: Severity, kind: &str, entry: Option<&str>, detail: String) -> Finding {
     Finding {
@@ -207,6 +207,54 @@ pub fn validate_catalog_with_keys(
     keys: &[TrustKey],
 ) -> Vec<Finding> {
     let mut findings = validate_catalog(published, legacy, today, now_unix);
+    // The plain pass already judged the singular
+    // manifests' expiry, so the shared pass skips it.
+    envelope_pass(published, today, now_unix, Some(keys), false, &mut findings);
+    sort_findings(&mut findings);
+    findings
+}
+
+/// The envelope findings a check run assembles over
+/// the published catalog: expiry and the envelope
+/// layers for every manifest an entry carries, the
+/// singular manifest's expiry included, since check
+/// runs no plain validation pass to have judged it.
+/// `keys` is the run's key set when it holds one;
+/// without one the signature layer makes no claim,
+/// the scoping the check integration design records.
+/// Findings come back in the report's deterministic
+/// order, as the validate entry points return them.
+/// The removal judgment against the baseline is the
+/// drift module's, beside the other baseline classes.
+pub fn envelope_findings(
+    published: &Catalog,
+    today: &str,
+    now_unix: i64,
+    keys: Option<&[TrustKey]>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    envelope_pass(published, today, now_unix, keys, true, &mut findings);
+    sort_findings(&mut findings);
+    findings
+}
+
+/// The one envelope pass both verification surfaces
+/// run, so a manifest is judged identically wherever
+/// it surfaces: validate's keyed pass over the plain
+/// pass's findings, and check's trust pass standing
+/// alone. `judge_singular_expiry` is set when no
+/// plain pass ran ahead of this one to judge the
+/// singular manifests' expiry. A manifest repeated
+/// across the slots, or twice in the array, is
+/// judged once, in its first slot.
+fn envelope_pass(
+    published: &Catalog,
+    today: &str,
+    now_unix: i64,
+    keys: Option<&[TrustKey]>,
+    judge_singular_expiry: bool,
+    findings: &mut Vec<Finding>,
+) {
     for entry in &published.entries {
         // Identity binds to the publisher segment of the
         // entry's own URN, the draft's section 3.5.1 rule;
@@ -215,16 +263,23 @@ pub fn validate_catalog_with_keys(
         let publisher = urn_publisher(&entry.identifier)
             .unwrap_or(published.host.domain.as_str())
             .to_string();
+        let mut judged: Vec<&serde_json::Value> = Vec::new();
         if let Some(manifest) = &entry.trust_manifest {
-            verify_envelope(manifest, entry, &publisher, keys, false, &mut findings);
+            if judge_singular_expiry {
+                validate_trust_manifest(manifest, &entry.identifier, today, now_unix, findings);
+            }
+            verify_envelope(manifest, entry, &publisher, keys, false, findings);
+            judged.push(manifest);
         }
         for manifest in &entry.trust_manifests {
-            validate_trust_manifest(manifest, &entry.identifier, today, now_unix, &mut findings);
-            verify_envelope(manifest, entry, &publisher, keys, true, &mut findings);
+            if judged.contains(&manifest) {
+                continue;
+            }
+            judged.push(manifest);
+            validate_trust_manifest(manifest, &entry.identifier, today, now_unix, findings);
+            verify_envelope(manifest, entry, &publisher, keys, true, findings);
         }
     }
-    sort_findings(&mut findings);
-    findings
 }
 
 /// The publisher segment of a domain anchored URN,
@@ -238,17 +293,6 @@ fn urn_publisher(identifier: &str) -> Option<&str> {
     } else {
         Some(segment)
     }
-}
-
-/// Whether a manifest presents itself as the draft's
-/// signed envelope: it carries any of the envelope's
-/// defining members. A manifest carrying none of them
-/// is the earlier expiry-only form, and the plain pass
-/// has already judged all of it this build judges.
-fn is_envelope(manifest: &serde_json::Value) -> bool {
-    manifest.get("identity").is_some()
-        || manifest.get("subject").is_some()
-        || manifest.get("signature").is_some()
 }
 
 /// Whether an identity binds to a publisher domain, the
@@ -280,7 +324,7 @@ fn verify_envelope(
     manifest: &serde_json::Value,
     entry: &Entry,
     publisher: &str,
-    keys: &[TrustKey],
+    keys: Option<&[TrustKey]>,
     third_party: bool,
     findings: &mut Vec<Finding>,
 ) {
@@ -400,6 +444,13 @@ fn verify_envelope(
             Some(id),
             "trust manifest signature is not a string".into(),
         ));
+        return;
+    };
+    // The verdict runs only in a run that holds keys.
+    // A run without them judges the envelope's shape
+    // and bindings and makes no signature claim at all,
+    // the check gate's scoping in the design record.
+    let Some(keys) = keys else {
         return;
     };
     let mut unsigned = manifest.clone();
@@ -646,8 +697,9 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "trust-manifest-signature-unverified");
         assert_eq!(findings[0].severity, Severity::Minor);
-        // The plain pass, which check uses, judges no
-        // envelope layer at all.
+        // The plain pass judges no envelope layer at
+        // all; the layers are the keyed pass's, and
+        // check's through envelope_findings.
         assert!(
             validate_catalog(&catalog_with(signed_entry()), None, "2026-11-21", NOW).is_empty()
         );
@@ -686,6 +738,37 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.kind == "trust-manifest-signature-invalid")
+        );
+    }
+
+    #[test]
+    fn check_envelope_findings_judge_bindings_without_keys_and_verdicts_with() {
+        // The check gate's scoping: without keys the
+        // envelope layers judge shape, bindings and
+        // expiry and make no signature claim; with keys
+        // the verdict joins, and the fixture's signature
+        // is valid, so a keyed run is clean.
+        let catalog = catalog_with(signed_entry());
+        let unkeyed = envelope_findings(&catalog, "2026-11-25", NOW, None);
+        assert!(
+            unkeyed
+                .iter()
+                .all(|f| !f.kind.starts_with("trust-manifest-signature")),
+            "{unkeyed:?}"
+        );
+        let keyed = envelope_findings(&catalog, "2026-11-25", NOW, Some(&fixture_keys()));
+        assert!(keyed.is_empty(), "{keyed:?}");
+        // A tampered subject is a binding failure in
+        // both scopings.
+        let mut tampered = signed_entry();
+        tampered.trust_manifest.as_mut().unwrap()["subject"]["digest"] =
+            serde_json::json!(format!("sha256:{}", "b".repeat(64)));
+        let unkeyed = envelope_findings(&catalog_with(tampered), "2026-11-25", NOW, None);
+        assert!(
+            unkeyed
+                .iter()
+                .any(|f| f.kind == "trust-manifest-subject-mismatch"),
+            "{unkeyed:?}"
         );
     }
 
