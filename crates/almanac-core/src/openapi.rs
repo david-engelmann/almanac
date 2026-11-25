@@ -188,7 +188,7 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
                     };
                     let required_flag = param
                         .get("required")
-                        .and_then(|v| v.as_bool())
+                        .and_then(crate::read_bool)
                         .unwrap_or(false);
                     if required_flag && let Some(name) = param.get("name").and_then(|v| v.as_str())
                     {
@@ -655,6 +655,53 @@ mod tests {
         dup["paths"]["/charges"]["get"]["operationId"] = serde_json::json!("createCharge");
         let err = reduce_openapi(&dup).expect_err("duplicates refuse");
         assert!(err.contains("createCharge"), "error was {err}");
+    }
+
+    #[test]
+    fn boolean_spellings_read_at_the_required_flag() {
+        // The YAML 1.1 spellings arrive as strings and
+        // read as the booleans they mean, at the one
+        // boolean position this reduction reads. Each
+        // posture is the only route to its outcome.
+        let required_of = |document: &Value| {
+            reduce_openapi(document)
+                .expect("reduces")
+                .operations
+                .iter()
+                .find(|o| o.id == "createCharge")
+                .expect("the operation")
+                .required
+                .clone()
+        };
+        let mut document = doc();
+        document["paths"]["/charges"]["post"]["parameters"] = serde_json::json!([
+            {"name": "word", "in": "query", "required": "yes"},
+            {"name": "cased", "in": "query", "required": "Off"},
+            {"name": "letter", "in": "query", "required": "y"},
+            {"name": "other", "in": "query", "required": "perhaps"},
+            {"$ref": "#/components/parameters/Shared"}
+        ]);
+        document["components"] = serde_json::json!({
+            "parameters": {"Shared": {"name": "shared", "in": "header", "required": "On"}}
+        });
+        let required = required_of(&document);
+        assert!(required.contains(&"query:word".to_string()), "{required:?}");
+        assert!(
+            required.contains(&"header:shared".to_string()),
+            "{required:?}"
+        );
+        assert!(
+            !required.contains(&"query:cased".to_string()),
+            "{required:?}"
+        );
+        assert!(
+            !required.contains(&"query:letter".to_string()),
+            "{required:?}"
+        );
+        assert!(
+            !required.contains(&"query:other".to_string()),
+            "{required:?}"
+        );
     }
 
     #[test]
