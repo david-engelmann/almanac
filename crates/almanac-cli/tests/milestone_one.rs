@@ -2148,6 +2148,39 @@ fn check_fetch_remote(site: &Path) -> (i32, String, String) {
     run(&["check", "--site", &site_arg(site), "--fetch-remote"])
 }
 
+/// The (body, media type) pair serve_typed holds, in
+/// the shape its caller flips between runs.
+type HeldTyped = std::sync::Arc<std::sync::Mutex<(Vec<u8>, String)>>;
+
+/// Serve bytes under a media type the test can change,
+/// for the catalog media type observation. The held
+/// value is the (body, media type) pair.
+fn serve_typed(bytes: Vec<u8>, media_type: &str) -> (String, HeldTyped) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new((bytes, media_type.to_string())));
+    let held = shared.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let held = held.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let (body, media_type) = held.lock().expect("lock").clone();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {media_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), shared)
+}
+
 #[test]
 fn check_fetches_remote_artifacts() {
     // A document and a card the catalog announces at
@@ -2388,6 +2421,64 @@ fn check_with_an_http_target_fetches_remote_artifacts() {
     // The targeted run fetches both and is clean.
     let (code, stdout, _) = run(&["check", "--site", &site_arg(&site), "--url", &url]);
     assert_eq!(code, 0, "targeted check failed with {stdout}");
+}
+
+#[test]
+fn catalog_served_with_a_generic_media_type_warns() {
+    // A fetching run observes the media type the
+    // catalog itself is served with. The site's domain
+    // is the serving address's authority, so the
+    // observation reads what this server answers; the
+    // https attempt cannot be made against a plain
+    // HTTP server, and the run falls back to http.
+    let clean = fixture_binary("fixture_server");
+    let catalog_bytes = b"{}".to_vec();
+    let (base, held) = serve_typed(catalog_bytes, "application/json");
+    let authority = base.trim_start_matches("http://").to_string();
+    let site = temp_site("media-type");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        &authority,
+        "--name",
+        "Example",
+        "--command",
+        &clean.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    // Repo mode observes nothing and reports nothing
+    // for the class.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "repo mode check failed with {stdout}");
+    assert!(
+        !stdout.contains("catalog-media-type"),
+        "report was {stdout}"
+    );
+
+    // A fetching run observes the generic type: one
+    // Minor, and the run still passes at Major.
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(
+        code, 0,
+        "a Minor must not fail the run, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("catalog-media-type") && stdout.contains("application/json"),
+        "report was {stdout}"
+    );
+
+    // Served under its own media type, the observation
+    // is clean.
+    held.lock().expect("lock").1 = "application/ard+json".to_string();
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 0, "check failed with {stdout}");
+    assert!(
+        !stdout.contains("catalog-media-type"),
+        "report was {stdout}"
+    );
 }
 
 #[test]

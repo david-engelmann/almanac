@@ -231,13 +231,24 @@ fn host_is_non_public(url: &str) -> bool {
         return false;
     };
     match ip {
-        IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.octets()[0] == 0,
+        IpAddr::V4(v4) => ipv4_is_non_public(&v4),
         IpAddr::V6(v6) => {
+            // An IPv4-mapped literal (::ffff:a.b.c.d) is
+            // judged as the IPv4 address it names, or the
+            // metadata family would walk in through the
+            // v6 door.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ipv4_is_non_public(&v4);
+            }
             v6.is_unspecified()
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     }
+}
+
+fn ipv4_is_non_public(v4: &std::net::Ipv4Addr) -> bool {
+    v4.is_link_local() || v4.is_unspecified() || v4.octets()[0] == 0
 }
 
 /// The checker's fetcher for public documents the catalog
@@ -308,6 +319,75 @@ impl DocumentFetcher {
         }
         Err("the fetch followed more than three redirects".into())
     }
+
+    /// Observe the media type a URL is served with, for
+    /// the catalog media type check. The outcome keeps
+    /// four cases apart, because the caller answers
+    /// them differently: an observation, an answer that
+    /// observed nothing, a request that could not be
+    /// made at all (the one case the caller answers by
+    /// trying the other scheme), and a refusal (an
+    /// address, or a redirect target, naming a
+    /// non-public literal), which is final. Redirects
+    /// are followed as in fetch.
+    pub(crate) fn fetch_media_type(&self, url: &str) -> MediaTypeOutcome {
+        let mut current = url.to_string();
+        for _ in 0..4 {
+            if host_is_non_public(&current) {
+                return MediaTypeOutcome::Refused;
+            }
+            let Ok(response) = self.agent.get(&current).call() else {
+                return MediaTypeOutcome::CouldNotBeMade;
+            };
+            let status = response.status().as_u16();
+            if status == 200 {
+                return match response.headers().get("content-type") {
+                    None => MediaTypeOutcome::Observed(String::new()),
+                    Some(value) => match value.to_str() {
+                        Ok(text) => MediaTypeOutcome::Observed(text.to_string()),
+                        // A header in bytes the checker
+                        // will not read is not an
+                        // observation of no type; it is
+                        // no observation.
+                        Err(_) => MediaTypeOutcome::Unobserved,
+                    },
+                };
+            }
+            if (300..400).contains(&status) {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok());
+                match location.and_then(|loc| resolve_location(&current, loc)) {
+                    Some(next) => {
+                        current = next;
+                        continue;
+                    }
+                    None => return MediaTypeOutcome::Unobserved,
+                }
+            }
+            return MediaTypeOutcome::Unobserved;
+        }
+        MediaTypeOutcome::Unobserved
+    }
+}
+
+/// The four outcomes of a media type observation
+/// request; see DocumentFetcher::fetch_media_type.
+pub(crate) enum MediaTypeOutcome {
+    /// A success answer; the value is its Content-Type,
+    /// empty when the answer carried none.
+    Observed(String),
+    /// The server answered without a success, or with
+    /// a redirect chain that went nowhere usable, or
+    /// with a Content-Type in unreadable bytes.
+    Unobserved,
+    /// The request could not be made at all (a
+    /// transport failure).
+    CouldNotBeMade,
+    /// The address, or a redirect target, names a
+    /// non-public literal the checker will not fetch.
+    Refused,
 }
 
 /// Fetch the server card a surface serves. SEP-2127 Final

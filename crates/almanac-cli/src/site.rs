@@ -1967,6 +1967,44 @@ pub fn check(
     // stays offline.
     let fetching = fetch_remote || matches!(target, Some(ProbeTarget::Http(_)));
     let fetcher = probe_http::DocumentFetcher::new();
+    // A fetching run also observes the media type the
+    // catalog itself is served with, at the well-known
+    // address on the publisher's own origin. The https
+    // address is tried first, and http only when the
+    // https request could not be made at all. Anything
+    // unobserved (no fetching, an answer that was not a
+    // success, an address the fetcher refuses) leaves
+    // the class silent, because an unobserved serving
+    // is not evidence about the serving. A legacy only
+    // site is not observed: its catalog does not live
+    // at the ard.json address, and its path already
+    // reports at Major on its own. A domain carrying
+    // characters that would change the address's shape
+    // (a slash, a query mark, a userinfo at sign) is
+    // not observed either; the domain is the catalog's
+    // own claim, and the observation is built from it.
+    let domain = &published.host.domain;
+    let catalog_media_type: Option<String> = if fetching
+        && !legacy_only
+        && !domain.contains(['/', '?', '#', '@'])
+        && !domain.chars().any(char::is_whitespace)
+    {
+        use probe_http::MediaTypeOutcome;
+        let https = format!("https://{domain}/.well-known/ard.json");
+        match fetcher.fetch_media_type(&https) {
+            MediaTypeOutcome::Observed(observed) => Some(observed),
+            MediaTypeOutcome::CouldNotBeMade => {
+                let http = format!("http://{domain}/.well-known/ard.json");
+                match fetcher.fetch_media_type(&http) {
+                    MediaTypeOutcome::Observed(observed) => Some(observed),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     let mut artifact_digests: Vec<(String, Option<String>)> = Vec::new();
     let mut card_displays: Vec<(String, CardDisplay)> = Vec::new();
     for artifact in &baseline.artifacts {
@@ -2122,6 +2160,7 @@ pub fn check(
         a2a_broken: &a2a_broken,
         suppressions: &suppressions,
         today: &today,
+        catalog_media_type: catalog_media_type.as_deref(),
     });
     let mode = match &snapshot {
         None => "repo",

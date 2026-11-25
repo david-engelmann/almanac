@@ -65,10 +65,12 @@ Generation is the on-ramp. The gate is the product.
   the site, so a document hosted on a docs domain is gated where
   it lives. A server card changed only in its display
   fields warns instead of failing its digest, because an
-  editorial edit is not a replaced card. It also cross checks the
-  MCP endpoints a site's agents.json names against the ones the
-  catalog announces, because two public claims about one surface
-  should not disagree.
+  editorial edit is not a replaced card. A fetching run also
+  observes the media type the catalog itself is served with,
+  and a type other than application/ard+json warns. It also
+  cross checks the MCP endpoints a site's agents.json names
+  against the ones the catalog announces, because two public
+  claims about one surface should not disagree.
 - migrate takes a publisher stranded on the legacy path, verifies
   their ai-catalog.json against the live surface and the site's
   own files instead of copying it, and emits the dual path pair,

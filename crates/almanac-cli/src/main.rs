@@ -36,8 +36,9 @@ Commands
             A run with an HTTP target (named or resolved from
             the catalog), or with --fetch-remote, also fetches
             announced artifacts, OpenAPI documents and agent
-            cards whose URLs do not map into the site; without
-            either, check stays offline
+            cards whose URLs do not map into the site, and
+            observes the media type the catalog itself is
+            served with; without either, check stays offline
   migrate   Verify a legacy ai-catalog.json against the live
             surface and emit the dual path pair and the gate
 

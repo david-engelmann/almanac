@@ -1869,6 +1869,111 @@ core posture pins the identical-reduction case at
 Critical. The record's as built wording is
 corrected to match.
 
+## Tenth slice: the served media type (design, 2026-11-24)
+
+The last deferred Minor class, in the design's own
+words (section 6, Minor): the catalog served with a
+generic JSON media type rather than
+application/ard+json. The deferral's gloss: the
+second needs the checker to observe a served
+catalog, which local mode never does. The fetching
+slice gave check a live posture and a fetcher; this
+slice spends them on the one observation the class
+needs.
+
+In a fetching run (an HTTP target, named or
+resolved, or --fetch-remote), check also requests
+the catalog itself, at the well-known address on the
+publisher's own origin, and reads the Content-Type
+of the answer. When the observed media type is
+anything but application/ard+json (parameters such
+as a charset are the same type wearing a parameter),
+the run reports Minor catalog-media-type naming what
+was served. The observation is best effort by
+design: a run that cannot observe (no fetching, the
+request fails, the answer is not a success, the
+address names a non-public literal, which the
+fetching slice's refusal already covers) reports
+nothing for this class, because an unobserved
+serving is not evidence about the serving. The
+catalog's bytes are not compared here; the site
+files remain the content the gate judges, and a
+served-versus-filed divergence class is not in the
+record. The request tries the https address the
+catalog's own URLs use, and falls back to http when
+the request itself cannot be made, the two schemes
+the checker's own origin mapping has always
+accepted. The core receives the observed type as a
+plain value and stays network free, as every slice
+before this one kept it.
+
+As built: the fetcher gains fetch_media_type, with
+four outcomes kept apart: an observation (a success
+answer, its Content-Type the value, an absent
+header observing as empty), an answer that
+observed nothing (a non-success, a redirect chain
+that went nowhere usable, a Content-Type in
+unreadable bytes), a request that could not be
+made at all, and a refusal (an address, or a
+redirect target, naming a non-public literal).
+Check tries the https address first and falls back
+to http only when the request could not be made;
+a refusal is final, and a non-success https answer
+ends the observation without trying http, an
+asymmetry the fallback rule's own words carry (a
+request that was answered was made). The core
+receives the observed type as a plain value and
+reports Minor catalog-media-type when the type
+before any parameter, compared case-insensitively,
+is not application/ard+json, naming what was
+served. Success means status 200, the fetcher's
+standing convention. A legacy only site is not
+observed, because its catalog does not live at the
+ard.json address and its path already reports at
+Major; a domain carrying characters that would
+change the address's shape is not observed either.
+The observation sends no Accept header by design:
+the class measures the default serving at the
+well-known address, which is the serving the
+specification names. Tests: a core test walks the
+postures (a generic type warns, the catalog's own
+type with a charset parameter is clean, an
+uppercase spelling is clean, an empty observation
+warns as no media type, no observation is silent),
+and an integration test serves a catalog under a
+changeable media type at the site domain's own
+authority, where a fetching run warns on
+application/json and is silent under
+application/ard+json, and a repo mode run observes
+nothing. With this slice the last deferred Minor
+class from the milestone one checkpoint is built,
+and the deferred list is empty.
+
+### Media type checkpoint fix pass (2026-11-24)
+
+The reviews caught the slice's worst fault before
+any gate did: the observation address interpolated
+a domain binding check does not have (the domain
+is the published catalog's host domain), so the
+tree did not compile. Also closed: the shared
+non-public guard now judges an IPv4-mapped IPv6
+literal as the IPv4 address it names, closing a
+way to the metadata family that predates this
+slice and that the catalog-supplied domain made
+newly reachable; the fetcher's outcome is the
+four-way enum above rather than a two-way result
+with refusals folded into failures, so the scheme
+fallback fires only where the design puts it; the
+class is factored beside its sibling classes in
+the core; the case-insensitive and empty
+observation postures gained tests; and the record
+now states the success reading, the legacy only
+skip, the domain shape guard, the fallback
+asymmetry, and the no-Accept posture. The redirect
+walk's duplication beside fetch is recorded as
+accumulated duplication for a future factoring,
+not closed here.
+
 ## Eleventh slice: the target trigger, re-earned (2026-11-24)
 
 The fetching slice's closure note owes this slice:
