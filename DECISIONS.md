@@ -3355,3 +3355,11 @@ defect before the reviews: the base64
 accumulator grew unmasked and would have
 overflowed on a real payload in a debug build; it
 now keeps only the bits not yet pushed.
+
+Ratified by Main on 2026-11-25: the outcome
+refinement stands as built. Critical in this pass
+means a positively identified contradiction on a
+channel the entry can answer, and a digest-only
+claim against an entry that records no digest is
+unanswerable rather than contradicted, so
+unverified at minor is the honest reading.
