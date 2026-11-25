@@ -1719,3 +1719,23 @@ in a dedicated test that generates its site from the
 HTTP fixture itself, so the targeted run compares
 against the surface its baseline recorded. No
 product code changed.
+
+### Remote fetching hosted gate closure (2026-11-24)
+
+Four hosted rounds failed on this slice, every one
+of them test side; the product substance was never
+the problem in any round. The first was the slice
+test's own premise (a stdio generated site checked
+against the HTTP fixture, whose schema bytes differ);
+the second was a format slip at the fix's insertion
+seam; the third and fourth were the dedicated HTTP
+target test written to replace the first round's run,
+whose hand written calls kept assuming contracts the
+helpers around them supply. Under the stop condition
+stated before the fourth round, the targeted-run
+coverage is pulled from this slice: the slice lands
+on the flag-trigger test, which passes. The target
+trigger itself is product code the reviews verified
+and the flag test's sibling paths exercise; proving
+it end to end is owed as its own slice, with a local
+gate behind the test before it stages.
