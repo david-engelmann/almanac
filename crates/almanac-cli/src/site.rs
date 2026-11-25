@@ -1997,6 +1997,7 @@ fn announced_bytes(
 /// catalog, the run is repo mode and every offline comparison
 /// still runs. An Err is a check that could not run, exit 2 at
 /// the caller.
+#[allow(clippy::too_many_arguments)]
 pub fn check(
     site: &Path,
     target: Option<&ProbeTarget>,
@@ -2005,6 +2006,7 @@ pub fn check(
     fetch_remote: bool,
     trust_keys: Option<&Path>,
     fetch_keys: bool,
+    fetch_attestations: bool,
 ) -> Result<i32, String> {
     let ard_path = site.join(".well-known/ard.json");
     let legacy_path = site.join(".well-known/ai-catalog.json");
@@ -2109,6 +2111,22 @@ pub fn check(
     } else {
         None
     };
+    // The attestation pin layer engages when the run
+    // already fetches, or when the operator names
+    // --fetch-attestations: the observations are the
+    // fetched documents' hashes, or the reasons their
+    // fetches failed, collected through the guarded
+    // fetcher. A run engaging neither stays silent
+    // about pins in both directions, the scoping the
+    // attestation design records.
+    let held_pins;
+    let pins_held: Option<&[almanac_core::trust::PinObservation]> =
+        if fetching || fetch_attestations {
+            held_pins = pin_observations(&published, &fetcher);
+            Some(&held_pins)
+        } else {
+            None
+        };
     let mut artifact_digests: Vec<(String, Option<String>)> = Vec::new();
     let mut card_displays: Vec<(String, CardDisplay)> = Vec::new();
     for artifact in &baseline.artifacts {
@@ -2280,6 +2298,7 @@ pub fn check(
         today: &today,
         now_unix,
         trust_keys: trust_keys_held,
+        pins: pins_held,
         catalog_media_type: catalog_media_type.as_deref(),
     });
     let mode = match &snapshot {
@@ -2322,6 +2341,7 @@ pub fn validate_site(
     site: &Path,
     trust_keys: Option<&Path>,
     fetch_keys: bool,
+    fetch_attestations: bool,
 ) -> Result<i32, String> {
     let published: Catalog = read_json(&site.join(".well-known/ard.json"))?;
     let legacy_path = site.join(".well-known/ai-catalog.json");
@@ -2330,7 +2350,13 @@ pub fn validate_site(
     } else {
         None
     };
-    report_validation(&published, legacy.as_ref(), trust_keys, fetch_keys)
+    report_validation(
+        &published,
+        legacy.as_ref(),
+        trust_keys,
+        fetch_keys,
+        fetch_attestations,
+    )
 }
 
 /// The validate command over one catalog file.
@@ -2338,9 +2364,10 @@ pub fn validate_file(
     path: &Path,
     trust_keys: Option<&Path>,
     fetch_keys: bool,
+    fetch_attestations: bool,
 ) -> Result<i32, String> {
     let published: Catalog = read_json(path)?;
-    report_validation(&published, None, trust_keys, fetch_keys)
+    report_validation(&published, None, trust_keys, fetch_keys, fetch_attestations)
 }
 
 /// The DID document URL a did:web identity resolves at:
@@ -2362,6 +2389,74 @@ fn did_web_document_url(identity: &str) -> Option<String> {
     } else {
         Some(format!("https://{domain}/{}/did.json", path.join("/")))
     }
+}
+
+/// The attestation observations a pin engaged run
+/// collects: for every pinned attestation (an item
+/// carrying both a uri and a digest) in every envelope
+/// an entry carries, the fetched document's sha256 or
+/// the reason the fetch failed, through the guarded
+/// fetcher, which refuses a literal non-public address
+/// before any request, a bound that matters here
+/// because attestation uris are catalog content. Each
+/// (entry, uri) pair is fetched once, however many
+/// envelopes repeat it.
+fn pin_observations(
+    published: &Catalog,
+    fetcher: &probe_http::DocumentFetcher,
+) -> Vec<almanac_core::trust::PinObservation> {
+    use almanac_core::trust::{PinObservation, PinOutcome};
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut observations = Vec::new();
+    for entry in &published.entries {
+        let manifests = entry
+            .trust_manifest
+            .iter()
+            .chain(entry.trust_manifests.iter());
+        for manifest in manifests {
+            // The collector mirrors the judge's gates:
+            // envelopes only, and pins in the form the
+            // judge will compare. Anything else is a
+            // shape finding's business, not a fetch's.
+            if !almanac_core::trust::is_envelope(manifest) {
+                continue;
+            }
+            let Some(items) = manifest.get("attestations").and_then(|a| a.as_array()) else {
+                continue;
+            };
+            for item in items {
+                let (Some(uri), true) = (
+                    item.get("uri")
+                        .and_then(|v| v.as_str())
+                        .filter(|text| !text.trim().is_empty()),
+                    item.get("digest")
+                        .and_then(|d| d.as_str())
+                        .is_some_and(|digest| {
+                            digest.split_once(':').is_some_and(|(alg, hex)| {
+                                !alg.is_empty()
+                                    && !hex.is_empty()
+                                    && hex.chars().all(|c| c.is_ascii_hexdigit())
+                            })
+                        }),
+                ) else {
+                    continue;
+                };
+                if !seen.insert((entry.identifier.clone(), uri.to_string())) {
+                    continue;
+                }
+                let outcome = match fetcher.fetch(uri) {
+                    Ok(bytes) => PinOutcome::Fetched(hash::sha256_hex(&bytes)),
+                    Err(reason) => PinOutcome::Failed(reason),
+                };
+                observations.push(PinObservation {
+                    entry_id: entry.identifier.clone(),
+                    uri: uri.to_string(),
+                    outcome,
+                });
+            }
+        }
+    }
+    observations
 }
 
 /// The verification keys a validate run holds: the keys
@@ -3192,15 +3287,28 @@ fn report_validation(
     legacy: Option<&Catalog>,
     trust_keys: Option<&Path>,
     fetch_keys: bool,
+    fetch_attestations: bool,
 ) -> Result<i32, String> {
     let now_unix = now_unix();
     let keys = validation_keys(published, trust_keys, fetch_keys)?;
+    // The pin layer engages in validate only when the
+    // operator names it, the attestation design's rule
+    // for a command that otherwise works offline.
+    let held_pins;
+    let pins_held: Option<&[almanac_core::trust::PinObservation]> = if fetch_attestations {
+        let fetcher = probe_http::DocumentFetcher::new();
+        held_pins = pin_observations(published, &fetcher);
+        Some(&held_pins)
+    } else {
+        None
+    };
     let findings = almanac_core::validate::validate_catalog_with_keys(
         published,
         legacy,
         &today_utc(),
         now_unix,
         &keys,
+        pins_held,
     );
     let report = Report::new(findings, Severity::Major);
     let printed = PrintedReport {

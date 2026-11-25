@@ -4255,3 +4255,160 @@ fn check_judges_trust_manifests_and_remembers_a_removal() {
         "report was {stdout}"
     );
 }
+
+#[test]
+fn check_verifies_attestation_pins_when_the_run_fetches() {
+    // The sixteenth slice end to end. A bound
+    // envelope is planted on the generated catalog,
+    // as a publisher's signer would leave it, its
+    // attestations pinning a document a local server
+    // holds. Runs that do not fetch are silent about
+    // the pin in both directions, before and after
+    // the server swaps its bytes; an engaged run is
+    // clean while the pinned bytes are served, and
+    // the substitution fails at critical in check
+    // and validate alike. A fetching check run
+    // engages the pin layer without the flag.
+    let site = temp_site("attestation-pins");
+    let fixture = fixture_binary("fixture_server");
+    let (code, _, stderr) = generate_stdio(&site, &fixture);
+    assert_eq!(code, 0, "generate failed: {stderr}");
+    let document = b"the attestation document, as served".to_vec();
+    let (att_uri, held) = serve_bytes(document.clone());
+    let pin = almanac_core::hash::sha256_hex(&document);
+
+    // Plant a bound envelope whose attestations pin
+    // the served document, on both catalog paths.
+    let ard_path = site.join(".well-known/ard.json");
+    let legacy_path = site.join(".well-known/ai-catalog.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ard_path).expect("ard read")).expect("ard parses");
+    let entry = catalog["entries"]
+        .as_array_mut()
+        .expect("entries")
+        .iter_mut()
+        .find(|e| e["type"] == "application/mcp-server-card+json")
+        .expect("the MCP entry");
+    let digest = entry["digest"]
+        .as_str()
+        .expect("the entry digest")
+        .to_string();
+    let id = entry["identifier"]
+        .as_str()
+        .expect("the entry id")
+        .to_string();
+    let junk = format!(
+        "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..{}",
+        "A".repeat(86)
+    );
+    entry["trustManifest"] = serde_json::json!({
+        "identity": "did:web:example.com",
+        "expiresAt": "2028-06-01",
+        "subject": {
+            "identifier": id,
+            "type": "application/mcp-server-card+json",
+            "digest": digest,
+        },
+        "attestations": [{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": att_uri,
+            "digest": format!("sha256:{pin}"),
+        }],
+        "signature": junk,
+    });
+    let planted = serde_json::to_vec_pretty(&catalog).expect("serialize");
+    std::fs::write(&ard_path, &planted).expect("ard planted");
+    std::fs::write(&legacy_path, &planted).expect("legacy planted");
+
+    // A run that does not fetch is silent about the
+    // pin in both directions.
+    let (code, stdout, _) = check_stdio(&site, &fixture);
+    assert_eq!(code, 0, "unengaged check: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+
+    // Validate without the flag likewise makes no pin
+    // claim (its only trust finding is the signature
+    // it cannot attempt without keys).
+    let (code, stdout, _) = run(&["validate", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "unengaged validate: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+
+    // Engaged, the served document matches its pin.
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 0, "pinned check: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+
+    // The uri now serves another document: the
+    // substitution the pin exists to catch, critical
+    // in check and in validate alike.
+    *held.lock().expect("lock") = b"a substituted document".to_vec();
+    let (code, stdout, _) = run(&[
+        "check",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 1, "substituted check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-attestation-mismatch"),
+        "report was {stdout}"
+    );
+    let (code, stdout, _) = run(&[
+        "validate",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+    ]);
+    assert_eq!(code, 1, "substituted validate passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-attestation-mismatch"),
+        "report was {stdout}"
+    );
+
+    // The discriminating phases: with the substituted
+    // bytes still served, the runs that do not fetch
+    // stay silent and pass. An always engaged CLI
+    // would fetch, mismatch, and fail here, which is
+    // what makes the scoping rule falsifiable at this
+    // level and not only in the core.
+    let (code, stdout, _) = check_stdio(&site, &fixture);
+    assert_eq!(code, 0, "unengaged check after substitution: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+    let (code, stdout, _) = run(&["validate", "--site", &site_arg(&site)]);
+    assert_eq!(code, 0, "unengaged validate after substitution: {stdout}");
+    assert!(!stdout.contains("attestation"), "report was {stdout}");
+
+    // A fetching check run engages the layer without
+    // the flag and catches the same substitution.
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 1, "fetching check passed: {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-attestation-mismatch"),
+        "report was {stdout}"
+    );
+
+    // Generate refuses the flag outright, like the
+    // other trust flags.
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--fetch-attestations",
+        "--command",
+        &fixture.to_string_lossy(),
+    ]);
+    assert_eq!(code, 2, "generate accepted the flag: {stderr}");
+    assert!(
+        stderr.contains("--fetch-attestations applies to validate and check only"),
+        "stderr was {stderr}"
+    );
+}

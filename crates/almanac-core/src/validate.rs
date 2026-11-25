@@ -20,7 +20,9 @@ use crate::Severity;
 use crate::catalog::{Catalog, Entry};
 use crate::drift::Finding;
 use crate::jcs;
-use crate::trust::{SignatureVerdict, TrustKey, is_envelope, verify_detached_jws};
+use crate::trust::{
+    PinObservation, PinOutcome, SignatureVerdict, TrustKey, is_envelope, verify_detached_jws,
+};
 
 fn finding(severity: Severity, kind: &str, entry: Option<&str>, detail: String) -> Finding {
     Finding {
@@ -198,18 +200,29 @@ fn sort_findings(findings: &mut [Finding]) {
 /// `keys` are the verification keys this run holds, from a
 /// keys file or a resolved did:web document; an empty set
 /// leaves every signature unverified, and the report says
-/// so rather than passing it silently.
+/// so rather than passing it silently. `pins` are the
+/// run's attestation observations when it engaged the
+/// pin layer; without them the pin layer makes no claim.
 pub fn validate_catalog_with_keys(
     published: &Catalog,
     legacy: Option<&Catalog>,
     today: &str,
     now_unix: i64,
     keys: &[TrustKey],
+    pins: Option<&[PinObservation]>,
 ) -> Vec<Finding> {
     let mut findings = validate_catalog(published, legacy, today, now_unix);
     // The plain pass already judged the singular
     // manifests' expiry, so the shared pass skips it.
-    envelope_pass(published, today, now_unix, Some(keys), false, &mut findings);
+    envelope_pass(
+        published,
+        today,
+        now_unix,
+        Some(keys),
+        pins,
+        false,
+        &mut findings,
+    );
     sort_findings(&mut findings);
     findings
 }
@@ -222,6 +235,9 @@ pub fn validate_catalog_with_keys(
 /// `keys` is the run's key set when it holds one;
 /// without one the signature layer makes no claim,
 /// the scoping the check integration design records.
+/// `pins` is the run's attestation observations when
+/// it engaged the pin layer; without them the pin
+/// layer likewise makes no claim.
 /// Findings come back in the report's deterministic
 /// order, as the validate entry points return them.
 /// The removal judgment against the baseline is the
@@ -231,9 +247,10 @@ pub fn envelope_findings(
     today: &str,
     now_unix: i64,
     keys: Option<&[TrustKey]>,
+    pins: Option<&[PinObservation]>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    envelope_pass(published, today, now_unix, keys, true, &mut findings);
+    envelope_pass(published, today, now_unix, keys, pins, true, &mut findings);
     sort_findings(&mut findings);
     findings
 }
@@ -252,6 +269,7 @@ fn envelope_pass(
     today: &str,
     now_unix: i64,
     keys: Option<&[TrustKey]>,
+    pins: Option<&[PinObservation]>,
     judge_singular_expiry: bool,
     findings: &mut Vec<Finding>,
 ) {
@@ -268,7 +286,7 @@ fn envelope_pass(
             if judge_singular_expiry {
                 validate_trust_manifest(manifest, &entry.identifier, today, now_unix, findings);
             }
-            verify_envelope(manifest, entry, &publisher, keys, false, findings);
+            verify_envelope(manifest, entry, &publisher, keys, pins, false, findings);
             judged.push(manifest);
         }
         for manifest in &entry.trust_manifests {
@@ -277,7 +295,7 @@ fn envelope_pass(
             }
             judged.push(manifest);
             validate_trust_manifest(manifest, &entry.identifier, today, now_unix, findings);
-            verify_envelope(manifest, entry, &publisher, keys, true, findings);
+            verify_envelope(manifest, entry, &publisher, keys, pins, true, findings);
         }
     }
 }
@@ -317,14 +335,17 @@ fn identity_binds(identity: &str, domain: &str) -> bool {
 /// first (the envelope's defining members present, at
 /// major), then subject binding and, for the publisher's
 /// own manifest, identity binding (critical on a miss,
-/// the draft's reject cases), then the signature:
-/// invalid is critical, and a signature this run cannot
+/// the draft's reject cases), then the attestations
+/// (judge_attestations), then the signature: invalid
+/// is critical, and a signature this run cannot
 /// attempt is a minor naming why, never a silent pass.
+#[allow(clippy::too_many_arguments)]
 fn verify_envelope(
     manifest: &serde_json::Value,
     entry: &Entry,
     publisher: &str,
     keys: Option<&[TrustKey]>,
+    pins: Option<&[PinObservation]>,
     third_party: bool,
     findings: &mut Vec<Finding>,
 ) {
@@ -428,6 +449,7 @@ fn verify_envelope(
             ),
         ));
     }
+    judge_attestations(manifest, entry, pins, findings);
     let Some(signature) = manifest.get("signature") else {
         findings.push(finding(
             Severity::Major,
@@ -484,6 +506,159 @@ fn verify_envelope(
             Some(id),
             format!("trust manifest signature went unverified: {reason}"),
         )),
+    }
+}
+
+/// The attestation judgments over one envelope, the
+/// draft's sections 3.5.2 and 6.4. Item shape at major
+/// in every run: attestations that are not an array,
+/// an item that is not an object, an item missing its
+/// type or its uri, a digest with no uri to fetch, and
+/// a digest outside the <alg>:<hex> form. The pin
+/// itself is judged only in a run holding observations:
+/// a fetched document whose sha256 differs from the
+/// sealed digest is critical, the substitution the pin
+/// exists to catch, and a pin the run could not check
+/// (a failed fetch, an algorithm this build does not
+/// compute) is a minor naming why, never a silent
+/// pass. An item without a digest carries no pin and
+/// is silent, as unsigned content is.
+fn judge_attestations(
+    manifest: &serde_json::Value,
+    entry: &Entry,
+    pins: Option<&[PinObservation]>,
+    findings: &mut Vec<Finding>,
+) {
+    let id = entry.identifier.as_str();
+    let Some(attestations) = manifest.get("attestations") else {
+        return;
+    };
+    let Some(items) = attestations.as_array() else {
+        findings.push(finding(
+            Severity::Major,
+            "trust-manifest-shape",
+            Some(id),
+            "trust manifest attestations are not an array".into(),
+        ));
+        return;
+    };
+    // An item repeated verbatim in one array is one
+    // claim, judged once; the pass's manifest dedupe
+    // covers repetition across slots, this covers it
+    // within the array.
+    let mut judged_items: Vec<&serde_json::Value> = Vec::new();
+    for item in items {
+        if judged_items.contains(&item) {
+            continue;
+        }
+        judged_items.push(item);
+        let Some(item) = item.as_object() else {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                "an attestation in the trust manifest is not an object".into(),
+            ));
+            continue;
+        };
+        if item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_none_or(|text| text.trim().is_empty())
+        {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                "an attestation in the trust manifest carries no type".into(),
+            ));
+        }
+        let uri = item
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.trim().is_empty());
+        let digest = item.get("digest");
+        let Some(uri) = uri else {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                if digest.is_some() {
+                    "an attestation in the trust manifest carries a digest but no uri".into()
+                } else {
+                    "an attestation in the trust manifest carries no uri".into()
+                },
+            ));
+            continue;
+        };
+        let Some(digest) = digest else {
+            continue;
+        };
+        let Some(digest) = digest.as_str() else {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                "an attestation digest in the trust manifest is not a string".into(),
+            ));
+            continue;
+        };
+        let well_formed = digest.split_once(':').filter(|(alg, hex)| {
+            !alg.is_empty() && !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit())
+        });
+        let Some((alg, hex)) = well_formed else {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                format!("the attestation digest {digest} is not in <alg>:<hex> form"),
+            ));
+            continue;
+        };
+        let Some(pins) = pins else {
+            continue;
+        };
+        if alg != "sha256" {
+            findings.push(finding(
+                Severity::Minor,
+                "trust-manifest-attestation-unverified",
+                Some(id),
+                format!(
+                    "the attestation pin for {uri} names {alg}, and this build computes sha256 only"
+                ),
+            ));
+            continue;
+        }
+        match pins
+            .iter()
+            .find(|o| o.entry_id == id && o.uri == uri)
+            .map(|o| &o.outcome)
+        {
+            Some(PinOutcome::Fetched(served)) => {
+                if !served.eq_ignore_ascii_case(hex) {
+                    findings.push(finding(
+                        Severity::Critical,
+                        "trust-manifest-attestation-mismatch",
+                        Some(id),
+                        format!(
+                            "the attestation document at {uri} hashes to sha256:{served}, not the pinned {digest}"
+                        ),
+                    ));
+                }
+            }
+            Some(PinOutcome::Failed(reason)) => findings.push(finding(
+                Severity::Minor,
+                "trust-manifest-attestation-unverified",
+                Some(id),
+                format!("the attestation document at {uri} could not be fetched ({reason})"),
+            )),
+            None => findings.push(finding(
+                Severity::Minor,
+                "trust-manifest-attestation-unverified",
+                Some(id),
+                format!("the attestation document at {uri} was not fetched"),
+            )),
+        }
     }
 }
 
@@ -686,14 +861,21 @@ mod tests {
             "2026-11-21",
             NOW,
             &fixture_keys(),
+            None,
         );
         assert!(findings.is_empty(), "findings were {findings:?}");
     }
 
     #[test]
     fn a_signed_envelope_without_a_key_reports_unverified_never_silent() {
-        let findings =
-            validate_catalog_with_keys(&catalog_with(signed_entry()), None, "2026-11-21", NOW, &[]);
+        let findings = validate_catalog_with_keys(
+            &catalog_with(signed_entry()),
+            None,
+            "2026-11-21",
+            NOW,
+            &[],
+            None,
+        );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "trust-manifest-signature-unverified");
         assert_eq!(findings[0].severity, Severity::Minor);
@@ -728,6 +910,7 @@ mod tests {
             "2026-11-21",
             NOW,
             &fixture_keys(),
+            None,
         );
         assert!(
             findings
@@ -749,21 +932,21 @@ mod tests {
         // the verdict joins, and the fixture's signature
         // is valid, so a keyed run is clean.
         let catalog = catalog_with(signed_entry());
-        let unkeyed = envelope_findings(&catalog, "2026-11-25", NOW, None);
+        let unkeyed = envelope_findings(&catalog, "2026-11-25", NOW, None, None);
         assert!(
             unkeyed
                 .iter()
                 .all(|f| !f.kind.starts_with("trust-manifest-signature")),
             "{unkeyed:?}"
         );
-        let keyed = envelope_findings(&catalog, "2026-11-25", NOW, Some(&fixture_keys()));
+        let keyed = envelope_findings(&catalog, "2026-11-25", NOW, Some(&fixture_keys()), None);
         assert!(keyed.is_empty(), "{keyed:?}");
         // A tampered subject is a binding failure in
         // both scopings.
         let mut tampered = signed_entry();
         tampered.trust_manifest.as_mut().unwrap()["subject"]["digest"] =
             serde_json::json!(format!("sha256:{}", "b".repeat(64)));
-        let unkeyed = envelope_findings(&catalog_with(tampered), "2026-11-25", NOW, None);
+        let unkeyed = envelope_findings(&catalog_with(tampered), "2026-11-25", NOW, None, None);
         assert!(
             unkeyed
                 .iter()
@@ -790,6 +973,7 @@ mod tests {
             "2026-11-21",
             NOW,
             &fixture_keys(),
+            None,
         );
         assert!(
             findings
@@ -810,7 +994,7 @@ mod tests {
             "signature": FIXTURE_SIGNATURE,
         })];
         let findings =
-            validate_catalog_with_keys(&catalog_with(third), None, "2026-11-21", NOW, &[]);
+            validate_catalog_with_keys(&catalog_with(third), None, "2026-11-21", NOW, &[], None);
         assert!(
             !findings
                 .iter()
@@ -835,5 +1019,134 @@ mod tests {
         sound.trust_manifest = Some(serde_json::json!({"expiresAt": "2027-06-01"}));
         let findings = validate_catalog(&catalog_with(sound), None, "2026-11-21", NOW);
         assert!(findings.is_empty(), "findings were {findings:?}");
+    }
+
+    #[test]
+    fn attestation_shape_stands_always_and_pins_only_in_engaged_runs() {
+        let uri = "https://example.com/attestations/slsa.json";
+        let served = crate::hash::sha256_hex(b"the attestation document");
+        let mut pinned = signed_entry();
+        pinned.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": uri,
+            "digest": format!("sha256:{served}"),
+        }]);
+        let catalog = catalog_with(pinned);
+        let observation = |outcome| {
+            vec![PinObservation {
+                entry_id: "urn:air:example.com:mcp:demo".into(),
+                uri: uri.into(),
+                outcome,
+            }]
+        };
+        // Not engaged, the pin is silent.
+        let silent = envelope_findings(&catalog, "2026-11-25", NOW, None, None);
+        assert!(
+            silent.iter().all(|f| !f.kind.contains("attestation")),
+            "{silent:?}"
+        );
+        // Engaged, the served document matches its pin.
+        let matched = envelope_findings(
+            &catalog,
+            "2026-11-25",
+            NOW,
+            None,
+            Some(&observation(PinOutcome::Fetched(served.clone()))),
+        );
+        assert!(
+            matched.iter().all(|f| !f.kind.contains("attestation")),
+            "{matched:?}"
+        );
+        // Engaged, the uri serves another document: the
+        // substitution the pin exists to catch, critical.
+        let swapped = envelope_findings(
+            &catalog,
+            "2026-11-25",
+            NOW,
+            None,
+            Some(&observation(PinOutcome::Fetched(crate::hash::sha256_hex(
+                b"a different document",
+            )))),
+        );
+        assert!(
+            swapped
+                .iter()
+                .any(|f| f.kind == "trust-manifest-attestation-mismatch"
+                    && f.severity == Severity::Critical),
+            "{swapped:?}"
+        );
+        // Engaged, the fetch failed: a minor naming why.
+        let failed = envelope_findings(
+            &catalog,
+            "2026-11-25",
+            NOW,
+            None,
+            Some(&observation(PinOutcome::Failed("it timed out".into()))),
+        );
+        assert!(
+            failed
+                .iter()
+                .any(|f| f.kind == "trust-manifest-attestation-unverified"
+                    && f.severity == Severity::Minor),
+            "{failed:?}"
+        );
+        // Shape stands in every run: a digest with no
+        // uri and a digest outside the pinned form are
+        // majors; an item with no digest is silent.
+        let mut shapeless = signed_entry();
+        shapeless.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([
+            { "type": "https://slsa.dev/provenance/v1", "digest": format!("sha256:{served}") },
+            { "type": "https://slsa.dev/provenance/v1", "uri": uri, "digest": "not-a-digest" },
+            { "type": "https://slsa.dev/provenance/v1", "uri": "https://example.com/a.json" },
+        ]);
+        let shaped = envelope_findings(&catalog_with(shapeless), "2026-11-25", NOW, None, None);
+        assert_eq!(
+            shaped
+                .iter()
+                .filter(|f| f.kind == "trust-manifest-shape")
+                .count(),
+            2,
+            "{shaped:?}"
+        );
+        // Attestations that are not an array are the
+        // same major, and a pin naming an algorithm
+        // this build does not compute reports
+        // unverified in an engaged run, silent in an
+        // unengaged one.
+        let mut not_array = signed_entry();
+        not_array.trust_manifest.as_mut().unwrap()["attestations"] =
+            serde_json::json!("not an array");
+        let findings = envelope_findings(&catalog_with(not_array), "2026-11-25", NOW, None, None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-shape" && f.severity == Severity::Major),
+            "{findings:?}"
+        );
+        let mut other_alg = signed_entry();
+        other_alg.trust_manifest.as_mut().unwrap()["attestations"] = serde_json::json!([{
+            "type": "https://slsa.dev/provenance/v1",
+            "uri": uri,
+            "digest": format!("sha512:{served}"),
+        }]);
+        let engaged = envelope_findings(
+            &catalog_with(other_alg.clone()),
+            "2026-11-25",
+            NOW,
+            None,
+            Some(&observation(PinOutcome::Fetched(served.clone()))),
+        );
+        assert!(
+            engaged
+                .iter()
+                .any(|f| f.kind == "trust-manifest-attestation-unverified"
+                    && f.severity == Severity::Minor),
+            "{engaged:?}"
+        );
+        let unengaged = envelope_findings(&catalog_with(other_alg), "2026-11-25", NOW, None, None);
+        assert!(
+            unengaged.iter().all(|f| !f.kind.contains("attestation")),
+            "{unengaged:?}"
+        );
     }
 }
