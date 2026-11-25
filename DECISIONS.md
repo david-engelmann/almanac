@@ -2163,3 +2163,229 @@ redirects) and fetch words them, so no consumer's
 prose lives in the shared machinery, and the
 outcome type takes the file's Outcome naming
 beside RpcOutcome and MediaTypeOutcome.
+
+## Trust manifest verification (design, 2026-11-25)
+
+Main charged this item on 2026-11-25: research
+first, the signature scheme and canonical form
+pinned against the spec, a design record for
+approval before any code. Amendment D still bars
+signing and key management; this is the read side
+only, verifying what publishers sign.
+
+The spec, pinned firsthand. The normative text is
+the IETF draft (draft-bu-dawn-ard-discovery-00,
+2026-10-30), sections 3.5, 3.5.1, 3.5.2, the CDDL
+in section 5, and section 6.2; the v0.91 site text
+is looser (it delegates verification to the
+manifest's declared trust framework) and the draft
+is the pin where they differ. A trustManifest
+carries identity (MUST, a signer identifier such
+as did:web:example.com), subject (MUST in the
+field list, a self-contained block holding the
+entry's identifier, type, digest, and version when
+present), issuedAt and expiresAt, optional
+attestations and provenance, and signature (MUST
+in the field list). The signature is a detached
+JWS (RFC 7515) computed over the RFC 8785 JCS
+serialization of the trustManifest object with
+the signature member removed; the protected
+header names alg (ES256 mandatory to implement)
+and kid. The CDDL is more lenient than the field
+list (subject and signature are optional there);
+the design follows the field list and names the
+discrepancy rather than resolving it silently.
+Verification under the publisher profile
+(section 3.5.1) is three checks: the subject
+matches the parent entry, the identity binds to
+the publisher domain in the entry's URN, and the
+signature is valid over the canonicalized
+manifest. Section 6.2 adds that an entry lacking
+a verified signature bound to the publisher is an
+unverified discovery hint, and a signed entry
+whose proof or binding fails must be rejected.
+Third-party manifests ride in a trustManifests
+array under the signer profile: same subject,
+their own identity domain, and they never
+substitute for the publisher's manifest.
+
+The build, in layers, each independently
+reportable in validate, beside the shape and
+expiry classes version 1 already has:
+
+1. Draft shape. identity present as a string,
+   subject present as an object carrying
+   identifier and type, signature present as a
+   string. Absences report at Major under the
+   existing trust-manifest-shape kind, extended.
+2. Subject binding, offline, needing no key:
+   subject identifier, type, digest, and version
+   against the parent entry's own fields, each
+   compared where both sides carry it, and a
+   subject digest absent while the entry carries
+   one is itself a mismatch, because the digest is
+   the binding section 3.5.2 exists to seal. A
+   mismatch is Critical, kind
+   trust-manifest-subject-mismatch: the draft's
+   reject case, in the gate's vocabulary.
+3. Identity binding, offline: under the
+   publisher profile the identity must bind to
+   the entry's publisher domain: a did:web
+   identity naming that domain, an https identity
+   on it, or a SPIFFE id whose trust domain is
+   it. Anything else is Critical, kind
+   trust-manifest-identity-unbound. Third-party
+   manifests are exempt from this layer; their
+   identity binds at key resolution instead.
+4. Signature, needing a key: JCS-canonicalize
+   the manifest with the signature member
+   removed, split the detached JWS (three
+   segments, the payload segment empty), read alg
+   and kid from the protected header, resolve the
+   key, and verify ES256 over the signing input.
+   An invalid signature is Critical, kind
+   trust-manifest-signature-invalid. A signature
+   that cannot be attempted reports Minor, kind
+   trust-manifest-signature-unverified, naming
+   why (no key source, an algorithm this build
+   does not verify, an identity form it does not
+   resolve): the entry is never silently passed,
+   because the draft's own words for it are an
+   unverified hint, and the report says so.
+
+Keys come from two sources, in this precedence:
+a JWKS or JWK file named by a --trust-keys flag
+(the offline CI shape, deterministic), matched
+by kid; and, in a fetching run only, did:web
+resolution for a did:web identity, fetching
+https://<domain>/.well-known/did.json through
+the existing guarded fetcher and reading its
+verificationMethod publicKeyJwk entries, matched
+by the kid's DID URL. No other identity form is
+resolved in this build.
+
+Two pieces of machinery are new. JCS
+canonicalization lands in the core as its own
+module over serde_json values (object keys
+sorted by UTF-16 code units, the number
+serialization RFC 8785 defers to ECMAScript,
+the minimal string escapes), proven against the
+RFC's own test vectors and the draft's example
+manifest before any signature is judged with it;
+number serialization is the known hard edge and
+the vectors are its gate. ES256 verification
+needs P-256: ring is already in the lock through
+rustls and verifies the JWS raw R||S form
+directly, so the proposal names ring as a direct
+dependency with this paragraph as the written
+reason DESIGN requires, and no new dependency
+family enters the tree.
+
+One modeling fix rides inside the scope: the
+catalog model carries only the singular
+trustManifest today, so a trustManifests array
+is dropped on parse and lost on regeneration.
+The model learns to carry it, because a signed
+envelope the tool silently drops is a fact the
+gate exists to catch, and third-party manifests
+cannot be verified if they cannot be read.
+
+Scope lines, stated plainly. Validate carries
+the verification in this build; check does not
+change (its drift model is baseline relative,
+and signature validity is not), with check
+integration named as a follow-up question, not
+smuggled in. Attestation documents are not
+fetched and their digests not re-verified
+(section 6.4's pinning is a follow-up), the
+cross-origin url binding of section 6.2 is a
+follow-up, and signing stays barred under
+Amendment D. Open questions for Main's approval:
+the validate-only scope, ES256 as the one
+verified algorithm in this build, the two key
+sources and their precedence, and the
+trustManifests modeling fix riding along.
+
+### As built (2026-11-25)
+
+The build follows the record, with the refinements and
+rulings the checkpoint reviews produced, all recorded
+here. The model carries both envelope forms: Entry
+gains trust_manifests beside the singular
+trust_manifest, with the serde posture of its sibling
+fields, and the keyed pass expiry judges the plural
+manifests the plain pass never read. The envelope
+layers engage only when a manifest carries identity,
+subject, or signature; a manifest carrying none of
+them is the pre-draft expiry-only form and keeps the
+version 1 judgment exactly, so the standing expiry
+tests stand untouched and the plain pass, which check
+runs, is behaviorally identical to before. The keyed
+pass is a separate entry point, validate_catalog_with_keys,
+and validate is its only caller.
+
+Subject binding follows the record's comparison rule
+as the spec review pinned it: identifier and type
+absences are layer 1 shape findings at major, present
+values that differ are layer 2 mismatches at critical,
+digest and version compare where both sides carry
+them, and a subject digest absent while the entry
+carries one is itself a mismatch. Identity binds to
+the publisher segment of the entry's own URN, the
+draft's section 3.5.1 subject, with the catalog host
+domain standing in only when the URN does not parse.
+Keys from a resolved DID document bind to that
+document's own subject at read time: a verification
+method counts only when its id's DID part is the
+document's id and its controller, when named, is the
+subject too, and a relative method id reads as the
+document's id with that fragment. A fetched document
+therefore cannot register a key under another
+identity's kid, the red team's one major finding,
+closed at the reader rather than by ordering the
+pooled list. The trust flags belong to validate
+alone; generate, check, and migrate refuse them
+outright rather than accept and ignore them. DID
+document fetch failures print their reason on stderr,
+the artifact fetch posture. DESIGN.md's Amendment D
+now records the narrowing: verification landed,
+signing and key management still deferred.
+
+The JCS module is proven on the RFC's printed number
+and string values and on the draft's own section 3.5
+example manifest, canonicalized with its signature
+member removed. The signed fixture is a real openssl
+ES256 signature over the fixture manifest's canonical
+bytes, exercised in the core tests and end to end
+through the binary. ring is the one new dependency,
+named in almanac-core with its written reason beside
+it; the lock gains exactly that one edge, verified
+byte for byte against the landed lock after the
+write fault truncated the working lock to zero bytes
+mid build and it was rebuilt by hand.
+
+### Trust verification checkpoint fix pass (2026-11-25)
+
+Three reviews ran over the built slice before
+staging. The red team found no critical and one
+major, the DID document kid shadowing closed above,
+with eight minors. The spec axis passed the slice
+with three minor deviations, the subject shape
+ownership, the comparison rule, and the draft
+example test, all closed above. The standards axis
+found one major, six rustfmt hunks in slice code,
+closed by hand application of the formatter's own
+diff, and eight minors, of which the base64url
+table and length discipline, the cached key sort,
+the stderr note, and the test deduplication are
+closed in code, and the rest stand recorded as
+accepted: the did:web percent encoded port form
+neither binds nor resolves in this build and fails
+safe to unverified, aggregate key fetch time is
+unbounded under the fetcher's recorded limit, and
+the envelope function stays one linear function
+whose doc comment names its layers. The local gate
+stayed write fault refused through the whole build;
+the slice stages on the hosted verdict under the
+Actions-first rule, with the format check verified
+clean firsthand before staging.

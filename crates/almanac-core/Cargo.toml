@@ -13,3 +13,7 @@ keywords = ["ard", "agent-discovery", "mcp", "drift", "ci"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+# ES256 verification for trust manifest signatures.
+# ring is already in the tree through rustls; naming
+# it here adds no new dependency family.
+ring = "0.17"

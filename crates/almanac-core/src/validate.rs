@@ -5,17 +5,22 @@
 //! exactly one of url or data per entry, digests in the draft's
 //! format, representative queries in the count the draft asks
 //! for, the dual path pair in agreement, and a trust manifest
-//! whose shape and expiry hold up. Amendment D fixes the trust
-//! manifest scope for version 1, shape and expiry only, no
-//! signature verification and no key management.
+//! whose shape and expiry hold up. Amendment D bars signing
+//! and key management, not verification: the keyed entry
+//! point below additionally judges a manifest that presents
+//! itself as the draft's signed envelope, subject binding,
+//! identity binding, and the signature itself, under the
+//! draft's section 3.5 rules.
 //!
-//! The function is pure. The CLI reads the files and passes the
-//! current date and time in, so the same catalog always produces
-//! the same findings on the same day.
+//! The functions are pure. The CLI reads the files and keys
+//! and passes the current date and time in, so the same
+//! catalog always produces the same findings on the same day.
 
 use crate::Severity;
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, Entry};
 use crate::drift::Finding;
+use crate::jcs;
+use crate::trust::{SignatureVerdict, TrustKey, verify_detached_jws};
 
 fn finding(severity: Severity, kind: &str, entry: Option<&str>, detail: String) -> Finding {
     Finding {
@@ -169,6 +174,11 @@ pub fn validate_catalog(
         }
     }
 
+    sort_findings(&mut findings);
+    findings
+}
+
+fn sort_findings(findings: &mut Vec<Finding>) {
     findings.sort_by(|a, b| {
         b.severity
             .cmp(&a.severity)
@@ -176,14 +186,261 @@ pub fn validate_catalog(
             .then_with(|| a.entry.cmp(&b.entry))
             .then_with(|| a.detail.cmp(&b.detail))
     });
+}
+
+/// Validate with trust manifest verification, the validate
+/// command's entry point. Everything the plain pass judges,
+/// plus, for every trust manifest an entry carries, the
+/// expiry judgment for third-party manifests and the
+/// envelope verification of the design record: a manifest
+/// carrying identity, subject, or signature presents itself
+/// as the draft's signed envelope and is judged as one.
+/// `keys` are the verification keys this run holds, from a
+/// keys file or a resolved did:web document; an empty set
+/// leaves every signature unverified, and the report says
+/// so rather than passing it silently.
+pub fn validate_catalog_with_keys(
+    published: &Catalog,
+    legacy: Option<&Catalog>,
+    today: &str,
+    now_unix: i64,
+    keys: &[TrustKey],
+) -> Vec<Finding> {
+    let mut findings = validate_catalog(published, legacy, today, now_unix);
+    for entry in &published.entries {
+        // Identity binds to the publisher segment of the
+        // entry's own URN, the draft's section 3.5.1 rule;
+        // the host domain stands in only when the URN does
+        // not parse, a case the plain pass already judges.
+        let publisher = urn_publisher(&entry.identifier)
+            .unwrap_or(published.host.domain.as_str())
+            .to_string();
+        if let Some(manifest) = &entry.trust_manifest {
+            verify_envelope(manifest, entry, &publisher, keys, false, &mut findings);
+        }
+        for manifest in &entry.trust_manifests {
+            validate_trust_manifest(manifest, &entry.identifier, today, now_unix, &mut findings);
+            verify_envelope(manifest, entry, &publisher, keys, true, &mut findings);
+        }
+    }
+    sort_findings(&mut findings);
     findings
+}
+
+/// The publisher segment of a domain anchored URN,
+/// urn:air:<publisher>:..., when the identifier has
+/// that shape.
+fn urn_publisher(identifier: &str) -> Option<&str> {
+    let rest = identifier.strip_prefix("urn:air:")?;
+    let segment = rest.split(':').next()?;
+    if segment.is_empty() {
+        None
+    } else {
+        Some(segment)
+    }
+}
+
+/// Whether a manifest presents itself as the draft's
+/// signed envelope: it carries any of the envelope's
+/// defining members. A manifest carrying none of them
+/// is the earlier expiry-only form, and the plain pass
+/// has already judged all of it this build judges.
+fn is_envelope(manifest: &serde_json::Value) -> bool {
+    manifest.get("identity").is_some()
+        || manifest.get("subject").is_some()
+        || manifest.get("signature").is_some()
+}
+
+/// Whether an identity binds to a publisher domain, the
+/// draft's publisher profile: a did:web identity naming
+/// the domain, an https identity on it, or a SPIFFE id
+/// whose trust domain it is.
+fn identity_binds(identity: &str, domain: &str) -> bool {
+    if let Some(rest) = identity.strip_prefix("did:web:") {
+        return rest == domain || rest.starts_with(&format!("{domain}:"));
+    }
+    if let Some(rest) = identity.strip_prefix("https://") {
+        let host = rest.split('/').next().unwrap_or("");
+        return host == domain;
+    }
+    if let Some(rest) = identity.strip_prefix("spiffe://") {
+        return rest == domain || rest.starts_with(&format!("{domain}/"));
+    }
+    false
+}
+
+/// The envelope layers over one trust manifest. Shape
+/// first (the envelope's defining members present, at
+/// major), then subject binding and, for the publisher's
+/// own manifest, identity binding (critical on a miss,
+/// the draft's reject cases), then the signature:
+/// invalid is critical, and a signature this run cannot
+/// attempt is a minor naming why, never a silent pass.
+fn verify_envelope(
+    manifest: &serde_json::Value,
+    entry: &Entry,
+    publisher: &str,
+    keys: &[TrustKey],
+    third_party: bool,
+    findings: &mut Vec<Finding>,
+) {
+    if !manifest.is_object() || !is_envelope(manifest) {
+        return;
+    }
+    let id = entry.identifier.as_str();
+    let identity = manifest.get("identity").and_then(|v| v.as_str());
+    if identity.is_none_or(|text| text.trim().is_empty()) {
+        findings.push(finding(
+            Severity::Major,
+            "trust-manifest-shape",
+            Some(id),
+            "trust manifest carries no identity".into(),
+        ));
+    }
+    let subject = manifest.get("subject");
+    let subject_object = subject.filter(|s| s.is_object());
+    if subject_object.is_none() {
+        findings.push(finding(
+            Severity::Major,
+            "trust-manifest-shape",
+            Some(id),
+            "trust manifest carries no subject object".into(),
+        ));
+    } else if let Some(subject) = subject_object {
+        // Absent identifier or type is a shape absence,
+        // layer 1's judgment; a present one that differs
+        // is a binding failure, layer 2's.
+        let subject_id = subject.get("identifier").and_then(|v| v.as_str());
+        if subject_id.is_none() {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                "trust manifest subject carries no identifier".into(),
+            ));
+        }
+        let subject_type = subject.get("type").and_then(|v| v.as_str());
+        if subject_type.is_none() {
+            findings.push(finding(
+                Severity::Major,
+                "trust-manifest-shape",
+                Some(id),
+                "trust manifest subject carries no type".into(),
+            ));
+        }
+        let mut mismatched: Vec<&str> = Vec::new();
+        if let Some(subject_id) = subject_id
+            && subject_id != id
+        {
+            mismatched.push("identifier");
+        }
+        if let Some(subject_type) = subject_type
+            && subject_type != entry.media_type
+        {
+            mismatched.push("type");
+        }
+        // Digest and version compare where both sides
+        // carry them, with the design's one exception:
+        // a subject digest absent while the entry
+        // carries one is itself a mismatch, because
+        // the digest is the binding the draft seals.
+        let subject_digest = subject.get("digest").and_then(|v| v.as_str());
+        let digest_mismatch = match (subject_digest, entry.digest.as_deref()) {
+            (Some(claimed), Some(actual)) => claimed != actual,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if digest_mismatch {
+            mismatched.push("digest");
+        }
+        let subject_version = subject.get("version").and_then(|v| v.as_str());
+        if let (Some(claimed), Some(actual)) = (subject_version, entry.version.as_deref())
+            && claimed != actual
+        {
+            mismatched.push("version");
+        }
+        if !mismatched.is_empty() {
+            findings.push(finding(
+                Severity::Critical,
+                "trust-manifest-subject-mismatch",
+                Some(id),
+                format!(
+                    "trust manifest subject does not match the entry on {}",
+                    mismatched.join(", ")
+                ),
+            ));
+        }
+    }
+    if !third_party
+        && let Some(identity) = identity
+        && !identity_binds(identity, publisher)
+    {
+        findings.push(finding(
+            Severity::Critical,
+            "trust-manifest-identity-unbound",
+            Some(id),
+            format!(
+                "trust manifest identity {identity} does not bind to publisher domain {publisher}"
+            ),
+        ));
+    }
+    let Some(signature) = manifest.get("signature") else {
+        findings.push(finding(
+            Severity::Major,
+            "trust-manifest-shape",
+            Some(id),
+            "trust manifest carries no signature".into(),
+        ));
+        return;
+    };
+    let Some(signature) = signature.as_str() else {
+        findings.push(finding(
+            Severity::Major,
+            "trust-manifest-shape",
+            Some(id),
+            "trust manifest signature is not a string".into(),
+        ));
+        return;
+    };
+    let mut unsigned = manifest.clone();
+    unsigned
+        .as_object_mut()
+        .expect("an envelope is an object")
+        .remove("signature");
+    let canonical = match jcs::canonicalize(&unsigned) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            findings.push(finding(
+                Severity::Minor,
+                "trust-manifest-signature-unverified",
+                Some(id),
+                format!("the trust manifest could not be canonicalized: {reason}"),
+            ));
+            return;
+        }
+    };
+    match verify_detached_jws(signature, &canonical, keys) {
+        SignatureVerdict::Valid => {}
+        SignatureVerdict::Invalid(reason) => findings.push(finding(
+            Severity::Critical,
+            "trust-manifest-signature-invalid",
+            Some(id),
+            format!("trust manifest signature does not verify: {reason}"),
+        )),
+        SignatureVerdict::Unverified(reason) => findings.push(finding(
+            Severity::Minor,
+            "trust-manifest-signature-unverified",
+            Some(id),
+            format!("trust manifest signature went unverified: {reason}"),
+        )),
+    }
 }
 
 /// Shape and expiry for one trust manifest. The expiry is read
 /// where version 1 knows to look, an expiresAt date on the
 /// manifest or on its inner manifest document, or an exp claim
-/// in seconds. Anything else about the manifest, its signature
-/// above all, is outside Amendment D's scope and is not judged.
+/// in seconds. The envelope layers (subject, identity, and
+/// signature) are verify_envelope's, in the keyed pass.
 fn validate_trust_manifest(
     manifest: &serde_json::Value,
     entry_id: &str,
@@ -306,6 +563,7 @@ mod tests {
             digest: Some(format!("sha256:{}", "a".repeat(64))),
             updated_at: None,
             trust_manifest: None,
+            trust_manifests: vec![],
         }
     }
 
@@ -337,6 +595,145 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "representative-queries");
         assert_eq!(findings[0].severity, Severity::Minor);
+    }
+
+    // A real ES256 fixture: a P-256 key generated for
+    // these tests, its JWK, and a detached JWS over the
+    // JCS form of the manifest below, signed with
+    // openssl. The signature segment is only valid for
+    // the manifest exactly as written.
+    const FIXTURE_JWK: &str = r#"{"kty":"EC","crv":"P-256","kid":"did:web:example.com#key-1","x":"KFvtK60fJVnMb4stS4hJSzf4U37o4zyW2oy0fuOL_Ow","y":"C43rXNNfvh4McIabWEirso0xH2eDtSDCVfupwMHs7mE"}"#;
+    const FIXTURE_SIGNATURE: &str = "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ.._JNWqS8t8CWplUrJOvIPW_UiNQ_6pwTC8NTbZyEJEHivmugANeHTwTDP3UYw7SU6Yirz5DknxMsRln6MIdFdXw";
+
+    fn signed_entry() -> Entry {
+        let mut signed = entry();
+        signed.trust_manifest = Some(serde_json::json!({
+            "identity": "did:web:example.com",
+            "issuedAt": "2026-11-20T00:00:00Z",
+            "expiresAt": "2027-06-01",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "signature": FIXTURE_SIGNATURE,
+        }));
+        signed
+    }
+
+    fn fixture_keys() -> Vec<TrustKey> {
+        crate::trust::trust_keys_from_jwks(
+            &serde_json::from_str::<serde_json::Value>(FIXTURE_JWK).expect("the JWK parses"),
+        )
+    }
+
+    #[test]
+    fn a_signed_envelope_verifies_under_its_key() {
+        let findings = validate_catalog_with_keys(
+            &catalog_with(signed_entry()),
+            None,
+            "2026-11-21",
+            NOW,
+            &fixture_keys(),
+        );
+        assert!(findings.is_empty(), "findings were {findings:?}");
+    }
+
+    #[test]
+    fn a_signed_envelope_without_a_key_reports_unverified_never_silent() {
+        let findings =
+            validate_catalog_with_keys(&catalog_with(signed_entry()), None, "2026-11-21", NOW, &[]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "trust-manifest-signature-unverified");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        // The plain pass, which check uses, judges no
+        // envelope layer at all.
+        assert!(
+            validate_catalog(&catalog_with(signed_entry()), None, "2026-11-21", NOW).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_tampered_envelope_fails_its_signature_and_its_subject() {
+        // One field of the signed fixture changes: the
+        // subject's claimed digest. The binding breaks
+        // against the entry, and the signature, which
+        // sealed the original subject, breaks with it.
+        let mut tampered = signed_entry();
+        tampered
+            .trust_manifest
+            .as_mut()
+            .and_then(|m| m.get_mut("subject"))
+            .and_then(|s| s.as_object_mut())
+            .expect("the fixture carries a subject object")
+            .insert(
+                "digest".into(),
+                serde_json::Value::String(format!("sha256:{}", "b".repeat(64))),
+            );
+        let findings = validate_catalog_with_keys(
+            &catalog_with(tampered),
+            None,
+            "2026-11-21",
+            NOW,
+            &fixture_keys(),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-subject-mismatch")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-signature-invalid")
+        );
+    }
+
+    #[test]
+    fn an_unbound_identity_is_critical_and_a_third_party_is_exempt() {
+        let mut unbound = signed_entry();
+        unbound
+            .trust_manifest
+            .as_mut()
+            .and_then(|m| m.as_object_mut())
+            .expect("the fixture manifest is an object")
+            .insert(
+                "identity".into(),
+                serde_json::Value::String("did:web:other.example".into()),
+            );
+        let findings = validate_catalog_with_keys(
+            &catalog_with(unbound),
+            None,
+            "2026-11-21",
+            NOW,
+            &fixture_keys(),
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unbound")
+        );
+
+        // The same manifest as a third-party envelope is
+        // not held to the publisher binding.
+        let mut third = entry();
+        third.trust_manifests = vec![serde_json::json!({
+            "identity": "did:web:auditor.example.org",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "signature": FIXTURE_SIGNATURE,
+        })];
+        let findings =
+            validate_catalog_with_keys(&catalog_with(third), None, "2026-11-21", NOW, &[]);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unbound"),
+            "findings were {findings:?}"
+        );
     }
 
     #[test]
