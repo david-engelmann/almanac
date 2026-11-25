@@ -4273,9 +4273,12 @@ fn check_verifies_attestation_pins_when_the_run_fetches() {
     let fixture = fixture_binary("fixture_server");
     let (code, _, stderr) = generate_stdio(&site, &fixture);
     assert_eq!(code, 0, "generate failed: {stderr}");
-    let document = b"the attestation document, as served".to_vec();
-    let (att_uri, held) = serve_bytes(document.clone());
-    let pin = almanac_core::hash::sha256_hex(&document);
+    // The served document is a statement binding the
+    // entry by its digest, so the statement layer is
+    // silent wherever this test does not exercise it;
+    // it is rebuilt around the entry's real digest
+    // once the catalog is read below, before any run.
+    let (att_uri, held) = serve_bytes(b"placeholder".to_vec());
 
     // Plant a bound envelope whose attestations pin
     // the served document, on both catalog paths.
@@ -4297,6 +4300,19 @@ fn check_verifies_attestation_pins_when_the_run_fetches() {
         .as_str()
         .expect("the entry id")
         .to_string();
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("the entry digest is sha256")
+        .to_string();
+    let document = serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{ "name": "fixture", "digest": {"sha256": hex} }],
+        "predicateType": "https://slsa.dev/provenance/v1",
+    })
+    .to_string()
+    .into_bytes();
+    let pin = almanac_core::hash::sha256_hex(&document);
+    *held.lock().expect("lock") = document;
     let junk = format!(
         "eyJhbGciOiJFUzI1NiIsImtpZCI6ImRpZDp3ZWI6ZXhhbXBsZS5jb20ja2V5LTEifQ..{}",
         "A".repeat(86)

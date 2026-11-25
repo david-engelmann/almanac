@@ -3363,3 +3363,22 @@ channel the entry can answer, and a digest-only
 claim against an entry that records no digest is
 unanswerable rather than contradicted, so
 unverified at minor is the honest reading.
+
+### Statement binding hosted gate fix pass (2026-11-25)
+
+PR #20's first hosted run failed in the test step
+on the sixteenth slice's end-to-end test, a
+test-side premise of exactly the kind the core
+test's update had already handled: the pin test's
+served document was plain text, which the new
+statement layer correctly reports as carrying no
+subject claim this build can read, breaking the
+test's blanket silence assertions in its clean
+phases. The document is now a statement binding
+the entry by its digest, rebuilt around the
+digest the test reads from the generated catalog,
+so the pin test exercises the pin layer against a
+statement the statement layer honors. The failure
+was read firsthand from the job log; format,
+clippy, compile, and the core suites were green,
+and the slice's own end-to-end test passed.
