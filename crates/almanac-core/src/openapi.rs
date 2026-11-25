@@ -23,14 +23,19 @@
 //! Webhooks are not reduced; they are callbacks a publisher
 //! receives, not operations it serves.
 //!
-//! Parameters and schemas referenced by $ref are not
-//! resolved. Resolving references means following pointers
-//! into other documents, which is a fetch this crate never
-//! does. A parameter carried by reference does not appear in
-//! the required list, and a schema carried by reference is
-//! covered only by the components hash, which reports that
-//! the shared pool changed without naming which operation it
-//! touches. The record in DECISIONS.md names both limits.
+//! Parameters referenced by a local $ref (a fragment
+//! pointer into the same document) are resolved, so a
+//! shared parameter under components counts in the
+//! required list exactly as an inline one does. A
+//! reference pointing into another document is never
+//! followed, because that is a fetch this crate never
+//! does, and a reference that does not resolve leaves
+//! the parameter invisible. Schemas referenced by $ref
+//! are not resolved; a schema carried by reference is
+//! covered only by the components hash, which reports
+//! that the shared pool changed without naming which
+//! operation it touches. The record in DECISIONS.md
+//! names both limits.
 
 use std::collections::HashSet;
 
@@ -82,6 +87,10 @@ const METHODS: [&str; 8] = [
 /// reason the document cannot be read as an OpenAPI document,
 /// in words a publisher can act on.
 pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
+    // The document as a value, kept beside the object
+    // view below because local $ref pointers resolve
+    // against the whole document.
+    let root = doc;
     let doc = doc
         .as_object()
         .ok_or("the document is not a JSON object, so it is not an OpenAPI document")?;
@@ -144,6 +153,8 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
     let components_sha256 = hash::sha256_json(doc.get("components").unwrap_or(&Value::Null));
 
     let mut seen: HashSet<String> = HashSet::new();
+    let mut ref_cache: std::collections::HashMap<&str, Option<&Value>> =
+        std::collections::HashMap::new();
     let mut operations: Vec<OperationView> = Vec::new();
     for (path, item) in paths {
         let Some(item) = item.as_object() else {
@@ -171,6 +182,9 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
                     continue;
                 };
                 for param in params {
+                    let Some(param) = resolve_parameter(root, param, &mut ref_cache) else {
+                        continue;
+                    };
                     let required_flag = param
                         .get("required")
                         .and_then(|v| v.as_bool())
@@ -216,6 +230,111 @@ pub fn reduce_openapi(doc: &Value) -> Result<OpenApiView, String> {
     })
 }
 
+/// Resolve a local JSON pointer (a $ref of the form
+/// "#/a/b") against the document itself. Returns the
+/// pointed value, or None when the reference is not a
+/// local pointer or names a place the document does
+/// not hold. The fragment is percent-decoded first,
+/// as RFC 6901 section 6 prescribes for pointers
+/// carried in a URI fragment, and segments then
+/// unescape per RFC 6901 (~1 to /, then ~0 to ~). A
+/// segment naming an array index crosses the array.
+fn resolve_local_pointer<'v>(doc: &'v Value, reference: &str) -> Option<&'v Value> {
+    let fragment = reference.strip_prefix('#')?;
+    if fragment.is_empty() {
+        return Some(doc);
+    }
+    let decoded = percent_decode(fragment);
+    let path = decoded.strip_prefix('/')?;
+    let mut current = doc;
+    for segment in path.split('/') {
+        let key = segment.replace("~1", "/").replace("~0", "~");
+        current = match current {
+            Value::Array(items) => items.get(key.parse::<usize>().ok()?)?,
+            _ => current.get(&key)?,
+        };
+    }
+    Some(current)
+}
+
+/// Percent-decode a URI fragment: each %XX pair with
+/// two hex digits becomes its byte, and anything else
+/// stands as written. The decoded bytes are read as
+/// UTF-8 lossily, because a pointer segment is a
+/// document key and a key that is not text cannot
+/// match one.
+fn percent_decode(fragment: &str) -> String {
+    let bytes = fragment.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(hi) = hex_value(bytes[i + 1])
+            && let Some(lo) = hex_value(bytes[i + 2])
+        {
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// The parameter a parameter object names, following
+/// local $ref chains. A parameter with no $ref is
+/// itself. A reference pointing outside the document,
+/// or at a place the document does not hold, resolves
+/// to nothing, and the parameter stays invisible, as
+/// unresolved references always have. The visited set
+/// bounds chains, so a cycle resolves to nothing
+/// rather than spinning. Resolutions are cached by
+/// reference for the length of one reduction, so a
+/// chain shared by many parameters is walked once,
+/// not once per parameter that names it.
+fn resolve_parameter<'v>(
+    doc: &'v Value,
+    param: &'v Value,
+    cache: &mut std::collections::HashMap<&'v str, Option<&'v Value>>,
+) -> Option<&'v Value> {
+    let Some(first) = param.get("$ref").and_then(|v| v.as_str()) else {
+        return Some(param);
+    };
+    let mut visited: Vec<&str> = Vec::new();
+    let mut reference = first;
+    let resolved = loop {
+        if visited.contains(&reference) {
+            break None;
+        }
+        visited.push(reference);
+        if let Some(cached) = cache.get(reference) {
+            break *cached;
+        }
+        let Some(next) = resolve_local_pointer(doc, reference) else {
+            break None;
+        };
+        match next.get("$ref").and_then(|v| v.as_str()) {
+            Some(next_reference) => reference = next_reference,
+            None => break Some(next),
+        }
+    };
+    for walked in visited {
+        cache.insert(walked, resolved);
+    }
+    resolved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +360,92 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn local_ref_parameters_join_the_required_list() {
+        // Every posture below is arranged to change the
+        // expected list if its behavior breaks: each
+        // referenced parameter is supplied by exactly
+        // the route the posture names, and no other.
+        let mut document = doc();
+        document["components"] = serde_json::json!({
+            "parameters": {
+                "Region": {"name": "region", "in": "header", "required": true},
+                "Trace": {"name": "trace", "in": "header"},
+                "Locale": {"name": "locale", "in": "query", "required": true},
+                "Alias": {"$ref": "#/components/parameters/Locale"},
+                "LoopA": {"$ref": "#/components/parameters/LoopB"},
+                "LoopB": {"$ref": "#/components/parameters/LoopA"},
+                "External": {"name": "external", "in": "header", "required": true},
+                "Version": {"name": "version", "in": "query", "required": true},
+                "My Param": {"name": "spaced", "in": "query", "required": true}
+            }
+        });
+        document["paths"]["/charges"]["parameters"] = serde_json::json!([
+            {"name": "tenant", "in": "header", "required": true},
+            {"$ref": "#/components/parameters/Version"}
+        ]);
+        document["paths"]["/charges"]["post"]["parameters"] = serde_json::json!([
+            {"$ref": "#/components/parameters/Region"},
+            {"$ref": "#/components/parameters/Trace"},
+            {"$ref": "#/components/parameters/Alias"},
+            {"$ref": "#/components/parameters/LoopA"},
+            {"$ref": "#/components/parameters/Missing"},
+            {"$ref": "https://example.com/other.json#/components/parameters/External"},
+            {"$ref": "#/components/parameters/My%20Param"},
+            {"$ref": "#/info/title"},
+            {"$ref": "#/components/parameters/Trace", "name": "zzz", "required": true},
+            {"$ref": 42, "name": "inline", "in": "query", "required": true},
+            {"name": "key", "in": "header", "required": true}
+        ]);
+        document["paths"]["/refunds"] = serde_json::json!({
+            "post": {
+                "operationId": "createRefund",
+                "parameters": [{"$ref": "#/paths/~1charges/post/parameters/10"}],
+                "responses": {"200": {"description": "ok"}}
+            }
+        });
+        let view = reduce_openapi(&document).expect("reduces");
+        let create = view
+            .operations
+            .iter()
+            .find(|op| op.id == "createCharge")
+            .expect("operation");
+        // Region arrives by direct reference, locale
+        // only through the alias chain, version only by
+        // a path level reference, spaced only through a
+        // percent-encoded pointer, and inline only
+        // because a non-string $ref is no reference at
+        // all. The optional Trace stays out, as do the
+        // two-node cycle, the missing target, the
+        // external reference (whose fragment names a
+        // parameter nothing else supplies), the pointer
+        // landing on a string, and the reference whose
+        // siblings claim a name and a required flag the
+        // reference itself does not carry.
+        assert_eq!(
+            create.required,
+            vec![
+                "header:key",
+                "header:region",
+                "header:tenant",
+                "query:inline",
+                "query:locale",
+                "query:spaced",
+                "query:version"
+            ]
+        );
+        // A pointer crossing an array resolves: the
+        // refunds operation references the charges
+        // operation's eleventh parameter, the inline
+        // key, by index.
+        let refund = view
+            .operations
+            .iter()
+            .find(|op| op.id == "createRefund")
+            .expect("operation");
+        assert_eq!(refund.required, vec!["header:key"]);
     }
 
     #[test]

@@ -2010,3 +2010,107 @@ the named run is then the only difference. With
 that shape the full local gate passes over the
 slice (format, clippy, and the whole suite), and
 the slice stages on that evidence.
+
+## Twelfth slice: local $ref parameters resolved (design, 2026-11-25)
+
+The OpenAPI reduction's named limit, recorded when
+the slice landed, is that parameters and schemas
+referenced by $ref are not resolved. For schemas
+the limit stands: the components hash reports the
+shared pool changed without attributing it, and
+attribution without resolution would be invented.
+For parameters the limit costs the gate a real
+class: shared parameters live under components in
+real documents and operations reference them, so a
+required parameter carried by reference never
+enters the operation's required list, and its
+arrival or departure is invisible.
+
+The refusal's reasoning was that resolving
+references means following pointers into other
+documents, which is a fetch the core never does.
+That is true of external references and stays
+refused. A local reference, a fragment pointer
+into the same document (#/components/parameters/
+Name and any other local pointer), resolves
+against the document already in hand. This slice
+resolves local $ref parameters during reduction:
+the pointed object's name, location, and required
+flag count exactly as an inline parameter's do.
+Reference chains are followed with a visited set,
+so a cycle leaves the parameter invisible rather
+than spinning; a chain of distinct references
+resolves however long it runs, and a finite
+document holds finitely many reference strings,
+so the walk always ends. A
+reference pointing outside the document, or at a
+place the document does not hold, leaves the
+parameter invisible, as today.
+
+One consequence is named plainly: a baseline
+recorded before this slice holds required lists
+without referenced parameters, so the first check
+of such a site reports the newly visible
+parameters as required parameters added, at Major,
+until the publisher regenerates and records the
+fuller baseline. That is the honest price of the
+checker seeing more of the same document, and it
+is a one-time re-baseline, not a standing noise.
+
+As built: resolve_parameter in the core reduction
+follows a parameter's $ref through
+resolve_local_pointer, which percent-decodes the
+fragment as RFC 6901 section 6 prescribes, walks
+object keys with the standard ~ escapes, and
+crosses arrays by index; the visited set bounds
+the walk, and resolutions are cached by reference
+for one reduction, so a chain shared by many
+parameters is walked once. The drift classes do
+not change: a referenced parameter enters the
+same required list the baseline records and the
+check compares, at generate and at check alike,
+because both run the one reduction. A core test
+pins the postures in one document, each supplied
+by exactly the route it names: a direct reference,
+an alias chain, a path level reference, a
+percent-encoded pointer, an array-crossing
+pointer, an optional reference staying out, and
+cyclic, missing, external, non-object, and
+sibling-carrying references staying invisible.
+
+### $ref parameters checkpoint fix pass (2026-11-25)
+
+The standards review caught the first test draft
+arranging two of its postures so they could not
+fail: the alias pointed at a parameter the direct
+reference already supplied, and the external
+reference's fragment named the same parameter, so
+deleting chain following, or resolving external
+fragments locally, left the expected list
+unchanged. The test was rebuilt so every posture
+is supplied by exactly its own route, and it grew
+the red team's unpinned postures (a two-node
+cycle, a path level reference, a pointer landing
+on a non-object, a non-string $ref read as an
+ordinary parameter, and a reference whose siblings
+are ignored, as OpenAPI's rule requires). The
+reviews' remaining points closed in code rather
+than in the record: the pointer walker now
+percent-decodes its fragment and crosses arrays
+by index, so the design's "any other local
+pointer" is true as written, and resolutions are
+cached per reduction, closing the quadratic
+re-walk of shared chains the red team sized. The
+design section's chain sentence was corrected to
+the mechanism the code implements. The first
+compile of the repaired tree then caught two real
+errors in the repair itself, which the gate
+exists to catch: the call site passed the
+reduction's shadowed object view where the
+resolver takes the whole document (the reduction
+now keeps the document beside the view as root),
+and the cached walk carried a dead first
+assignment (the walk now binds each hop
+directly). Both are fixed in the slice as staged,
+and the hosted gate carries the verdict on the
+staged tree.
