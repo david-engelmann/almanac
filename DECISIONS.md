@@ -2584,9 +2584,11 @@ the same records from the entries it carries, a
 judgment beyond the design's letter, taken because
 a migrated site is a baseline's first writing and
 leaving the class inert there until a regeneration
-would exempt exactly the adoption path; it is
+would exempt exactly the adoption path; it was
 flagged for Main's ratification in the staging
-report. Migrate's standing limit applies to the
+report, and Main ratified it on 2026-11-25: every
+baseline carries its envelope record from birth,
+written by the command that writes the baseline. Migrate's standing limit applies to the
 record as to its entries: migration vouches for
 what it ingested at the level it verified it.
 
@@ -2686,3 +2688,20 @@ accepted beside the entry classes that judge the
 rename's other faces; --fetch-keys in check is
 the operator's named choice, as in validate, and
 the usage text says what it does.
+
+### Check integration hosted gate fix pass (2026-11-25)
+
+The first hosted attempt (run 45597261454) compiled
+the slice whole, format and clippy green, the core
+suites green, and 52 of 53 CLI tests green. The one
+failure was the slice's own end-to-end test at its
+keyed phase, and the defect was in the test's
+invocation, not the product: it passed --trust-keys
+after --command, and --command consumes the rest of
+argv by the CLI's standing contract, so the flag
+became part of the fixture's command line and the
+run was unkeyed, clean, and correctly silent. The
+flag now stands before --command in the invocation.
+The discipline was already on this seat's record;
+the test forgot it, and the hosted gate is what
+caught it.

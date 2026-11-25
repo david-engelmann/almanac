@@ -4202,10 +4202,10 @@ fn check_judges_trust_manifests_and_remembers_a_removal() {
         "check",
         "--site",
         &site_arg(&site),
-        "--command",
-        &fixture.to_string_lossy(),
         "--trust-keys",
         &keys_path.to_string_lossy(),
+        "--command",
+        &fixture.to_string_lossy(),
     ]);
     assert_eq!(code, 1, "keyed check passed: {stdout}");
     assert!(
