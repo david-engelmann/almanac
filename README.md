@@ -59,7 +59,11 @@ Generation is the on-ramp. The gate is the product.
   checked against its server card as declared evidence, or probed
   live when a publisher credential is available through the
   environment, and a refused credential is named in the run's
-  output rather than silently falling back. It also cross checks the
+  output rather than silently falling back. A live run, or any run
+  with --fetch-remote, also fetches the artifacts, OpenAPI
+  documents and agent cards the catalog announces at URLs outside
+  the site, so a document hosted on a docs domain is gated where
+  it lives. It also cross checks the
   MCP endpoints a site's agents.json names against the ones the
   catalog announces, because two public claims about one surface
   should not disagree.
