@@ -208,6 +208,108 @@ fn get_json(agent: &Agent, url: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Whether a URL's host is a literal non-public address:
+/// link-local (the cloud metadata family lives there),
+/// unique-local, or unspecified, in either family. Names
+/// are not judged: a name that resolves privately is the
+/// operator's own infrastructure question, and the
+/// recorded posture (fetching is a live run's opt-in
+/// behavior against the publisher's own baseline) is
+/// what bounds that side.
+fn host_is_non_public(url: &str) -> bool {
+    use std::net::IpAddr;
+    let Some(rest) = url.split("://").nth(1) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.octets()[0] == 0,
+        IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// The checker's fetcher for public documents the catalog
+/// announces: one agent built once for a run's fetches,
+/// against the module's build-once convention. The walk
+/// is the metadata walk's shape (redirects followed by
+/// hand, up to three) but with every failure named,
+/// because the checker reports the reason, and with the
+/// size cap enforced as a refusal rather than a silent
+/// truncation. No credential is ever attached: announced
+/// artifacts are public documents, and the publisher
+/// token is scoped to the MCP endpoint. A URL (or a
+/// redirect target) naming a literal non-public address
+/// is refused before any request: the baseline is a
+/// committed file, and a fetching run must not become a
+/// way to make CI read a metadata endpoint.
+pub(crate) struct DocumentFetcher {
+    agent: Agent,
+}
+
+impl DocumentFetcher {
+    pub(crate) fn new() -> Self {
+        DocumentFetcher {
+            agent: build_agent(),
+        }
+    }
+
+    pub(crate) fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        const LIMIT: usize = 16 * 1024 * 1024;
+        let mut current = url.to_string();
+        for _ in 0..4 {
+            if host_is_non_public(&current) {
+                return Err(
+                    "the URL names a non-public address, which the checker will not fetch".into(),
+                );
+            }
+            let mut response = self
+                .agent
+                .get(&current)
+                .call()
+                .map_err(|e| format!("the fetch failed with {e}"))?;
+            let status = response.status().as_u16();
+            if status == 200 {
+                let mut bytes = Vec::new();
+                response
+                    .body_mut()
+                    .as_reader()
+                    .take((LIMIT + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| format!("the fetch failed with {e}"))?;
+                if bytes.len() > LIMIT {
+                    return Err("the document is over the 16 MiB reading limit".into());
+                }
+                return Ok(bytes);
+            }
+            if (300..400).contains(&status) {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or("the redirect named no location")?;
+                current = resolve_location(&current, location)
+                    .ok_or("the redirect location could not be resolved")?;
+                continue;
+            }
+            return Err(format!("the server answered status {status}"));
+        }
+        Err("the fetch followed more than three redirects".into())
+    }
+}
+
 /// Fetch the server card a surface serves. SEP-2127 Final
 /// puts the card at the endpoint's own path with /server-card
 /// appended, so that location is tried first, and the well

@@ -8,7 +8,8 @@
 //! committed like a lockfile and never served as part of the
 //! catalog. URLs in catalog entries map back to files by stripping
 //! the publisher's own origin, which is how the checker reads the
-//! artifacts as served.
+//! artifacts as served; a fetching run also reads the ones whose
+//! URLs do not map, over the network where they live.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1769,6 +1770,28 @@ struct PrintedReport<'a> {
     report: &'a Report,
 }
 
+/// The bytes of a document or card a baseline record
+/// announces: the site file when its URL maps into the
+/// site, the fetched bytes when it does not map and this
+/// run fetches remote artifacts, and otherwise the reason
+/// it cannot be read, in the caller's own missing words.
+fn announced_bytes(
+    site: &Path,
+    domain: &str,
+    url: &str,
+    fetcher: &probe_http::DocumentFetcher,
+    fetching: bool,
+    missing: &str,
+) -> Result<Vec<u8>, String> {
+    match url_to_path(site, domain, url) {
+        Some(path) => fs::read(&path).map_err(|_| missing.to_string()),
+        None if fetching => fetcher
+            .fetch(url)
+            .map_err(|reason| format!("it could not be fetched ({reason})")),
+        None => Err("its URL does not map into the site".into()),
+    }
+}
+
 /// The check command. Reads the site, probes the live surface
 /// when the run has a target, prints the report and returns the
 /// exit code. With no target named and none resolvable from the
@@ -1780,6 +1803,7 @@ pub fn check(
     target: Option<&ProbeTarget>,
     fail_at: Severity,
     token: Option<&str>,
+    fetch_remote: bool,
 ) -> Result<i32, String> {
     let ard_path = site.join(".well-known/ard.json");
     let legacy_path = site.join(".well-known/ai-catalog.json");
@@ -1838,10 +1862,38 @@ pub fn check(
             skill_hashes.push((skill.entry_id.clone(), hash::sha256_hex(&bytes)));
         }
     }
+    // A run fetches remote artifacts when it already does
+    // network work, which is an HTTP target, named or
+    // resolved from the catalog, or when the operator asks
+    // for fetching on its own. A stdio target is local
+    // work and does not fetch; repo mode without either
+    // stays offline.
+    let fetching = fetch_remote || matches!(target, Some(ProbeTarget::Http(_)));
+    let fetcher = probe_http::DocumentFetcher::new();
     let mut artifact_digests: Vec<(String, Option<String>)> = Vec::new();
     for artifact in &baseline.artifacts {
         if let Some(path) = url_to_path(site, &published.host.domain, &artifact.url) {
             let digest = fs::read(&path).ok().map(|bytes| hash::sha256_hex(&bytes));
+            artifact_digests.push((artifact.url.clone(), digest));
+        } else if fetching {
+            // The digest channel carries no reason, so a
+            // failed fetch is named on stderr here and the
+            // digest reads as missing, as a failed local
+            // read already does.
+            let digest = match announced_bytes(
+                site,
+                &published.host.domain,
+                &artifact.url,
+                &fetcher,
+                fetching,
+                "the artifact is missing where its catalog entry points",
+            ) {
+                Ok(bytes) => Some(hash::sha256_hex(&bytes)),
+                Err(reason) => {
+                    eprintln!("note, for the artifact at {}, {reason}", artifact.url);
+                    None
+                }
+            };
             artifact_digests.push((artifact.url.clone(), digest));
         }
     }
@@ -1886,18 +1938,15 @@ pub fn check(
     let mut openapi_views: Vec<(String, OpenApiView)> = Vec::new();
     let mut openapi_broken: Vec<(String, String)> = Vec::new();
     for api in &baseline.openapi {
-        let Some(path) = url_to_path(site, &published.host.domain, &api.url) else {
-            openapi_broken.push((
-                api.entry_id.clone(),
-                "its URL does not map into the site".into(),
-            ));
-            continue;
-        };
-        match fs::read(&path) {
-            Err(_) => openapi_broken.push((
-                api.entry_id.clone(),
-                "the document is missing where its catalog entry points".into(),
-            )),
+        match announced_bytes(
+            site,
+            &published.host.domain,
+            &api.url,
+            &fetcher,
+            fetching,
+            "the document is missing where its catalog entry points",
+        ) {
+            Err(reason) => openapi_broken.push((api.entry_id.clone(), reason)),
             Ok(bytes) => match parse_api_document(&bytes) {
                 Err(reason) => openapi_broken.push((
                     api.entry_id.clone(),
@@ -1915,18 +1964,15 @@ pub fn check(
     let mut a2a_views: Vec<(String, A2aView)> = Vec::new();
     let mut a2a_broken: Vec<(String, String)> = Vec::new();
     for card in &baseline.a2a {
-        let Some(path) = url_to_path(site, &published.host.domain, &card.url) else {
-            a2a_broken.push((
-                card.entry_id.clone(),
-                "its URL does not map into the site".into(),
-            ));
-            continue;
-        };
-        match fs::read(&path) {
-            Err(_) => a2a_broken.push((
-                card.entry_id.clone(),
-                "the card is missing where its catalog entry points".into(),
-            )),
+        match announced_bytes(
+            site,
+            &published.host.domain,
+            &card.url,
+            &fetcher,
+            fetching,
+            "the card is missing where its catalog entry points",
+        ) {
+            Err(reason) => a2a_broken.push((card.entry_id.clone(), reason)),
             Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Err(e) => a2a_broken.push((
                     card.entry_id.clone(),

@@ -32,7 +32,12 @@ Commands
   validate  Check a catalog beyond schema, URN anchoring, entry
             shape, representative query counts, path coherence
   check     Compare published catalog, baseline and live surface
-            and exit nonzero on drift at or above the fail severity
+            and exit nonzero on drift at or above the fail severity.
+            A run with an HTTP target (named or resolved from
+            the catalog), or with --fetch-remote, also fetches
+            announced artifacts, OpenAPI documents and agent
+            cards whose URLs do not map into the site; without
+            either, check stays offline
   migrate   Verify a legacy ai-catalog.json against the live
             surface and emit the dual path pair and the gate
 
@@ -68,6 +73,7 @@ struct Flags {
     fail_at: Option<String>,
     queries: Vec<String>,
     token_env: Option<String>,
+    fetch_remote: bool,
     command: Vec<String>,
 }
 
@@ -79,6 +85,11 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
         if arg == "--command" {
             flags.command = args[i + 1..].to_vec();
             break;
+        }
+        if arg == "--fetch-remote" {
+            flags.fetch_remote = true;
+            i += 1;
+            continue;
         }
         let value = |i: usize| -> Result<String, String> {
             let v = args
@@ -194,6 +205,7 @@ fn run() -> Result<i32, String> {
                 target.as_ref(),
                 fail_at(&flags)?,
                 token(&flags).as_deref(),
+                flags.fetch_remote,
             )
         }
         "validate" => {

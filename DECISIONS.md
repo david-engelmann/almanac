@@ -1574,3 +1574,134 @@ deeply nested YAML can still exhaust the reader
 inside the byte cap, a robustness limit that must be
 settled before remote artifact fetching makes these
 bytes network supplied.
+
+## Generation roadmap, eighth slice: remote artifact fetching (design, 2026-11-24)
+
+Check today reads only what the site directory holds.
+An entry URL on the publisher's own origin maps back
+to a site file; anything else is outside the gate's
+reach, in two inconsistent ways. A baselined OpenAPI
+document or agent card whose URL is off origin is
+reported broken with "its URL does not map into the
+site" and fails at Critical, while a baselined
+artifact (a server card copy above all) whose URL is
+off origin is silently never digest checked at all:
+the digest list simply omits it and the core loop
+skips what it is not given. A publisher who hosts a
+document on a docs domain or a card on a CDN gets a
+false failure for the document and no verification
+for the artifact.
+
+The slice teaches check to fetch what it cannot map.
+The fetch set is the baselined things check already
+reads when they are local: artifacts, OpenAPI
+documents, and A2A agent cards. Skills stay file
+truth: a skill is a file in the site by construction,
+and the directory walk that finds unannounced skills
+has no remote form. Fetching happens in a live run,
+which is a run that already does network work: a
+target is named, or the operator passes
+--fetch-remote for a targetless run (a REST only
+site's whole surface can be remote). Repo mode
+without either stays offline, as the design promises
+per pull request runs, and keeps today's behavior.
+(The checkpoint fix pass below narrows the trigger:
+the target that counts is an HTTP one, named or
+resolved from the catalog; a stdio target is local
+work and does not fetch.)
+
+The fetcher is one helper in the CLI beside the
+probe's own reads: blocking, no credential ever (the
+publisher token is scoped to the MCP endpoint by the
+credential slice's rule and never rides to an artifact
+URL; announced artifacts are public documents), the
+probe's 30 second timeout and 16 MiB cap, and up to
+three redirects followed, as the metadata fetches do.
+A fetch that fails (unreachable, a non success status,
+over the cap) takes the channel the local read already
+uses: a document or card goes to its broken list with
+the fetch's reason and fails at Critical unreadable;
+an artifact's digest reads as missing where its entry
+points, the existing Critical. Fetched bytes flow into
+exactly the values local bytes flow into today (the
+digest list, the document views), so the core and
+every drift class stay unchanged and network free.
+
+One debt comes due in this slice, recorded at the
+YAML fix pass: fetched YAML is network supplied, so
+the reader's nesting limit must be settled, not just
+capped. The build measures the real failure depth
+first; if deep nesting aborts the reader, the parse
+helper gains a depth guard at the JSON reader's own
+128, counted over flow brackets and block indentation,
+refusing deeper documents with the reason named.
+
+As built: check takes a fetch_remote flag beside the
+target; a run fetches when it has an HTTP target
+(named or resolved from the catalog) or the flag is
+passed. One helper (announced_bytes) serves
+both document readers with the caller's missing words,
+and the artifact digest loop fetches what it cannot
+map. The fetcher (fetch_document in the probe module)
+follows three redirects by hand, caps at 16 MiB as a
+refusal, names every failure, and carries no
+credential. Fetched bytes enter exactly the values
+local bytes enter, so the core is untouched. A test
+repoints a generated site at a local HTTP server and
+walks the whole story: offline refusal naming the
+unmapped URL, a clean fetching run, an operation
+removed remotely at Major, a card tampered remotely
+breaking its digest. The nesting debt is settled by
+measurement, not by a guard: against the built binary,
+a 100,000 deep flow document and a 3,000 deep block
+document both refuse cleanly at the YAML reader's own
+recursion limit (the error names it, at the same depth
+as the JSON reader's), and a nine level alias bomb
+refuses at its repetition limit. serde_yaml 0.9.34
+carries both guards itself, so the parse helper needs
+none of its own; the 16 MiB cap stands as the outer
+bound.
+
+### Remote fetching checkpoint fix pass (2026-11-24)
+
+The three reviews landed with no Critical on any
+axis. The red team's Major was the fetch target set:
+baseline URLs were fetched with no restriction, and a
+crafted baseline in a contributor's pull request plus
+a fetching run against the unreviewed tree could make
+CI read internal addresses, with the report's named
+reasons and any reduction leaking what answered. The
+fetcher now refuses, before any request and again at
+each redirect target, a URL naming a literal
+non-public address (link local, where the cloud
+metadata family lives; unique local; unspecified).
+Names are deliberately not judged: a name resolving
+privately is recorded as the accepted residual,
+bounded by the posture that fetching is a live run's
+opt-in behavior against the publisher's own committed
+baseline, response bodies are never printed, and live
+runs belong on reviewed trees in the design's own
+mode split. Also closed: a stdio target no longer
+turns fetching on (a local child process is not
+network work; the condition is an HTTP target, named
+or resolved, or the flag), which also corrects the
+record's "a target is named" to the code's actual
+rule; the artifact loop routes through announced_bytes
+and names a failed fetch on stderr, since the digest
+channel carries no reason and a remote outage must
+not read as a deletion with nothing to act on; the
+fetcher is one DocumentFetcher built once per run,
+matching the module's build-once convention; check's
+doc comment, displaced onto the helper at insertion,
+is restored; USAGE names the full fetch set; and the
+test gains a thread-per-connection server, the
+artifact-count assumption stated, a run where an HTTP
+target alone turns fetching on, and a dead-host case
+pinning the named fetch failure. Recorded and
+accepted: a run's fetch time is bounded per document
+(30 seconds, three redirects) but not in aggregate,
+so a baseline with many slow remote records can hold
+a scheduled run; and the A2A fetch arm shares the one
+helper with the OpenAPI arm rather than carrying its
+own test, the two call sites being the same code
+path.

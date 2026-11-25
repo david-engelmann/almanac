@@ -2114,6 +2114,200 @@ fn openapi_input_and_operation_drift() {
     assert!(stderr.contains("openapi"), "stderr was {stderr}");
 }
 
+/// A one purpose HTTP server for the remote artifact
+/// tests: it answers every request with the bytes it
+/// currently holds, so a test can change what the remote
+/// side serves between checks.
+fn serve_bytes(bytes: Vec<u8>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(bytes));
+    let held = shared.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let held = held.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let body = held.lock().expect("lock").clone();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), shared)
+}
+
+fn check_fetch_remote(site: &Path) -> (i32, String, String) {
+    run(&["check", "--site", &site_arg(site), "--fetch-remote"])
+}
+
+#[test]
+fn check_fetches_remote_artifacts() {
+    // A document and a card the catalog announces at
+    // remote URLs: offline check cannot read the document
+    // and says so; a fetching run reads both where they
+    // live, and drift on the remote side is caught the
+    // same way local drift is.
+    let clean = fixture_binary("fixture_server");
+    let src = temp_site("remote-artifacts-src");
+    let doc_path = src.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let site = temp_site("remote-artifacts");
+    let (code, _, stderr) = generate_stdio_with_openapi(&site, &clean, &doc_path);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    let doc_bytes = std::fs::read(&doc_path).expect("doc bytes");
+    let (doc_base, doc_held) = serve_bytes(doc_bytes);
+    let card_bytes =
+        std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card bytes");
+    let (card_base, card_held) = serve_bytes(card_bytes);
+
+    // Repoint the document in the baseline and in both
+    // catalog files, and the card artifact in the
+    // baseline, at the remote URLs.
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(
+        baseline["artifacts"].as_array().expect("artifacts").len(),
+        1,
+        "a stdio generate records exactly one artifact, the card copy"
+    );
+    baseline["openapi"][0]["url"] = serde_json::Value::String(format!("{doc_base}/billing.json"));
+    baseline["artifacts"][0]["url"] =
+        serde_json::Value::String(format!("{card_base}/server-card.json"));
+    std::fs::write(
+        site.join("baseline.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&baseline).expect("serialize")
+        ),
+    )
+    .expect("write baseline");
+    for name in ["ard.json", "ai-catalog.json"] {
+        let path = site.join(".well-known").join(name);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("catalog")).expect("catalog json");
+        for entry in catalog["entries"].as_array_mut().expect("entries") {
+            if entry["type"] == "application/openapi+json" {
+                entry["url"] = serde_json::Value::String(format!("{doc_base}/billing.json"));
+            }
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&catalog).expect("serialize")
+            ),
+        )
+        .expect("write catalog");
+    }
+    std::fs::remove_file(site.join("billing.json")).expect("remove local doc");
+
+    // Offline, the document cannot be read and the run
+    // says exactly that.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 1, "offline check must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-document-unreadable")
+            && stdout.contains("does not map into the site"),
+        "report was {stdout}"
+    );
+
+    // Fetching, the same site is clean.
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 0, "fetching check failed with {stdout}");
+
+    // An HTTP target turns fetching on without the flag:
+    // the same run probes the fixture surface and fetches
+    // the remote document and card.
+    let (fixture_url, _mode) = start_http_fixture();
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site), "--url", &fixture_url]);
+    assert_eq!(code, 0, "targeted check failed with {stdout}");
+
+    // An operation removed on the remote side is drift.
+    let mut shrunk = billing_doc();
+    shrunk["paths"]["/charges"]
+        .as_object_mut()
+        .expect("paths")
+        .remove("get");
+    *doc_held.lock().expect("lock") = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&shrunk).expect("serialize")
+    )
+    .into_bytes();
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 1, "removed operation must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-operation-removed"),
+        "report was {stdout}"
+    );
+    *doc_held.lock().expect("lock") = std::fs::read(&doc_path).expect("doc bytes restored");
+
+    // A card changed on the remote side breaks its digest.
+    *card_held.lock().expect("lock") = b"{\"tampered\":true}\n".to_vec();
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(code, 1, "tampered card must fail, report was {stdout}");
+    assert!(stdout.contains("digest-mismatch"), "report was {stdout}");
+    *card_held.lock().expect("lock") =
+        std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card restored");
+
+    // A document whose host is gone fails as unreadable
+    // with the fetch's reason named, not as a missing
+    // file: repoint it at a port nothing serves.
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind dead");
+    let dead_port = dead.local_addr().expect("addr").port();
+    drop(dead);
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    baseline["openapi"][0]["url"] =
+        serde_json::Value::String(format!("http://127.0.0.1:{dead_port}/billing.json"));
+    std::fs::write(
+        site.join("baseline.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&baseline).expect("serialize")
+        ),
+    )
+    .expect("write baseline");
+    for name in ["ard.json", "ai-catalog.json"] {
+        let path = site.join(".well-known").join(name);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("catalog")).expect("catalog json");
+        for entry in catalog["entries"].as_array_mut().expect("entries") {
+            if entry["type"] == "application/openapi+json" {
+                entry["url"] =
+                    serde_json::Value::String(format!("http://127.0.0.1:{dead_port}/billing.json"));
+            }
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&catalog).expect("serialize")
+            ),
+        )
+        .expect("write catalog");
+    }
+    let (code, stdout, _) = check_fetch_remote(&site);
+    assert_eq!(
+        code, 1,
+        "unreachable document must fail, report was {stdout}"
+    );
+    assert!(
+        stdout.contains("openapi-document-unreadable") && stdout.contains("could not be fetched"),
+        "report was {stdout}"
+    );
+}
+
 #[test]
 fn yaml_openapi_documents_generate_and_drift() {
     // A YAML OpenAPI document generates exactly as its
