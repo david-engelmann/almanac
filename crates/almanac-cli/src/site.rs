@@ -2274,7 +2274,7 @@ fn validation_keys(
         keys.extend(almanac_core::trust::trust_keys_from_jwks(&document));
     }
     if fetch_keys {
-        let fetcher = DocumentFetcher::new();
+        let fetcher = probe_http::DocumentFetcher::new();
         let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
         let manifests = published
             .entries

@@ -2404,4 +2404,8 @@ example is parsed from the RFC's printed text in
 both tests that carry it instead of standing as a
 float literal, which keeps the text as the source
 and answers the excessive precision lint without
-an allowance. Nothing else changed.
+an allowance. Nothing else changed. The second
+attempt compiled the core clean and refused in the
+CLI: the key resolution named the document fetcher
+bare where the file's idiom is the qualified path,
+one word, now qualified like its neighbours.
