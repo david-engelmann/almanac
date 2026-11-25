@@ -122,25 +122,26 @@ fn write_number(number: &serde_json::Number) -> Result<String, String> {
 
 /// The ECMAScript Number::toString serialization, the
 /// form JCS adopts. The digits are the shortest string
-/// that round trips to the same double, which Rust's
-/// own float formatting also produces; the placement
-/// of the decimal point and the choice between plain
-/// and exponential form follow the ECMAScript rules.
+/// that round trips to the same double. Rust's own
+/// float formatting does not always produce them: its
+/// digits can run one long, and the RFC's first
+/// example is such a value, formatting with a trailing
+/// 25 where ECMAScript prints the shorter 3. The ryu
+/// crate computes the provably shortest digits, the
+/// algorithm ECMAScript implementations use, and this
+/// module takes its digits and decimal position from
+/// ryu's serialization; the placement of the decimal
+/// point and the choice between plain and exponential
+/// form are then this module's own, by the ECMAScript
+/// rules.
 fn write_double(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
     }
     let negative = value < 0.0;
-    // Rust's lower exponential form is the shortest
-    // digits with a decimal exponent: d.dddde<exp>.
-    let sci = format!("{:e}", value.abs());
-    let (mantissa, exp_text) = sci.split_once('e').expect("exponential form has an e");
-    let exp: i32 = exp_text.parse().expect("the exponent is an integer");
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let mut buffer = ryu::Buffer::new();
+    let (digits, n) = shortest_digits(buffer.format_finite(value.abs()));
     let k = digits.len() as i32;
-    // The value is digits * 10^(n-k), with n the
-    // position the ECMAScript rules speak in.
-    let n = exp + 1;
     let mut out = String::new();
     if negative {
         out.push('-');
@@ -174,6 +175,36 @@ fn write_double(value: f64) -> String {
         out.push_str(&point_exp.to_string());
     }
     out
+}
+
+/// Split a ryu serialization, plain or exponential,
+/// into its significant digits and the ECMAScript
+/// position n, where the value reads as the digits
+/// times 10^(n - digits.len()). Place holding zeros
+/// in a plain serialization are not significant: the
+/// leading ones fall away, and each trailing one
+/// moves into the scale, which leaves n unchanged.
+fn shortest_digits(text: &str) -> (String, i32) {
+    let (mantissa, exponent) = match text.split_once('e') {
+        Some((mantissa, exp)) => (
+            mantissa,
+            exp.parse::<i32>().expect("the ryu exponent is an integer"),
+        ),
+        None => (text, 0),
+    };
+    let (point, raw) = match mantissa.split_once('.') {
+        Some((head, tail)) => (head.len() as i32, format!("{head}{tail}")),
+        None => (mantissa.len() as i32, mantissa.to_string()),
+    };
+    let mut scale = exponent + point - raw.len() as i32;
+    let mut digits = raw.trim_start_matches('0');
+    while digits.len() > 1 && digits.ends_with('0') {
+        digits = &digits[..digits.len() - 1];
+        scale += 1;
+    }
+    let digits = digits.to_string();
+    let n = scale + digits.len() as i32;
+    (digits, n)
 }
 
 #[cfg(test)]

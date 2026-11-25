@@ -2408,4 +2408,22 @@ an allowance. Nothing else changed. The second
 attempt compiled the core clean and refused in the
 CLI: the key resolution named the document fetcher
 bare where the file's idiom is the qualified path,
-one word, now qualified like its neighbours.
+one word, now qualified like its neighbours. The
+third attempt reached the test step and the RFC
+vector caught a real defect in the JCS number
+digits, the hard edge the design named. The build
+had taken its shortest digits from Rust's own float
+formatting, and that formatting can run one digit
+long: the RFC's first example, 333333333.33333329,
+serialized as 333333333.33333325 where ECMAScript
+prints 333333333.3333333. The other eleven values
+matched; this one is the counterexample. The digits
+now come from the ryu crate, the provably shortest
+algorithm ECMAScript implementations use, already
+in the tree through serde_json and now named in
+almanac-core with its reason beside it, like ring.
+The placement rules are unchanged and were never
+the fault. A manifest whose numbers hit this class
+would have failed verification against a correct
+signer; the gate earned its keep on the exact case
+the design worried about.
