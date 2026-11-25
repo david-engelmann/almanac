@@ -1705,3 +1705,17 @@ a scheduled run; and the A2A fetch arm shares the one
 helper with the OpenAPI arm rather than carrying its
 own test, the two call sites being the same code
 path.
+
+### Remote fetching hosted gate fix pass (2026-11-24)
+
+The hosted gate's one failure was the slice test's
+own HTTP target run: it checked a site generated from
+the stdio fixture against the HTTP fixture, whose
+tool input schemas differ in bytes from the stdio
+fixture's, so the live comparison legitimately
+reported schema drift at Major. The product was
+right and the premise was wrong. The run now lives
+in a dedicated test that generates its site from the
+HTTP fixture itself, so the targeted run compares
+against the surface its baseline recorded. No
+product code changed.
