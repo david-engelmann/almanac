@@ -33,6 +33,10 @@
 //! skipped, because real cards carry partial entries the
 //! gate has no class for; a repeated skill identifier is
 //! refused, because the gate cannot tell the skills apart.
+//! An extension repeated with the same required flag
+//! reduces as one; repeated with a conflicting flag it is
+//! refused the same way, because the baseline could not
+//! say which obligation it recorded.
 
 use std::collections::HashSet;
 
@@ -211,15 +215,29 @@ pub fn reduce_agent_card(doc: &Value) -> Result<A2aView, String> {
             }
         }
         if let Some(list) = capabilities.get("extensions").and_then(|v| v.as_array()) {
+            let mut seen_extensions: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
             for item in list {
                 if let Some(uri) = item
                     .get("uri")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                 {
-                    extensions.push(uri.to_string());
-                    if item.get("required").and_then(crate::read_bool) == Some(true) {
-                        required_extensions.push(uri.to_string());
+                    let required = item.get("required").and_then(crate::read_bool) == Some(true);
+                    match seen_extensions.get(uri) {
+                        Some(&first) if first != required => {
+                            return Err(format!(
+                                "extension {uri} is declared with conflicting required flags, and the gate cannot tell which obligation was recorded"
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            seen_extensions.insert(uri.to_string(), required);
+                            extensions.push(uri.to_string());
+                            if required {
+                                required_extensions.push(uri.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -505,6 +523,59 @@ mod tests {
             .remove("supportedInterfaces");
         let err = reduce_agent_card(&no_interfaces).expect_err("no interface refuses");
         assert!(err.contains("no interface"), "error was {err}");
+    }
+
+    #[test]
+    fn reduction_rejects_conflicting_duplicate_extensions_only() {
+        // A repeated uri whose required flags agree
+        // reduces as one. A repeat whose flags conflict
+        // refuses, naming the uri, in either order.
+        let mut agreeing = card();
+        agreeing["capabilities"]["extensions"] = serde_json::json!([
+            {"uri": "https://example.com/ext/pay", "required": true},
+            {"uri": "https://example.com/ext/pay", "required": true}
+        ]);
+        let view = reduce_agent_card(&agreeing).expect("agreeing repeats reduce");
+        assert_eq!(
+            view.required_extensions,
+            vec!["https://example.com/ext/pay".to_string()]
+        );
+        // Agreement is judged on the read flag, not the
+        // raw value: a spelled yes agrees with a JSON
+        // true, and a spelled off agrees with no flag.
+        for items in [
+            serde_json::json!([
+                {"uri": "https://example.com/ext/pay", "required": true},
+                {"uri": "https://example.com/ext/pay", "required": "yes"}
+            ]),
+            serde_json::json!([
+                {"uri": "https://example.com/ext/pay", "required": "off"},
+                {"uri": "https://example.com/ext/pay"}
+            ]),
+        ] {
+            let mut card_view = card();
+            card_view["capabilities"]["extensions"] = items;
+            let view = reduce_agent_card(&card_view).expect("cross-spelling agreement reduces");
+            assert_eq!(
+                view.extensions,
+                vec!["https://example.com/ext/pay".to_string()]
+            );
+        }
+        for items in [
+            serde_json::json!([
+                {"uri": "https://example.com/ext/pay", "required": true},
+                {"uri": "https://example.com/ext/pay"}
+            ]),
+            serde_json::json!([
+                {"uri": "https://example.com/ext/pay", "required": "off"},
+                {"uri": "https://example.com/ext/pay", "required": "yes"}
+            ]),
+        ] {
+            let mut conflicting = card();
+            conflicting["capabilities"]["extensions"] = items;
+            let err = reduce_agent_card(&conflicting).expect_err("conflicts refuse");
+            assert!(err.contains("ext/pay"), "error was {err}");
+        }
     }
 
     #[test]
