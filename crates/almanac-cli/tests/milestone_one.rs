@@ -2302,6 +2302,95 @@ fn check_fetches_remote_artifacts() {
 }
 
 #[test]
+fn check_with_an_http_target_fetches_remote_artifacts() {
+    // The second fetch trigger: a run with an HTTP target
+    // fetches without the flag. The site is generated from
+    // the HTTP fixture itself, so the live comparison is
+    // against the surface the baseline recorded. The
+    // served card file is then removed from the tree, so
+    // a plain run resolves no target from the catalog and
+    // stays in repo mode; the only difference the named
+    // run makes is the target itself.
+    let (url, _mode) = start_http_fixture();
+    let src = temp_site("remote-target-src");
+    let doc_path = src.join("billing.json");
+    write_doc(&doc_path, &billing_doc());
+    let site = temp_site("remote-target");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--name",
+        "Example",
+        "--openapi",
+        &doc_path.to_string_lossy(),
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+
+    let doc_bytes = std::fs::read(&doc_path).expect("doc bytes");
+    let (doc_base, _doc_held) = serve_bytes(doc_bytes);
+    let card_bytes =
+        std::fs::read(site.join(".well-known/mcp/server-card.json")).expect("card bytes");
+    let (card_base, _card_held) = serve_bytes(card_bytes);
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(site.join("baseline.json")).expect("baseline"))
+            .expect("baseline json");
+    assert_eq!(
+        baseline["artifacts"].as_array().expect("artifacts").len(),
+        1,
+        "an off-origin endpoint records exactly one artifact, the card copy"
+    );
+    baseline["openapi"][0]["url"] = serde_json::Value::String(format!("{doc_base}/billing.json"));
+    baseline["artifacts"][0]["url"] =
+        serde_json::Value::String(format!("{card_base}/server-card.json"));
+    std::fs::write(
+        site.join("baseline.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&baseline).expect("serialize")
+        ),
+    )
+    .expect("write baseline");
+    for name in ["ard.json", "ai-catalog.json"] {
+        let path = site.join(".well-known").join(name);
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("catalog")).expect("catalog json");
+        for entry in catalog["entries"].as_array_mut().expect("entries") {
+            if entry["type"] == "application/openapi+json" {
+                entry["url"] = serde_json::Value::String(format!("{doc_base}/billing.json"));
+            }
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&catalog).expect("serialize")
+            ),
+        )
+        .expect("write catalog");
+    }
+
+    // With the card file gone, a plain run resolves no
+    // target and stays in repo mode, where the remote
+    // document cannot be read.
+    std::fs::remove_file(site.join(".well-known/mcp/server-card.json")).expect("remove card");
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site)]);
+    assert_eq!(code, 1, "repo mode check must fail, report was {stdout}");
+    assert!(
+        stdout.contains("openapi-document-unreadable"),
+        "report was {stdout}"
+    );
+
+    // The targeted run fetches both and is clean.
+    let (code, stdout, _) = run(&["check", "--site", &site_arg(&site), "--url", &url]);
+    assert_eq!(code, 0, "targeted check failed with {stdout}");
+}
+
+#[test]
 fn card_display_changes_warn_instead_of_failing() {
     // A card edited only in its display fields warns at
     // Minor and passes; a card edited in substance fails
