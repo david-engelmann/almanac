@@ -2427,3 +2427,23 @@ the fault. A manifest whose numbers hit this class
 would have failed verification against a correct
 signer; the gate earned its keep on the exact case
 the design worried about.
+
+A correction to that account, earned by the fourth
+attempt, which failed identically with ryu in
+place. Two independent formatters agreeing was the
+tell: both were faithfully printing the double they
+were handed, and the double was wrong. serde_json's
+default float parser is not correctly rounded; it
+landed the RFC's number one ulp low, at the double
+whose shortest form genuinely ends in 25. The
+defect was the parse, not the digits, and the
+operative fix is the workspace dependency turning
+on serde_json's float_roundtrip, so every float
+this build reads is the double its text names. The
+ryu digits stay, on their own merits: the provably
+shortest digits by construction, never a platform
+formatter's choice. But the round three paragraph
+above misassigns the fault, and this paragraph
+supersedes its diagnosis. The lesson is the fleet's
+own: when two witnesses agree, check what they were
+both looking at.

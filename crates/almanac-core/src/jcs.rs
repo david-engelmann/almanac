@@ -122,18 +122,18 @@ fn write_number(number: &serde_json::Number) -> Result<String, String> {
 
 /// The ECMAScript Number::toString serialization, the
 /// form JCS adopts. The digits are the shortest string
-/// that round trips to the same double. Rust's own
-/// float formatting does not always produce them: its
-/// digits can run one long, and the RFC's first
-/// example is such a value, formatting with a trailing
-/// 25 where ECMAScript prints the shorter 3. The ryu
-/// crate computes the provably shortest digits, the
-/// algorithm ECMAScript implementations use, and this
-/// module takes its digits and decimal position from
-/// ryu's serialization; the placement of the decimal
-/// point and the choice between plain and exponential
-/// form are then this module's own, by the ECMAScript
-/// rules.
+/// that round trips to the same double, taken from
+/// the ryu crate, whose shortest output is proven and
+/// which ECMAScript implementations likewise rely on,
+/// so the module never depends on a platform
+/// formatter's digit choice. The placement of the
+/// decimal point and the choice between plain and
+/// exponential form are then this module's own, by
+/// the ECMAScript rules. The other half of exactness
+/// is the parse: the workspace turns on serde_json's
+/// float_roundtrip, because a number parsed one ulp
+/// off canonicalizes to the wrong digits however
+/// exact the formatting is.
 fn write_double(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
@@ -222,8 +222,11 @@ mod tests {
         // with the serializations the RFC prints. The
         // first value is parsed from the RFC's printed
         // text rather than written as a float literal:
-        // the text is the source, and the literal's
-        // precision is the point of the example.
+        // the text is the source, the literal's
+        // precision is the point of the example, and
+        // the parse rides the product's own correctly
+        // rounded parser, so the case guards the whole
+        // path from text to canonical bytes.
         let cases = [
             (
                 serde_json::from_str("333333333.33333329").expect("the RFC value parses"),

@@ -12,7 +12,13 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# float_roundtrip makes float parsing correctly
+# rounded. The default parser can land one ulp off
+# on hard values, the RFC 8785 example number among
+# them, and a manifest number parsed one ulp off
+# canonicalizes to different digits than the signer
+# sealed. JCS work cannot carry that error.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 almanac-core = { path = "crates/almanac-core", version = "0.1.0" }
 
 [profile.release]
