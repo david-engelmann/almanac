@@ -205,6 +205,29 @@ pub fn trust_keys_from_did_document(document: &Value) -> Vec<TrustKey> {
         .collect()
 }
 
+/// One attestation document observation a fetching
+/// run collected for the pin layer: the entry and the
+/// attestation uri it answers, and what the fetch
+/// established. The core judges pins from these plain
+/// values and stays network-free; the CLI collects
+/// them through its guarded fetcher in the runs the
+/// attestation design engages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinObservation {
+    pub entry_id: String,
+    pub uri: String,
+    pub outcome: PinOutcome,
+}
+
+/// What one attestation fetch established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinOutcome {
+    /// The served bytes' sha256, lowercase hex.
+    Fetched(String),
+    /// The fetch could not be made, with the reason.
+    Failed(String),
+}
+
 /// The outcome of judging one signature.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SignatureVerdict {

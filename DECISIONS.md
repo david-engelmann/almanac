@@ -2705,3 +2705,211 @@ flag now stands before --command in the invocation.
 The discipline was already on this seat's record;
 the test forgot it, and the hosted gate is what
 caught it.
+
+## Attestation pinning (design, 2026-11-25)
+
+Main approved this design as written on
+2026-11-25, and its one open question is answered
+as the record recommends: the pin layer engages
+when named through --fetch-attestations or when
+the run is already a fetching run, and
+non-engaged runs stay silent about pins in both
+directions. The trust design named this follow-up:
+the draft's section 6.4 attestation pinning,
+deferred when the fourteenth slice built the
+envelope layers.
+
+The research, read firsthand from
+draft-bu-dawn-ard-discovery-00 today. A trust
+manifest may carry attestations, an array of items
+shaped (the draft's section 3.5 example and its
+CDDL alike) as type (a URI naming the statement
+kind, required), uri (where the external document
+lives, required), mediaType (optional), and digest
+(optional, <alg>:<hex>, sha256 mandatory to
+implement). Section 3.5.2 names two distinct
+integrity bindings. The first binds the attestation
+statement itself to the target artifact: the
+statement must sign the artifact or carry a signed
+subject claim naming the resource's identifier or
+digest. The second pins the external document:
+because attestation documents may live on external
+servers in formats without self-contained
+signatures, the digest inside each attestations
+item records the hash of the external document
+itself, sealed under the manifest's signature as a
+subresource integrity pin, so the file at the uri
+cannot be replaced or modified after signing.
+Section 6.4 restates the second as a consumer duty:
+when an attestations item includes digest, a
+consumer fetching the document from the uri MUST
+verify the fetched document's digest matches.
+
+This slice builds the second binding, the pin. The
+first binding, reading SLSA and in-toto statements
+to confirm their internal subjects, is a deeper
+water (foreign statement formats, each with its own
+subject grammar) and stands as its own named
+follow-up; the envelope's own subject binding,
+landed in the fourteenth slice, already covers
+transplantation at the envelope level, and the pin
+covers substitution of the document itself.
+Provenance links (sourceId and sourceDigest) carry
+no uri and pin nothing fetchable; out of scope.
+
+The judgments, inside the envelope pass both
+commands already share, over every envelope an
+entry carries, singular and plural alike. Item
+shape first, at major under trust-manifest-shape:
+attestations present but not an array, an item not
+an object, an item missing its type or its uri, and
+a digest present without a uri to fetch (a pin with
+nothing pinned is a defect, not a claim). A
+malformed digest, not <alg>:<hex>, is the same
+major. The pin itself, when an item carries a
+well-formed digest and the run engages the pin
+layer: the fetched bytes' sha256 against the pin.
+A mismatch is critical under a new kind,
+trust-manifest-attestation-mismatch: the sealed
+pin names one document and the uri serves another,
+the section 6.4 substitution, at the severity of
+the other sealed-claim failures. A pin the run
+engaged but could not fetch, or whose algorithm is
+not sha256 (this build computes sha256 only, the
+draft's mandatory one), is a minor under
+trust-manifest-attestation-unverified naming why,
+never a silent pass in an engaged run. An item
+with no digest carries no pin and is silent, as
+unsigned content is.
+
+Engagement is the design's one open question, and
+the recommendation follows the fifteenth slice's
+rule for network judgments: they engage when named
+or when the run already fetches. A new flag,
+--fetch-attestations, names it on validate and on
+check; a check run that is already a fetching run
+(an HTTP target, named or resolved, or
+--fetch-remote) engages it without the flag, as
+those runs already do network work and the pin is
+part of the drift claim, the posture the media
+type observation set. A run that does not engage
+the layer is silent about pins in both directions,
+so a repo-mode CI gate gains no standing minor from
+a claim it never set out to check. Fetches ride
+the guarded document fetcher, no credential ever,
+and the guard matters more here than anywhere:
+attestation uris are catalog content, and a literal
+non-public address is refused before any request,
+the refusal surfacing as the unverified minor's
+reason. Fetched bytes are hashed raw, as served;
+the draft pins the document itself, not a
+canonical form.
+
+Mechanically: the core stays network-free. The CLI
+collects, per entry and attestation uri, an
+observation (the fetched bytes' sha256, or the
+failure's reason) in engaged runs, and the envelope
+pass takes the observations as an input beside the
+keys, judging shape offline in every run and pins
+only from observations. Validate's refusal guard
+moves again: --fetch-attestations belongs to
+validate and check, and generate and migrate refuse
+it with the trust flags.
+
+Scope lines. No statement parsing (the first
+binding stands as a named follow-up), no provenance
+judgments, no local path resolution for attestation
+uris in this slice (an own-origin document is
+fetched over HTTP like any other; site-relative
+reading is a refinement for a later pass), no
+signing. The dusk.fm catalog stays parked. Nothing
+here needs David.
+
+### As built (2026-11-25)
+
+The pin layer stands as designed. The core gained
+PinObservation and PinOutcome in trust.rs, plain
+values beside TrustKey, and judge_attestations in
+validate.rs, called from verify_envelope between
+the identity layer and the signature, so item
+shape is judged even on an envelope whose
+signature member is absent. The envelope pass and
+both its entry points take the observations beside
+the keys; drift's CheckInputs carries them the
+same way. The CLI collects observations in
+pin_observations through the guarded fetcher,
+mirroring the judge's gates (envelopes only, pins
+in <alg>:<hex> form), each (entry, uri) pair
+fetched once. Check engages when it fetches or
+when --fetch-attestations is named; validate
+engages on the flag alone, the design's operative
+sentence scoping the without-the-flag clause to
+check runs, recorded here against the design's
+more general summary sentence. Generate and
+migrate refuse the flag with the trust flags.
+
+Known postures, recorded rather than repaired.
+Attestation shape is judged inside envelopes
+only, the fourteenth slice's standing scoping:
+an attestations-only manifest is not an envelope
+and is silent in every run, as an expiry-only
+stub is. Attestation fetches join the fetcher's
+standing posture on aggregate time: each fetch is
+bounded (30 seconds, 16 MiB, the non-public
+guard), the count is deduped per (entry, uri) but
+not capped, so a catalog carrying many distinct
+pinned uris costs proportionally, the same
+exposure artifact fetching already carries and
+accepts. A uri's form beyond non-emptiness is
+the fetch's to fail: a relative or padded uri is
+no shape defect in this slice and surfaces in an
+engaged run as the unverified minor its failed
+fetch produces.
+
+### Attestation pinning checkpoint fix pass (2026-11-25)
+
+All three reviews ran before staging. Spec
+fidelity FAIL on one critical, the product
+conforming sentence by sentence; standards one
+critical, the same defect from its own axis; red
+team no critical, one major, four minor, and a
+clean trace on every silent-pass route it tried.
+Every critical and major is closed here.
+
+The critical, owned plainly: the slice's
+end-to-end test named helpers that do not exist
+(check_stdio misused as a setup returning a site,
+a fixture_path that is defined nowhere) and never
+generated its catalog, so it could not compile,
+the invented-helper class this seat has shipped
+before and greps against. The test stands
+rewritten on the file's real harness, the
+fifteenth slice's pattern (temp_site,
+fixture_binary, generate_stdio, check_stdio), and
+its plant is the sibling test's own.
+
+The red team's major converged on the rewrite:
+the test's unengaged phases originally ran while
+the served document still matched its pin, so an
+always-engaged CLI would have passed them; the
+scoping rule had no discriminating test at the
+binary level. The rewritten test re-runs both
+unengaged commands after the substitution, where
+silence is the only correct outcome, and adds the
+fetching-run engagement phase and the generate
+refusal the spec review found unpinned. The core
+test likewise gained the non-sha256 branch and
+the non-array shape the spec review listed.
+
+Minors closed: the collector now mirrors the
+judge's gates, so engaged runs no longer fetch
+for manifests and digests no judgment will use
+(the red team, standards, and spec reviews
+converged here from three sides); identical
+attestation items repeated in one array are
+judged once; verify_envelope's layer map and
+validate_catalog_with_keys' parameter doc name
+the new layer and input; the core test's name
+says what it proves. The remaining minors are
+the known postures recorded in the as-built
+above.

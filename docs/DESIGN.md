@@ -671,6 +671,10 @@ Rust, the fleet default, with no exception requested.
   same envelopes inside its drift report, the signature layer when
   the run holds keys and the removal of a recorded envelope always,
   as the check integration section of DECISIONS.md records.
+  Attestation pins are verified in the runs that fetch, the
+  digest an envelope seals against the document its uri
+  serves, as the attestation pinning section of DECISIONS.md
+  records.
 - Distribution. The binary is named almanac and the crates are
   almanac-core and almanac-cli, the bare crate name belonging to a
   dormant calendar tool, as section 1 records. The crates publish to

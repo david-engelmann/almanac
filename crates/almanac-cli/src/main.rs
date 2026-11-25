@@ -59,6 +59,10 @@ Validate verifies trust manifest signatures with keys from
 over HTTPS to find its keys. Check judges trust manifests as
 part of its drift report: the envelope layers always, and
 signatures too when the same two flags give the run keys.
+Both commands verify an attestation's pinned digest against
+the document its uri serves when the run fetches: check in
+any fetching run, and either command when --fetch-attestations
+is named. A run that does not fetch makes no claim about pins.
 Migrate writes CI wiring to --ci PATH when it migrates a site.
 A protected surface is probed live when a publisher credential
 is available. The token is read from the environment variable
@@ -83,6 +87,7 @@ struct Flags {
     fetch_remote: bool,
     trust_keys: Option<String>,
     fetch_keys: bool,
+    fetch_attestations: bool,
     command: Vec<String>,
 }
 
@@ -102,6 +107,11 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
         }
         if arg == "--fetch-keys" {
             flags.fetch_keys = true;
+            i += 1;
+            continue;
+        }
+        if arg == "--fetch-attestations" {
+            flags.fetch_attestations = true;
             i += 1;
             continue;
         }
@@ -179,6 +189,9 @@ fn refuse_trust_flags(flags: &Flags) -> Result<(), String> {
     if flags.fetch_keys {
         return Err("--fetch-keys applies to validate and check only".into());
     }
+    if flags.fetch_attestations {
+        return Err("--fetch-attestations applies to validate and check only".into());
+    }
     Ok(())
 }
 
@@ -240,6 +253,7 @@ fn run() -> Result<i32, String> {
                 flags.fetch_remote,
                 trust_keys.as_deref(),
                 flags.fetch_keys,
+                flags.fetch_attestations,
             )
         }
         "validate" => {
@@ -250,10 +264,16 @@ fn run() -> Result<i32, String> {
                     &PathBuf::from(file),
                     trust_keys.as_deref(),
                     flags.fetch_keys,
+                    flags.fetch_attestations,
                 ),
                 None => {
                     let site = PathBuf::from(flags.site.as_deref().unwrap_or("."));
-                    site::validate_site(&site, trust_keys.as_deref(), flags.fetch_keys)
+                    site::validate_site(
+                        &site,
+                        trust_keys.as_deref(),
+                        flags.fetch_keys,
+                        flags.fetch_attestations,
+                    )
                 }
             }
         }

@@ -154,6 +154,11 @@ pub struct CheckInputs<'a> {
     /// design records; Some, even empty, engages the
     /// signature layer and reports what it cannot judge.
     pub trust_keys: Option<&'a [crate::trust::TrustKey]>,
+    /// The run's attestation observations, when it
+    /// engaged the pin layer (a fetching run, or one
+    /// naming --fetch-attestations); without them the
+    /// pin layer makes no claim.
+    pub pins: Option<&'a [crate::trust::PinObservation]>,
     /// The media type the catalog itself was observed
     /// served with, in a run that could observe it. None
     /// when the run made no observation (repo mode, or
@@ -516,6 +521,7 @@ fn check_trust(inputs: &CheckInputs, findings: &mut Vec<Finding>) {
         inputs.today,
         inputs.now_unix,
         inputs.trust_keys,
+        inputs.pins,
     ));
     for record in &inputs.baseline.trust_manifests {
         let Some(entry) = inputs
@@ -1556,6 +1562,7 @@ mod tests {
             today: "2026-11-21",
             now_unix: 1_800_000_000,
             trust_keys: None,
+            pins: None,
             catalog_media_type: None,
         }
     }
