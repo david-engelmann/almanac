@@ -1,0 +1,32 @@
+name: Almanac drift check
+description: Run the almanac drift gate against a published discovery catalog, failing the job when the live surface has drifted from the catalog at or above the chosen severity.
+inputs:
+  site:
+    description: Path to the site directory holding the catalog and its baseline.
+    required: false
+    default: "."
+  fail-at:
+    description: The severity at which the check fails, one of critical, major, or minor.
+    required: false
+    default: "major"
+  target:
+    description: The live target URL to check against. When omitted, the check resolves the target from the catalog itself.
+    required: false
+  version:
+    description: The almanac-cli version to install from crates.io. Pinned by default so the gate itself never drifts under its users. Set it explicitly to move.
+    required: true
+    default: "0.1.0"
+runs:
+  using: composite
+  steps:
+    - name: Install almanac
+      shell: bash
+      run: cargo install almanac-cli --locked --version "${{ inputs.version }}"
+    - name: Check the catalog for drift
+      shell: bash
+      run: |
+        args=(check --site "${{ inputs.site }}" --fail-at "${{ inputs.fail-at }}")
+        if [ -n "${{ inputs.target }}" ]; then
+          args+=(--url "${{ inputs.target }}")
+        fi
+        "${CARGO_HOME:-${HOME}/.cargo}/bin/almanac" "${args[@]}"

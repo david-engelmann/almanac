@@ -4389,6 +4389,85 @@ fn credentialed_retry_covers_protected_reads_over_discover() {
 }
 
 #[test]
+fn the_composite_action_carries_the_check_contract() {
+    // The thirty-third slice: the Action at the
+    // repository root is a shipped artifact whose
+    // contract is its text. It must parse, declare
+    // the four inputs with the pinned version
+    // default, install the CLI locked at that pin,
+    // and run the check command with its exit code
+    // untranslated.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root");
+    let text = std::fs::read_to_string(root.join("action.yml")).expect("action.yml at the root");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("action.yml parses");
+    assert_eq!(
+        doc.get("runs")
+            .and_then(|r| r.get("using"))
+            .and_then(|u| u.as_str()),
+        Some("composite"),
+        "the action is composite"
+    );
+    let inputs = doc.get("inputs").expect("inputs declared");
+    for name in ["site", "fail-at", "target", "version"] {
+        assert!(inputs.get(name).is_some(), "input {name} declared");
+    }
+    assert_eq!(
+        inputs
+            .get("version")
+            .and_then(|v| v.get("default"))
+            .and_then(|d| d.as_str()),
+        Some("0.1.0"),
+        "the version input is pinned by default"
+    );
+    assert!(
+        text.contains("cargo install almanac-cli --locked"),
+        "the install step installs the CLI locked"
+    );
+    assert!(
+        text.contains("inputs.version"),
+        "the install step installs at the pinned version"
+    );
+    assert!(
+        text.contains("check --site") && text.contains("--fail-at") && text.contains("--url"),
+        "the run step maps the inputs to the check command's real flags"
+    );
+    // Each flag is paired with its own input, the run
+    // step never swallows the check's exit code, the
+    // binary is found under the runner's cargo home,
+    // and every step names its shell.
+    assert!(
+        text.contains("--site \"${{ inputs.site }}\"")
+            && text.contains("--fail-at \"${{ inputs.fail-at }}\"")
+            && text.contains("--url \"${{ inputs.target }}\""),
+        "each flag is paired with its input"
+    );
+    assert!(
+        !text.contains("|| true"),
+        "nothing swallows the check's exit code"
+    );
+    assert!(
+        text.contains("CARGO_HOME"),
+        "the run step finds the binary under the runner's cargo home"
+    );
+    let steps = doc
+        .get("runs")
+        .and_then(|r| r.get("steps"))
+        .and_then(|s| s.as_sequence())
+        .expect("steps declared");
+    assert_eq!(steps.len(), 2, "the action is two steps");
+    for step in steps {
+        assert_eq!(
+            step.get("shell").and_then(|s| s.as_str()),
+            Some("bash"),
+            "every step names its shell"
+        );
+    }
+}
+
+#[test]
 fn validate_verifies_a_trust_manifest_signature_with_supplied_keys() {
     // The core suite's ES256 fixture, end to end through
     // the binary: the same JWK, the same signed manifest.
