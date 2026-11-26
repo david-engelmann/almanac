@@ -609,6 +609,8 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
         tools: vec![],
         resources: vec![],
         resource_surfaces: vec![],
+        resource_templates: vec![],
+        template_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Protected(Box::new(almanac_core::snapshot::ProtectedMetadata {
@@ -629,7 +631,7 @@ enum ListWalk {
     Protected(Box<SurfaceSnapshot>, &'static str),
 }
 
-/// Walk the three lists into the snapshot over HTTP, following
+/// Walk the four lists into the snapshot over HTTP, following
 /// pagination to completion. Under the current revision the
 /// requests are stateless, identity in the meta block, no
 /// session and no version header. Under the earlier revisions
@@ -726,6 +728,10 @@ fn walk_lists(
     }
     snapshot.resources.sort();
     snapshot.resource_surfaces.sort_by(|a, b| a.uri.cmp(&b.uri));
+    snapshot.resource_templates.sort();
+    snapshot
+        .template_surfaces
+        .sort_by(|a, b| a.uri_template.cmp(&b.uri_template));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
     ListWalk::Done

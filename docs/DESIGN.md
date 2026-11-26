@@ -562,6 +562,13 @@ Major, fails by default and can be lowered by config.
   client reads a resource's content through the type the server
   declares, so a different type at the same uri is a different
   contract at the same address.
+- A resource template set change on the MCP surface, and a
+  template's mimeType change at major, its editorial metadata
+  change at minor below. Added 2026-11-25 by the twenty-sixth
+  slice, on the same recorded-here footing: templates are the
+  parameterized half of the resource surface, and the channels
+  gate only on a baseline that recorded templates at all, so an
+  upgrade manufactures no finding of its own.
 - A catalog served only on the legacy path, with no ard.json beside
   it. The publisher is invisible to conformant ARD registries, which
   is the stranded state the migrate command exists to end. This
@@ -584,6 +591,10 @@ Minor, warns by default.
   changed since baseline. Added 2026-11-25 by the twenty-fifth
   slice, the minor half of the resource channels recorded in the
   major list above.
+- A resource template's editorial metadata changed since
+  baseline. Added 2026-11-25 by the twenty-sixth slice, the
+  minor half of the template channels recorded in the major
+  list above.
 - Display text, tags or ordering changes in a declared artifact.
 - The catalog served with a generic JSON media type rather than
   application/ard+json. Most publishers get this wrong today, so it

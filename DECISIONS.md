@@ -4283,3 +4283,183 @@ does not enumerate and the record does not hold;
 annotation churn, a lastModified timestamp above
 all, is not something a drift gate should fire
 on in any case.
+
+## Twenty-sixth slice: MCP resource templates (design, 2026-11-25)
+
+Approved by Main 2026-11-25 as written, with the
+design's one question answered with the record's
+recommendation: the no-record-no-gating posture
+extends to the pair. A baseline carrying neither
+a template list nor any template contract leaves
+every template channel, membership included,
+ungated until regeneration; a membership major
+manufactured by the upgrade itself is the
+false-positive class the additive shape exists to
+prevent, and the mirrored cost (templates
+genuinely gained in the window going ungated
+until regeneration) is accepted and stated.
+Build on the main standing once the twenty-fifth
+slice lands.
+
+The twenty-fifth slice's design named this one:
+resource templates are a surface the probe does
+not walk at all. A resources/templates/list answer
+carries the parameterized half of a server's
+resource surface: each template has a uriTemplate
+(the RFC 6570 pattern a client expands to reach a
+whole family of resources), a name, optional
+title and description, and a mimeType. A client
+cannot discover a parameterized resource any
+other way. A publisher who drops a template
+breaks every read through it, and one who changes
+a template's uriTemplate moves the whole family
+at once; today the gate records nothing about
+templates, so neither event draws a finding, and
+a catalog's resource story is silently the
+concrete half only.
+
+The design extends the standing walk rather than
+inventing a second one. The list walk gains a
+fourth kind, resources/templates/list, on the
+same footing as the other optional lists: a
+server that does not serve it answers
+method-not-found and the walk records an empty
+set, the posture prompts already take. The
+snapshot records the uriTemplates as a membership
+list beside the resource uri list, and one
+surface per template (uriTemplate, name, title,
+description, mimeType as served), sorted by
+uriTemplate on both transports. The baseline
+records the membership list and a per-template
+contract in a parallel template_contracts map:
+the same two hashes the twenty-fifth slice set
+for resources, a metadata hash over the three
+editorial fields as one canonical record and a
+mime hash over the mimeType string, in a
+TemplateBaseline of the ResourceBaseline shape.
+The comparison adds three channels on the
+severities the fields earn: membership on a new
+major, resource-template-set-changed; a mimeType
+change at major, resource-template-mime-changed,
+naming the template; an editorial change at
+minor, resource-template-metadata-changed.
+Duplicate uriTemplates take the last-wins map
+discipline on both sides, as resources and
+prompts now do.
+
+One question rides with this design, and it is
+the slice's real decision: how a pre-slice
+baseline meets the new membership list. The
+contract channels have the standing answer (no
+record, no gating), but membership is a list the
+old baseline never held, so an old baseline's
+empty template list against a live server that
+serves templates would fire the membership major
+on the first post-upgrade check, a finding
+manufactured by the upgrade itself. The record
+recommends extending the standing answer to the
+pair: when a baseline carries neither a template
+list nor any template contract, the template
+channels, membership included, stay ungated
+until regeneration. The cost is the mirror of
+the contract channels' accepted consequence: a
+server that genuinely had no templates at
+generation and gains some before regeneration is
+missed until then. The alternative, accepting
+the one-time major, makes every publisher with
+templates take a false failure on upgrade, which
+is the outcome the additive shape exists to
+prevent. Main's call.
+
+Scope edges, stated. Template expansion itself
+is not probed: the gate records the pattern as
+announced and never expands a uriTemplate
+against the live surface, the same restraint the
+resource channels show (existence of concrete
+instances stays the resource list's own story).
+Mime and metadata for templates reuse the
+twenty-fifth slice's record shapes unchanged, so
+the postures recorded there (mime read as served,
+case included; duplicates last-wins in served
+order) carry over without new decisions. Card
+and protected snapshots carry no template
+surfaces: a Final server card enumerates no
+primitives, so template evidence is live-only,
+the posture all three contract families hold.
+
+### As built (2026-11-25)
+
+Built as designed on the main the twenty-fifth
+slice landed (c8026fdc), with the base re-verified
+before the reviews: the working record extends
+the landed DECISIONS exactly, and every file
+outside the slice is blob-identical to the landed
+tree. The list walk gains its fourth kind,
+resources/templates/list, on the shared machinery
+both transports use, method-not-found reading as
+an empty set. The snapshot records the
+uriTemplate membership list and one
+TemplateSurface per template (uriTemplate, name,
+title, description, mimeType as served), sorted
+by uriTemplate on both transports; the baseline
+records the list and a template_contracts map of
+TemplateBaseline, the ResourceBaseline shape,
+both fields serde-defaulted; the comparison adds
+resource-template-set-changed and
+resource-template-mime-changed at major and
+resource-template-metadata-changed at minor, each
+naming the template, all of it behind the pair
+gate the approval ordered: a baseline carrying
+neither a template list nor any template contract
+leaves every template channel ungated until
+regeneration. The metadata hash reads the
+canonical record built by
+TemplateSurface::metadata(), the ResourceSurface
+construction in twin form.
+
+The three reviews ran on the file-based route and
+were read firsthand from the written report.
+Verdicts: spec fidelity PASS with no finding at
+any grade (0 critical, 0 major, 0 minor), the
+second consecutive clean spec axis; standards
+PASS (0 critical, 0 major, 2 minor); red team
+PASS (0 critical, 0 major, 2 minor), its attack
+surface exercised and held, including the pair
+gate's edges examined one by one: the half-pair
+states (a list without contracts, contracts
+without a list) are unreachable from the one
+baseline construction, since the probe fills both
+from the same page under the same test, and a
+hand-edited half-pair behaves coherently, judging
+only what was recorded; a card-recorded baseline
+meets a live walk with the template channels
+ungated while its sibling channels gate, the
+design's card posture compounded with the pair
+posture, one-directional and safe. The checkpoint
+fix pass closed both standards minors, which were
+documentation lag: the transport record's walk
+step now names resources/templates/list beside
+its siblings, and the primitive-set function's
+doc together with the two capabilities_enumerated
+docs now enumerate the template lists and the
+three contract families the code runs (the drift
+half of that lag was first charged at the
+twenty-fourth slice and is discharged here).
+
+Recorded from the red team's minors, standing as
+postures carried over by the design's own words
+rather than repairs: a mimeType change of letter
+case alone fires the major, the as-served reading
+the twenty-fifth slice recorded for resources;
+and duplicate uriTemplates resolve last-wins in
+served order on both sides, so a server reversing
+its duplicates between generation and check can
+over-report an order change among duplicates.
+Neither posture can hide a real change. Also
+recorded from the standards axis as a choice, not
+an oversight: TemplateSurface::metadata()
+duplicates ResourceSurface::metadata()'s body,
+the twin-type idiom the codebase keeps for its
+per-kind pairs, and within each channel the two
+call sites share the one method on the one type,
+so no two-sides divergence is possible.

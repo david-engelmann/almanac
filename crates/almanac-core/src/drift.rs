@@ -1559,9 +1559,10 @@ fn check_live_surface(
 
 /// The live primitive set comparisons: tools in both
 /// directions with their schema and description channels,
-/// and the resource and prompt sets. Called only when the
-/// baseline enumerated, so every comparison here reads a
-/// record that was actually made.
+/// the resource, prompt and template sets, and the
+/// prompt, resource and template contract channels.
+/// Called only when the baseline enumerated, so every
+/// comparison here reads a record that was actually made.
 fn check_live_primitive_sets(
     mcp: &McpBaseline,
     snapshot: &SurfaceSnapshot,
@@ -1672,6 +1673,53 @@ fn check_live_primitive_sets(
                     Some(&mcp.entry_id),
                     format!("resource {uri} metadata changed since generation"),
                 ));
+            }
+        }
+    }
+    // The template channels gate only on a baseline
+    // that recorded templates at all. A baseline from
+    // before the twenty-sixth slice carries neither a
+    // template list nor any template contract, and
+    // judging its empty list against a live surface
+    // would manufacture the membership major from the
+    // upgrade itself; the pair stays ungated until
+    // regeneration, the approved posture.
+    if !mcp.resource_templates.is_empty() || !mcp.template_contracts.is_empty() {
+        if snapshot.resource_templates != mcp.resource_templates {
+            findings.push(finding(
+                Severity::Major,
+                "resource-template-set-changed",
+                Some(&mcp.entry_id),
+                "the MCP resource template set changed since generation".into(),
+            ));
+        }
+        let live_templates: BTreeMap<&str, &crate::snapshot::TemplateSurface> = snapshot
+            .template_surfaces
+            .iter()
+            .map(|template| (template.uri_template.as_str(), template))
+            .collect();
+        for (uri_template, recorded) in &mcp.template_contracts {
+            if let Some(template) = live_templates.get(uri_template.as_str()) {
+                if crate::hash::sha256_str(&template.mime_type) != recorded.mime_sha256 {
+                    findings.push(finding(
+                        Severity::Major,
+                        "resource-template-mime-changed",
+                        Some(&mcp.entry_id),
+                        format!(
+                            "resource template {uri_template} mime type changed since generation"
+                        ),
+                    ));
+                }
+                if crate::hash::sha256_json(&template.metadata()) != recorded.metadata_sha256 {
+                    findings.push(finding(
+                        Severity::Minor,
+                        "resource-template-metadata-changed",
+                        Some(&mcp.entry_id),
+                        format!(
+                            "resource template {uri_template} metadata changed since generation"
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -1894,6 +1942,8 @@ mod tests {
             tools,
             resources: vec![],
             resource_surfaces: vec![],
+            resource_templates: vec![],
+            template_surfaces: vec![],
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -2694,6 +2744,92 @@ mod tests {
                 name: "guide".into(),
                 title: "The Guide".into(),
                 description: "How it works.".into(),
+                mime_type: "text/plain".into(),
+            });
+        let dup_base = baseline_for(&dup);
+        assert!(check(&inputs(&cat, &dup_base, Some(&dup))).is_empty());
+    }
+
+    #[test]
+    fn template_changes_report_and_the_unrecorded_pair_stays_ungated() {
+        // Templates gate in three channels once a
+        // baseline recorded them: membership and mime
+        // at major, metadata at minor. A baseline that
+        // recorded no templates at all, the pre-slice
+        // shape, leaves every channel ungated even
+        // against a live surface serving templates.
+        let surface = |name: &str, mime_type: &str| {
+            let mut snap = snapshot(vec![ping()]);
+            snap.resource_templates = vec!["docs://{page}".into()];
+            snap.template_surfaces = vec![crate::snapshot::TemplateSurface {
+                uri_template: "docs://{page}".into(),
+                name: name.into(),
+                title: "A Page".into(),
+                description: "One page of the docs.".into(),
+                mime_type: mime_type.into(),
+            }];
+            snap
+        };
+        let base = baseline_for(&surface("page", "text/markdown"));
+        let cat = catalog();
+        assert!(
+            check(&inputs(
+                &cat,
+                &base,
+                Some(&surface("page", "text/markdown"))
+            ))
+            .is_empty()
+        );
+        let bare = snapshot(vec![ping()]);
+        let findings = check(&inputs(&cat, &base, Some(&bare)));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-template-set-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let findings = check(&inputs(&cat, &base, Some(&surface("page", "text/plain"))));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-template-mime-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface("sheet", "text/markdown")),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-template-metadata-changed");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        let mut old_base = base.clone();
+        old_base
+            .mcp
+            .as_mut()
+            .expect("mcp baseline")
+            .resource_templates
+            .clear();
+        old_base
+            .mcp
+            .as_mut()
+            .expect("mcp baseline")
+            .template_contracts
+            .clear();
+        assert!(
+            check(&inputs(
+                &cat,
+                &old_base,
+                Some(&surface("page", "text/markdown"))
+            ))
+            .is_empty()
+        );
+        // A surface serving one template twice records
+        // the last item's contract on both sides of the
+        // gate, so the unchanged duplicated surface
+        // stays silent.
+        let mut dup = surface("page", "text/markdown");
+        dup.resource_templates = vec!["docs://{page}".into(), "docs://{page}".into()];
+        dup.template_surfaces
+            .push(crate::snapshot::TemplateSurface {
+                uri_template: "docs://{page}".into(),
+                name: "page".into(),
+                title: "A Page".into(),
+                description: "One page of the docs.".into(),
                 mime_type: "text/plain".into(),
             });
         let dup_base = baseline_for(&dup);
