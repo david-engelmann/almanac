@@ -13,6 +13,7 @@
 //! document's canonical bytes.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One probed MCP surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,6 +73,13 @@ pub struct SurfaceSnapshot {
     /// produce. The template list above stays the
     /// membership record.
     pub template_surfaces: Vec<TemplateSurface>,
+    /// Contents hashes by resource uri, one per
+    /// resource the probe read successfully after the
+    /// list walk. A resource whose read failed carries
+    /// no entry, which the baseline records as no
+    /// contents hash and the gate reads, against a
+    /// recorded hash, as a failed read.
+    pub resource_contents: BTreeMap<String, String>,
     /// Prompt names, sorted by the probe.
     pub prompts: Vec<String>,
     /// One surface per prompt, sorted by name by the
@@ -202,6 +210,32 @@ impl TemplateSurface {
     }
 }
 
+/// Hash one resources/read result's contents, the
+/// canonical record the baseline stores and the gate
+/// recomputes: the items in served order, a text item
+/// by its text as served, a blob item by the hash of
+/// its decoded bytes, because the content is the fact
+/// and base64 is a transport encoding whose wrapping
+/// is not. None when the result carries no contents
+/// array or an item is neither text nor blob shaped,
+/// which the probe records as a failed read.
+pub fn contents_hash(result: &serde_json::Value) -> Option<String> {
+    let items = result.get("contents")?.as_array()?;
+    let mut record = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+            record.push(serde_json::json!({"text": text}));
+        } else {
+            let blob = item.get("blob").and_then(|v| v.as_str())?;
+            let bytes = crate::statement::decode_base64(blob)?;
+            record.push(serde_json::json!({
+                "blob_sha256": crate::hash::sha256_hex(&bytes)
+            }));
+        }
+    }
+    Some(crate::hash::sha256_json(&serde_json::Value::Array(record)))
+}
+
 /// Where a probe stopped and how.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeFailure {
@@ -320,6 +354,53 @@ mod tests {
         );
         assert_eq!(record.scopes_supported, vec!["read", "write"]);
         assert_eq!(record.sha256, crate::hash::sha256_json(&doc));
+    }
+
+    #[test]
+    fn contents_hash_reads_text_and_blob_items() {
+        // Text hashes as served; a blob hashes its
+        // decoded bytes, so the same bytes under a
+        // different base64 wrapping hash identically,
+        // and item order is part of the record.
+        let text = serde_json::json!({"contents": [
+            {"uri": "docs://a", "mimeType": "text/plain", "text": "hello"}
+        ]});
+        assert_eq!(
+            contents_hash(&text),
+            Some(crate::hash::sha256_json(&serde_json::json!([
+                {"text": "hello"}
+            ])))
+        );
+        let blob_a = serde_json::json!({"contents": [
+            {"uri": "docs://b", "blob": "aGVsbG8="}
+        ]});
+        let blob_b = serde_json::json!({"contents": [
+            {"uri": "docs://b", "blob": "aGVs bG8="}
+        ]});
+        assert_eq!(contents_hash(&blob_a), contents_hash(&blob_b));
+        assert_ne!(contents_hash(&text), contents_hash(&blob_a));
+        let two = serde_json::json!({"contents": [
+            {"uri": "docs://a", "text": "one"},
+            {"uri": "docs://a", "text": "two"}
+        ]});
+        let swapped = serde_json::json!({"contents": [
+            {"uri": "docs://a", "text": "two"},
+            {"uri": "docs://a", "text": "one"}
+        ]});
+        assert_ne!(contents_hash(&two), contents_hash(&swapped));
+        assert_eq!(
+            contents_hash(&serde_json::json!({"contents": []})),
+            Some(crate::hash::sha256_json(&serde_json::json!([])))
+        );
+        assert_eq!(contents_hash(&serde_json::json!({})), None);
+        assert_eq!(
+            contents_hash(&serde_json::json!({"contents": [{"uri": "docs://c"}]})),
+            None
+        );
+        assert_eq!(
+            contents_hash(&serde_json::json!({"contents": [{"blob": "!!!"}]})),
+            None
+        );
     }
 
     #[test]

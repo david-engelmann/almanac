@@ -484,7 +484,12 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
                     .is_some();
                 if matches!(
                     method_name,
-                    "server/discover" | "tools/list" | "resources/list" | "prompts/list"
+                    "server/discover"
+                        | "tools/list"
+                        | "resources/list"
+                        | "prompts/list"
+                        | "resources/templates/list"
+                        | "resources/read"
                 ) && !carries_meta
                 {
                     respond(
@@ -513,7 +518,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             if mode != "open-2026"
                 && matches!(
                     method_name,
-                    "tools/list" | "resources/list" | "prompts/list"
+                    "tools/list" | "resources/list" | "prompts/list" | "resources/read"
                 )
                 && !headers.contains("mcp-session-id: fixture-session")
             {
@@ -602,6 +607,21 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
                     "jsonrpc": "2.0", "id": id,
                     "result": {"tools": fixture_tools(&mode)}
                 }),
+                "resources/read" => {
+                    let text = if mode == "open-contents" {
+                        "scene contents v2"
+                    } else {
+                        "scene contents v1"
+                    };
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {"contents": [{
+                            "uri": "ui://telorama/scene",
+                            "mimeType": "text/plain",
+                            "text": text
+                        }]}
+                    })
+                }
                 "resources/list" if mode == "open-resources" => serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {"resources": []}
@@ -808,6 +828,15 @@ fn http_sse_pagination_version_and_resource_breaks() {
     let (code, _, stderr) = generate_http(&site, &url);
     assert_eq!(code, 0, "generate failed with {stderr}");
 
+    // Generation read the resource's contents into the
+    // baseline (the twenty-eighth slice's record).
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        baseline_text.contains("contents_sha256"),
+        "baseline was {baseline_text}"
+    );
+
     // The event stream framing, CRLF and all, reads clean.
     *mode.lock().expect("mode") = "open-sse".to_string();
     let (code, stdout, _) = check_http(&site, &url);
@@ -842,6 +871,16 @@ fn http_sse_pagination_version_and_resource_breaks() {
     assert_eq!(code, 1, "resource change must fail, report was {stdout}");
     assert!(
         stdout.contains("resource-set-changed"),
+        "report was {stdout}"
+    );
+
+    // A resource contents change under an unchanged uri,
+    // name, and type is major drift (twenty-eighth slice).
+    *mode.lock().expect("mode") = "open-contents".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "contents change must fail, report was {stdout}");
+    assert!(
+        stdout.contains("resource-contents-changed"),
         "report was {stdout}"
     );
 }

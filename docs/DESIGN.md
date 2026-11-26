@@ -576,6 +576,13 @@ Major, fails by default and can be lowered by config.
   server's declared contract envelope, and the channel gates
   only on a baseline that recorded a hash, so an upgrade
   manufactures no finding of its own.
+- A resource's contents change on the MCP surface, and a
+  resource whose recorded contents can no longer be read, at
+  major. Added 2026-11-25 by the twenty-eighth slice, on the
+  same recorded-here footing: the contents are the resource,
+  and the channels gate per entry on a baseline that recorded
+  that entry's contents, so an upgrade manufactures no
+  finding of its own.
 - A catalog served only on the legacy path, with no ard.json beside
   it. The publisher is invisible to conformant ARD registries, which
   is the stranded state the migrate command exists to end. This

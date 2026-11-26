@@ -1692,6 +1692,25 @@ fn check_live_primitive_sets(
                     format!("resource {uri} metadata changed since generation"),
                 ));
             }
+            if let Some(recorded_contents) = &recorded.contents_sha256 {
+                match snapshot.resource_contents.get(uri) {
+                    Some(live_contents) if live_contents == recorded_contents => {}
+                    Some(_) => findings.push(finding(
+                        Severity::Major,
+                        "resource-contents-changed",
+                        Some(&mcp.entry_id),
+                        format!("resource {uri} contents changed since generation"),
+                    )),
+                    None => findings.push(finding(
+                        Severity::Major,
+                        "resource-read-failed",
+                        Some(&mcp.entry_id),
+                        format!(
+                            "resource {uri} could not be read, though generation recorded its contents"
+                        ),
+                    )),
+                }
+            }
         }
     }
     // The template channels gate only on a baseline
@@ -1963,6 +1982,7 @@ mod tests {
             resource_surfaces: vec![],
             resource_templates: vec![],
             template_surfaces: vec![],
+            resource_contents: Default::default(),
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -2900,6 +2920,52 @@ mod tests {
         assert_eq!(findings[0].kind, "capabilities-changed");
         let unrecorded = baseline_for(&snapshot(vec![ping()]));
         assert!(check(&inputs(&cat, &unrecorded, Some(&with_caps(caps)))).is_empty());
+    }
+
+    #[test]
+    fn resource_contents_changes_and_failed_reads_report() {
+        // Contents gate per entry once generation read
+        // them: a changed payload at major, a read that
+        // fails against a recorded hash at major under
+        // its own kind, and an entry generation never
+        // read stays ungated however the live contents
+        // look.
+        let surface = |contents: Option<&str>| {
+            let mut snap = snapshot(vec![ping()]);
+            snap.resources = vec!["docs://guide".into()];
+            snap.resource_surfaces = vec![crate::snapshot::ResourceSurface {
+                uri: "docs://guide".into(),
+                name: "guide".into(),
+                title: "The Guide".into(),
+                description: "How it works.".into(),
+                mime_type: "text/markdown".into(),
+            }];
+            if let Some(hash) = contents {
+                snap.resource_contents
+                    .insert("docs://guide".into(), hash.into());
+            }
+            snap
+        };
+        let base = baseline_for(&surface(Some("hash-one")));
+        let cat = catalog();
+        assert!(check(&inputs(&cat, &base, Some(&surface(Some("hash-one"))))).is_empty());
+        let findings = check(&inputs(&cat, &base, Some(&surface(Some("hash-two")))));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-contents-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let findings = check(&inputs(&cat, &base, Some(&surface(None))));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-read-failed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let unread_base = baseline_for(&surface(None));
+        assert!(
+            check(&inputs(
+                &cat,
+                &unread_base,
+                Some(&surface(Some("hash-two")))
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
