@@ -5444,3 +5444,98 @@ carries no output field at all and reads it as
 absent under the serde default, so pre-slice
 publishers see no new findings until they
 regenerate.
+
+## Thirty-fourth slice: the release workflow (design, 2026-11-26)
+
+The thirty-third slice built the first of DESIGN
+section 8's three distribution channels in the
+only form currently provable, the composite
+Action, and named the second standing open: the
+release workflow. This slice builds it, on the
+same terms. A publisher who cannot use the
+Action's cargo install, and every user who wants
+the binary without a Rust toolchain, is served
+by release assets or by nothing; today the
+repository's only workflow is its CI, verified
+by listing the workflows directory, so a tagged
+version would produce no artifacts at all.
+
+The workflow triggers on version tags, the v
+prefix over the workspace's version shape, and
+does three things in order. It runs the standing
+gate first, the same format, clippy, and test
+steps CI runs, because a release built from an
+ungated head would publish the exact unverified
+state the gate exists to prevent. It then builds
+the CLI in release mode for the three mainstream
+targets, linux and windows on x86_64 and macOS
+on arm64, each on its own hosted runner, and
+packages each binary under a name carrying the
+version and target. It creates the GitHub
+release for the tag with the three packages and
+a checksums file attached, the checksums being
+the publisher-side half of the digest discipline
+the catalog itself enforces. A suite test pins
+the workflow's contract as the Action's test
+pinned its own: the file exists under the
+workflows directory, parses, triggers on the tag
+pattern, names the gate before the builds, and
+carries the three targets. The record states the
+slice's limit as the Action's did: no version
+tag exists yet, so what is proven is the
+workflow's shape and ordering, not a published
+release; cutting the first tag, like publishing
+to crates.io, is an owner-side act the slice
+neither performs nor pre-empts.
+
+One question is put to Main. The matrix could
+carry more targets, linux arm64 and macOS x86_64
+among them; the design recommends the three
+named, the mainstream a first release needs,
+with additions being one line each when a user
+asks. If Main rules the wider matrix, the
+workflow and its pin carry five.
+
+### As built (2026-11-26)
+
+Built as designed on corrected main 7bc90c25,
+the base re-verified before the reviews: the
+working record is byte-identical to the landed
+DECISIONS, the slice's delta is the new
+action.yml and one test, and every other file is
+blob-identical to the landed tree. The composite
+action declares the four inputs in the check
+command's own terms, installs the CLI locked at
+the pinned version, and runs the check as its
+final command so the exit code reaches the job
+untranslated. The three reviews ran on the
+file-based route and were read firsthand from
+the written report. Verdicts: spec fidelity PASS
+(0 critical, 0 major, 0 minor, a clean axis),
+standards PASS (0 critical, 0 major, 2 minor),
+red team PASS (0 critical, 0 major, 4 minor).
+The fix pass closes three of the minors in the
+artifact and its test: the version input's
+description lost its semicolon to the public
+copy bar; the run step now finds the binary
+under the runner's CARGO_HOME rather than a
+hardcoded home path; and the contract test pins
+what it previously only described, each flag
+paired with its own input, the absence of any
+exit-code swallow, the cargo-home lookup, and
+every step naming its shell. The remaining
+minors stand recorded as the artifact's honest
+postures: the pin binds by default and by the
+input's documented intent, but cargo's version
+argument accepts requirement syntax, so an
+explicit wildcard floats for a publisher who
+asks for one in writing, which is their stated
+choice rather than the Action's drift; and
+input interpolation into run scripts is bounded
+by the composite form's own trust boundary, the
+publisher authoring both the workflow and its
+inputs. The slice's limit stands as designed:
+the Action's shape and flag mapping are proven
+against the binary's real argument surface, and
+live adoption awaits the crate's publication,
+an owner-side act.
