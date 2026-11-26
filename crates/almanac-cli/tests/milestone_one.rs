@@ -436,13 +436,19 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             }
         }
         ("POST", "/mcp") => {
+            // The current-revision family, named explicitly:
+            // a fixture mode is a premise other tests reason
+            // from, so the family is these two names and no
+            // prefix test widens it silently (the
+            // thirty-first slice's ruling).
+            let speaks_2026 = mode == "open-2026" || mode == "open-2026-reads-protected";
             // The credential mode serves the walk only to the
             // request carrying the fixture's token, and
             // challenges everything else.
             if mode == "auth-token" && headers.contains("authorization: bearer test-token") {
                 // Fall through to the open serving path below.
             } else if mode.starts_with("auth-")
-                || (mode == "reads-protected"
+                || ((mode == "reads-protected" || mode == "open-2026-reads-protected")
                     && body.contains("\"resources/read\"")
                     && !headers.contains("authorization: bearer test-token"))
             {
@@ -461,7 +467,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             // no protocol version header, and identity rides in
             // the _meta block on every call, so the fixture
             // refuses the headers and requires the meta.
-            if mode == "open-2026" {
+            if speaks_2026 {
                 let request_id = request
                     .get("id")
                     .cloned()
@@ -519,7 +525,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             // the way a real framework dispatches. The current
             // revision's mode is stateless and exempt, because
             // its requests carry no session by design.
-            if mode != "open-2026"
+            if !speaks_2026
                 && matches!(
                     method_name,
                     "tools/list" | "resources/list" | "prompts/list" | "resources/read"
@@ -546,7 +552,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
                 .and_then(|c| c.as_str())
                 .map(String::from);
             let payload = match method_name {
-                "server/discover" if mode == "open-2026" => serde_json::json!({
+                "server/discover" if speaks_2026 => serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": {
                         "protocolVersion": "2026-07-28",
@@ -554,7 +560,7 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
                         "serverInfo": {"name": "telorama", "version": "0.1.0"}
                     }
                 }),
-                "initialize" if mode == "open-2026" => serde_json::json!({
+                "initialize" if speaks_2026 => serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": -32601, "message": "method not found"}
                 }),
@@ -4286,6 +4292,63 @@ fn credentialed_retry_covers_protected_reads() {
     assert!(
         !baseline_text.contains("contents_sha256"),
         "a declared generate records no contents, baseline was {baseline_text}"
+    );
+}
+
+#[test]
+fn credentialed_retry_covers_protected_reads_over_discover() {
+    // The thirty-first slice: the ladder test's shape on
+    // the stateless entry. The fixture's combined mode
+    // speaks the current revision and protects only its
+    // reads, so the discover walk's read-step challenge
+    // conversion is the one exercised: a token-carrying
+    // generate retries credentialed and records the
+    // contents, and a tokenless one answers from
+    // declared evidence and records none.
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "open-2026-reads-protected".to_string();
+    let site = temp_site("reads-protected-2026");
+    let (code, _, stderr) = run_with_env(
+        &[
+            "generate",
+            "--site",
+            &site_arg(&site),
+            "--domain",
+            "example.com",
+            "--url",
+            &url,
+        ],
+        &[("ALMANAC_TOKEN", "test-token")],
+    );
+    assert_eq!(code, 0, "credentialed generate failed with {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        baseline_text.contains("contents_sha256"),
+        "the retry's reads must record contents, baseline was {baseline_text}"
+    );
+
+    let site = temp_site("reads-declared-2026");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "declared generate failed with {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        !baseline_text.contains("contents_sha256"),
+        "a declared generate records no contents, baseline was {baseline_text}"
+    );
+    assert!(
+        baseline_text.contains("\"Protected\""),
+        "the tokenless half must answer from the challenge's declared evidence, \
+         baseline was {baseline_text}"
     );
 }
 
