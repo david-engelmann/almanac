@@ -5290,62 +5290,104 @@ fixture's method-not-found on initialize and fail
 both halves, which is what makes the discover pin
 a pin.
 
-## Thirty-third slice: A2A skill contracts (design, 2026-11-26)
+## Thirty-third slice: the composite Action (design, 2026-11-26)
 
-The A2A surface has the same half-contract gap
-the thirty-second slice closed for MCP tools. An
-agent card declares its skills, the unit a caller
-chooses by, each with an identifier, a name, a
-description, and tags; the baseline's A2A record
-holds the capabilities object and the extensions
-and nothing of the skills, so a skill removed, a
-skill added, or a skill whose description is
-rewritten between releases moves no finding,
-though each is exactly the change a consumer of
-the card plans around. The twenty-second and
-twenty-third slices hardened the extension
-family on this surface and left the skills
-standing unrecorded beside them.
+APPROVED by Main 2026-11-26 as the replacement
+design, with its one question answered for the
+pinned default. A drift kit whose own Action
+floated on latest would let the checker drift
+under its users, the exact failure the product
+exists to catch; a pinned default with an
+explicit version input is the product's own
+logic applied to itself. The slice's stated
+limit stands in the open as written: the
+Action's shape and flag mapping proven against
+the binary's real argument surface, live
+adoption awaiting publication, which remains
+owner-side and uncharged. Build on the corrected
+main the record correction lands, through the
+usual reviews and staging.
 
-The design gives the skills the treatment the
-MCP surface gives its own units, in the A2A
-record's own idiom. The snapshot's A2A view gains
-the skills as served, each reduced to its
-identifier with its name, description, and tags;
-the baseline records the identifier set and, per
-skill, one hash over a canonical record of the
-name, description, and tags in served order, the
-resource-contract shape the twenty-fifth slice
-settled for a unit's editorial fields. A skill
-present at generation and absent live, or the
-reverse, is a set change at major under its own
-kind, a2a-skill-set-changed, the resource-set
-precedent; a recorded skill whose contract hash
-moves is a2a-skill-changed at major, since the
-record mixes identity and description and the
-surface offers no cleaner split, the template
-pair's single-hash reasoning. Generation records
-the skills on every path that builds the A2A
-view today, duplicates resolve as the MCP side
-resolves them, last wins in served order, and a
-card serving no skills records an empty set that
-gates as any other, the pair slices' recorded-
-empty rule rather than the optional-field gate,
-because a card's skills array is its declared
-unit list and not an optional decoration on one
-unit.
+This section replaces a design withdrawn the
+same day it was approved, and the withdrawal is
+recorded before the replacement. The withdrawn
+design proposed recording A2A skill contracts,
+on the premise that the baseline held nothing of
+a card's skills. The premise was false, and the
+seat found it false only when it opened the code
+to build: the original A2A slice already reduces
+each skill to two channels (a2a.rs's skill view
+carries the identifier, the description, and a
+contract hash over the skill object with its
+description removed), the baseline records both
+channels per skill, and the drift pass compares
+them in full, a removed skill at major under
+a2a-skill-removed, a description change at minor,
+a contract change at major under a2a-skill-
+changed, and an unannounced skill at critical.
+The design was written from the seat's summary
+of the record rather than from the code, which
+is the failure the read-firsthand rule exists to
+prevent; the approval it received was given on
+that premise and does not stand. Nothing of the
+withdrawn design is built, and the A2A skills
+surface needs no slice.
 
-One question is put to Main. The per-skill hash
-could instead split, description at minor and
-the rest at major, mirroring the tool treatment
-field for field; the design recommends the
-single hash at major, because an A2A skill's
-name and tags are how callers select it, closer
-to a resource's mimeType than to a tool's prose,
-and a selection field's change at minor would
-understate what a caller relying on it loses. If
-Main rules the split, the record carries two
-hashes and the findings split with them.
+The replacement takes up the one v1 promise
+verified unbuilt. DESIGN section 8 names three
+distribution channels, crates.io, release
+binaries, and a composite GitHub Action running
+check; as of this writing the repository carries
+only its CI workflow, no action.yml and no
+release workflow, while the crates' manifests
+already carry their publication metadata. The
+Action is the adoption surface the whole kit
+points at: a publisher wires the drift gate into
+a repository's CI in a handful of lines, and
+without it every adoption is a hand-rolled
+install. The slice builds the Action and pins
+its contract; the channels it depends on stay
+owner-side acts, named at the end.
+
+The Action is a composite action.yml at the
+repository root. Its inputs are the check
+command's own terms: the site path to check, the
+fail severity to enforce, an optional target,
+and the CLI version to install, pinned by
+default to a named release rather than floating,
+because a gate that updates itself silently is
+the drift this product exists to catch. Its
+steps install the CLI with cargo install
+almanac-cli --locked at the pinned version, then
+run almanac check with the inputs mapped to the
+command's flags, and the step's exit status is
+the check's own, so the 0, 1, and 2 semantics a
+publisher's pipeline reads are the CLI's,
+untranslated. A test in the suite pins the
+artifact's contract: the file exists at the
+root, parses, names the check command, declares
+the four inputs, and pins a default version.
+The slice is explicit about its limit: until
+the crate is published the install step cannot
+run end to end anywhere, so what the slice
+proves is the Action's shape and its mapping to
+the CLI's real flags, verified against the
+binary's own argument surface, and not a live
+adoption. Publication to crates.io and the
+release workflow that would let the Action
+install a binary instead of building one remain
+owner-side, publication needing David's token
+through secure entry; the slice neither performs
+nor pre-empts them.
+
+One question is put to Main. The default version
+input could instead track the latest release at
+run time, sparing publishers a pin to bump; the
+design recommends the pin, on the product's own
+logic above, with the bump being one line in the
+publisher's workflow. If Main rules the floating
+default, the input defaults to latest and this
+record's successor names the exception.
 
 ### As built (2026-11-26)
 
