@@ -31,6 +31,17 @@ pub struct SurfaceSnapshot {
     /// a later addition, named in docs/HTTP-TRANSPORT.md so its
     /// absence is a decision and not a surprise.
     pub stateless_shape: bool,
+    /// The server's declared capabilities object, as
+    /// served at the entry step beside serverInfo: the
+    /// contract envelope the baseline hashes. Some
+    /// whenever the entry step was reached and answered,
+    /// with a served absence of the member recorded as
+    /// JSON null, so an absence hashes distinctly from
+    /// an empty object; None when the entry step was
+    /// never reached, or the snapshot came from declared
+    /// evidence (a server card, a protected surface),
+    /// where capabilities evidence does not exist.
+    pub capabilities: Option<serde_json::Value>,
     /// True when this snapshot's tool, resource, prompt
     /// and template lists are the surface's own
     /// enumeration. A completed live walk enumerates; a

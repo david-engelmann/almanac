@@ -1555,6 +1555,24 @@ fn check_live_surface(
             ),
         ));
     }
+    // The capabilities envelope, compared when the
+    // baseline recorded one and the live walk read
+    // one. An unrecorded baseline leaves the channel
+    // ungated until regeneration; a live walk always
+    // reads the entry result, with a served absence
+    // recorded as JSON null, so a server that stops
+    // declaring capabilities fires here rather than
+    // passing silently.
+    if let (Some(recorded), Some(live)) = (&mcp.capabilities_sha256, &snapshot.capabilities) {
+        if crate::hash::sha256_json(live) != *recorded {
+            findings.push(finding(
+                Severity::Major,
+                "capabilities-changed",
+                Some(&mcp.entry_id),
+                "the MCP server's declared capabilities changed since generation".into(),
+            ));
+        }
+    }
 }
 
 /// The live primitive set comparisons: tools in both
@@ -1938,6 +1956,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities: None,
             capabilities_enumerated: true,
             tools,
             resources: vec![],
@@ -2834,6 +2853,53 @@ mod tests {
             });
         let dup_base = baseline_for(&dup);
         assert!(check(&inputs(&cat, &dup_base, Some(&dup))).is_empty());
+    }
+
+    #[test]
+    fn capabilities_changes_report_and_the_unrecorded_stays_ungated() {
+        // The declared capabilities envelope gates at
+        // major once a baseline recorded it. A baseline
+        // that recorded none leaves the channel ungated,
+        // and the canonical hash makes key order in the
+        // served object no change at all.
+        let with_caps = |caps: serde_json::Value| {
+            let mut snap = snapshot(vec![ping()]);
+            snap.capabilities = Some(caps);
+            snap
+        };
+        let caps = serde_json::json!({
+            "tools": {"listChanged": true},
+            "resources": {"subscribe": true}
+        });
+        let base = baseline_for(&with_caps(caps.clone()));
+        let cat = catalog();
+        assert!(check(&inputs(&cat, &base, Some(&with_caps(caps.clone())))).is_empty());
+        let reordered = serde_json::json!({
+            "resources": {"subscribe": true},
+            "tools": {"listChanged": true}
+        });
+        assert!(check(&inputs(&cat, &base, Some(&with_caps(reordered)))).is_empty());
+        let changed = serde_json::json!({
+            "tools": {"listChanged": true},
+            "resources": {}
+        });
+        let findings = check(&inputs(&cat, &base, Some(&with_caps(changed))));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "capabilities-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        // A server that stops declaring the member
+        // records null at the entry step, which fires
+        // against the recorded object rather than
+        // passing as no evidence.
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&with_caps(serde_json::Value::Null)),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "capabilities-changed");
+        let unrecorded = baseline_for(&snapshot(vec![ping()]));
+        assert!(check(&inputs(&cat, &unrecorded, Some(&with_caps(caps)))).is_empty());
     }
 
     #[test]
