@@ -78,6 +78,43 @@ Generation is the on-ramp. The gate is the product.
   Entries that fail verification are reported, never silently
   carried and never silently dropped.
 
+## Use in CI
+
+The gate ships as a composite GitHub Action in this repository.
+A workflow step adopts it in its pinned form.
+
+```yaml
+- uses: david-engelmann/almanac@v0.1.0
+  with:
+    site: .
+    fail-at: major
+```
+
+The Action installs the pinned CLI and runs check against the
+repository it stands in, and the reference resolves once the
+first version tag is cut. The site input names the directory
+holding the catalog and the baseline and defaults to the
+repository root. The fail-at input sets the lowest severity
+that fails the job and defaults to major. The target input
+names a live surface to probe, and when it stays unset the
+check resolves its endpoint from the catalog itself, probing
+the endpoint it finds and falling back to the offline repo
+mode only when the catalog names none. The
+version input pins the CLI the Action installs and defaults
+to 0.1.0, and moving it is a deliberate edit rather than a
+change the gate absorbs silently. Check exits 0 when the
+surface matches the baseline, 1 on drift at or above the
+chosen severity, and 2 when the check itself could not run,
+so a broken gate never reads as a passing one.
+
+A repository that does not use the Action can build the CLI
+from this source and run the same command as a step.
+
+```sh
+cargo install --path crates/almanac-cli --locked
+almanac check --site . --fail-at major
+```
+
 ## State
 
 The design gate was confirmed on 2026-11-20 after a cheapest failure

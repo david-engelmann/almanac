@@ -5558,6 +5558,20 @@ an owner-side act.
 
 ## Thirty-fifth slice: the README adoption section (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, with the record's
+recommendation taken: the pinned form everywhere
+the Action is shown. That is the thirty-third
+slice's own ruling applied to documentation, and
+the product's security posture stated in its own
+copy; a floating reference in the README would
+teach readers to accept the unpinned supply
+chain input the Action itself refuses by
+default. The section claims only what exists,
+as designed, and gains its installation line by
+amendment when publication lands. Build on the
+head the thirty-fourth slice lands, through the
+usual reviews and staging.
+
 The thirty-third and thirty-fourth slices built
 the distribution artifacts, and nothing in the
 repository tells a publisher they exist. The
@@ -5656,3 +5670,133 @@ The slice's limit stands as designed: the
 workflow's shape and ordering are proven, no
 release is published, and the first tag remains
 an owner-side act.
+
+## Thirty-sixth slice: the plural slot's identity exemption (design, 2026-11-26)
+
+The fifteenth slice's record keeps a posture in
+the open, stated there in full: the trust
+draft's model treats an envelope standing in the
+plural attestations array as a third-party
+attestation, so the identity binding the
+singular publisher envelope carries does not
+reach it, and a publisher envelope relocated
+into the plural array is judged as a third-party
+attestation instead, drawing in an unkeyed run
+no judgment beyond what its signature claims.
+The record names the consequence plainly: both
+that exemption and its sibling follow the draft
+and the approved scoping, and changing either is
+a design change, not a repair. This slice is
+that design change, brought to Main rather than
+left standing by default.
+
+The gap is narrow and concrete. The sixteenth
+and eighteenth slices bound the singular
+envelope twice over, its statement subject and
+its declared identity, because a publisher's own
+attestation is the claim the whole verification
+rests on. An envelope claiming the publisher's
+own identity, by the same key or the same
+identity string the singular envelope declares,
+escapes both bindings by standing in the plural
+array, where the run judges it as a stranger's
+word. The relocation costs the mover nothing and
+changes the judgment entirely, which is the
+shape of an exemption that outlives its reason:
+the draft's model exists so genuine third-party
+attestations are not held to the publisher's
+bindings, not so the publisher's own claim can
+step out from under them by changing arrays.
+
+The design closes it by identity, not by
+position. A plural envelope whose declared
+identity, or whose signing key where keys are
+supplied, matches the publisher identity the
+catalog or the singular envelope declares is
+judged under the publisher bindings, statement
+subject and identity alike, exactly as if it
+stood in the singular slot; a plural envelope
+claiming any other identity keeps the
+third-party judgment it has today. The match is
+computed from what the run already reads, the
+envelope's own declared identity and the keys
+supplied to the run, and introduces no new input
+and no new fetch. The sibling posture, unkeyed
+third-party envelopes drawing no judgment beyond
+shape, is NOT reopened by this slice: it stands
+as the fifteenth record left it, a scoping
+consequence of Amendment D's deferral, and
+reopening it is its own design if Main ever
+charges one.
+
+One question is put to Main, and it is the
+slice. The record's recommendation is to close
+the exemption as designed, because a binding
+that relocation defeats is a binding in name
+only, and the closure is judged on the
+envelope's claimed identity rather than its
+array, which keeps genuine third-party
+attestations exactly as free as the draft made
+them. The alternative Main may rule is that the
+draft's model stands as the specification's own
+posture and the exemption is the price of
+following it, in which case this section records
+the decision and the posture stops being an
+open item. Either ruling closes the question;
+what the design asks is that it be closed by
+decision rather than by standing.
+
+### As built (2026-11-26)
+
+Built as designed on landed main 22408137, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the
+landed tree, and the working record differs
+from the landed DECISIONS by exactly the
+slice's approval paragraph inserted at its
+design head, verified by removing it and
+comparing whole files. The Use in CI section
+stands between Commands and State, showing the
+Action pinned, naming its four inputs, stating
+the exit meanings, and giving the direct route
+as a build from this source. The three reviews
+ran on the file-based route and were read
+firsthand from the written report. Verdicts:
+spec fidelity FAIL (0 critical, 1 major, 0
+minor), standards PASS (0 critical, 0 major, 0
+minor, the copy bar verified by a codepoint
+scan over the section's prose), red team FAIL
+(0 critical, 1 major, 3 minor), the major being
+one fact judged by both failing axes. The
+section described the target input's unset state
+as selecting the offline repo mode; the code
+resolves an unnamed target from the catalog and
+probes it live, with repo mode only the fallback
+when nothing resolves, so a publisher following
+the copy to keep CI offline would have received
+live probes, and in a sandboxed CI a critical
+reachability failure reading as drift. The fix
+pass rewrites that sentence to state the true
+behavior, the resolution from the catalog, the
+live probe of what it finds, and the fallback,
+and the contract test now pins that very phrase
+among the stated facts. The same pass discloses
+the pin's forward reference in place, the
+reference resolving once the first version tag
+is cut, and strengthens the test past the
+design's list: the extraction is bounded at the
+next heading, the source build line is pinned,
+and the stated defaults and exit wording are
+pinned on whitespace-normalized prose. What
+stands recorded is the red team's remaining
+minor: exit 2 is the binary's universal error
+exit rather than a check-specific code, and the
+section's sentence, which claims only that the
+check could not run in that case, stands as
+written because it does not claim exclusivity
+and both cases fail a CI job loudly. The
+slice's limit stands as designed: the section
+documents artifacts that exist, claims no
+publication that has not happened, and gains
+its installation line by amendment when
+publication lands.
