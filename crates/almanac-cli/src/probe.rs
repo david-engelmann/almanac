@@ -121,6 +121,23 @@ pub(crate) fn normative_card_url(endpoint_url: &str) -> String {
 }
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest response the probe will read, on either
+/// transport: the stdio walk applies it to each response
+/// line, the HTTP walk to each response body. A response
+/// past the cap fails its request in the ordinary form,
+/// so the two transports judge the same surface (the
+/// thirtieth slice).
+pub(crate) const RESPONSE_CAP_BYTES: usize = 16 * 1024 * 1024;
+
+/// One line from the server's stdout, as the reader
+/// thread delivers it: the line's text, or the mark
+/// that the line ran past the response cap and was
+/// not read whole.
+enum Line {
+    Text(String),
+    Overflow,
+}
+
 /// The most pages one list call may span before the probe
 /// records a failure. A server that always answers with another
 /// cursor would otherwise hold the gate open forever.
@@ -392,7 +409,7 @@ pub fn is_method_not_found(response: &Value) -> bool {
 struct StdioClient {
     child: Child,
     stdin: ChildStdin,
-    lines: mpsc::Receiver<String>,
+    lines: mpsc::Receiver<Line>,
     next_id: i64,
 }
 
@@ -409,15 +426,65 @@ impl StdioClient {
         let stdout = child.stdout.take().expect("stdout was piped");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
-                            break;
+            let mut reader = BufReader::new(stdout);
+            'lines: loop {
+                let mut bytes = Vec::new();
+                let mut overflow = false;
+                loop {
+                    let available = match reader.fill_buf() {
+                        Ok(available) => available,
+                        Err(_) => break 'lines,
+                    };
+                    if available.is_empty() {
+                        // The stream ended. A partial last
+                        // line is delivered like any other;
+                        // an over-cap one is delivered as
+                        // its mark.
+                        if overflow {
+                            let _ = tx.send(Line::Overflow);
+                        } else if !bytes.is_empty()
+                            && let Ok(text) = String::from_utf8(bytes)
+                        {
+                            let _ = tx.send(Line::Text(text));
                         }
+                        break 'lines;
                     }
-                    Err(_) => break,
+                    // The cap counts the line's payload
+                    // bytes; the terminating newline is
+                    // framing, not payload, so a payload of
+                    // exactly the cap reads clean.
+                    let (chunk, counted, complete) =
+                        match available.iter().position(|b| *b == b'\n') {
+                            Some(pos) => (pos + 1, pos, true),
+                            None => (available.len(), available.len(), false),
+                        };
+                    if !overflow && bytes.len() + counted > RESPONSE_CAP_BYTES {
+                        overflow = true;
+                        bytes = Vec::new();
+                    } else if !overflow {
+                        bytes.extend_from_slice(&available[..chunk]);
+                    }
+                    reader.consume(chunk);
+                    if complete {
+                        let line = if overflow {
+                            Line::Overflow
+                        } else {
+                            match String::from_utf8(bytes) {
+                                Ok(mut text) => {
+                                    text.pop();
+                                    if text.ends_with('\r') {
+                                        text.pop();
+                                    }
+                                    Line::Text(text)
+                                }
+                                Err(_) => break 'lines,
+                            }
+                        };
+                        if tx.send(line).is_err() {
+                            break 'lines;
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -461,10 +528,16 @@ impl StdioClient {
             if remaining.is_zero() {
                 return Err(format!("timed out waiting for the {method} response"));
             }
-            let line = self
+            let line = match self
                 .lines
                 .recv_timeout(remaining)
-                .map_err(|_| format!("timed out waiting for the {method} response"))?;
+                .map_err(|_| format!("timed out waiting for the {method} response"))?
+            {
+                Line::Text(line) => line,
+                Line::Overflow => {
+                    return Err(format!("the {method} response exceeded the response cap"));
+                }
+            };
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(_) => continue,

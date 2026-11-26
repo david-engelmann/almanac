@@ -4164,6 +4164,81 @@ fn credentialed_probe_walks_a_protected_surface() {
 }
 
 #[test]
+fn stdio_list_past_the_cap_fails_the_probe() {
+    // The thirtieth slice. The oversized fixture answers
+    // tools/list with a line past the 16 MiB response cap
+    // the HTTP transport has always applied, and the
+    // probe fails that step rather than reading it whole.
+    let fixture = fixture_binary("fixture_server_oversized");
+    let site = temp_site("oversized-list");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--command",
+        &fixture.to_string_lossy(),
+        "list",
+    ]);
+    assert_ne!(code, 0, "an oversized list must not generate");
+    assert!(
+        stderr.contains("exceeded the response cap"),
+        "stderr was {stderr}"
+    );
+}
+
+#[test]
+fn stdio_read_past_the_cap_records_no_contents() {
+    // The contents half of the cap: an oversized read
+    // records nothing and the walk completes around it.
+    // The same fixture uninflated records contents, so
+    // the absence under inflation is the cap's doing and
+    // not a read never issued.
+    let fixture = fixture_binary("fixture_server_oversized");
+    let site = temp_site("oversized-read-clean");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--command",
+        &fixture.to_string_lossy(),
+        "none",
+    ]);
+    assert_eq!(code, 0, "clean generate failed: {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        baseline_text.contains("contents_sha256"),
+        "the uninflated fixture's read must record contents, baseline was {baseline_text}"
+    );
+
+    let site = temp_site("oversized-read");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--command",
+        &fixture.to_string_lossy(),
+        "read",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an oversized read must not fail generate: {stderr}"
+    );
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        !baseline_text.contains("contents_sha256"),
+        "an oversized read records no contents, baseline was {baseline_text}"
+    );
+}
+
+#[test]
 fn credentialed_retry_covers_protected_reads() {
     // The twenty-ninth slice. The fixture's reads-protected
     // mode serves the lists openly and challenges only

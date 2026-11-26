@@ -29,8 +29,9 @@ use serde_json::{Value, json};
 use ureq::Agent;
 
 use crate::probe::{
-    CURRENT_PROTOCOL_VERSION, LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, discover_params,
-    failed_snapshot, handshake_snapshot, is_method_not_found, list_params, request_meta,
+    CURRENT_PROTOCOL_VERSION, LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, RESPONSE_CAP_BYTES,
+    discover_params, failed_snapshot, handshake_snapshot, is_method_not_found, list_params,
+    request_meta,
 };
 use crate::sse;
 
@@ -138,7 +139,7 @@ fn rpc(
         let _ = response
             .body_mut()
             .as_reader()
-            .take(16 * 1024 * 1024)
+            .take(RESPONSE_CAP_BYTES as u64)
             .read_to_end(&mut bytes);
         String::from_utf8_lossy(&bytes).to_string()
     };
@@ -257,7 +258,7 @@ fn get_bytes(agent: &Agent, url: &str) -> Option<Vec<u8>> {
     response
         .body_mut()
         .as_reader()
-        .take(16 * 1024 * 1024)
+        .take(RESPONSE_CAP_BYTES as u64)
         .read_to_end(&mut bytes)
         .ok()?;
     Some(bytes)

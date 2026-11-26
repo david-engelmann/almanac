@@ -131,7 +131,10 @@ sent one at a time, never batched, so a failure names its step.
 Every request carries a timeout, thirty seconds by default, and a
 response size cap, sixteen megabytes by default, above which the
 probe stops reading and reports the surface as unprobeable at that
-step rather than swallowing an unbounded stream.
+step rather than swallowing an unbounded stream. The stdio walk
+applies the same sixteen-megabyte cap to each response line, a
+line past it failing its request in the ordinary form, so the two
+transports judge the same surface.
 
 Failure at any step is data, not an exception. The snapshot
 records which step failed and how, an HTTP status, a JSON-RPC
