@@ -569,6 +569,13 @@ Major, fails by default and can be lowered by config.
   parameterized half of the resource surface, and the channels
   gate only on a baseline that recorded templates at all, so an
   upgrade manufactures no finding of its own.
+- A change in the MCP server's declared capabilities object,
+  the whole object as served, experimental keys included, at
+  major. Added 2026-11-25 by the twenty-seventh slice, on the
+  same recorded-here footing: the capabilities object is the
+  server's declared contract envelope, and the channel gates
+  only on a baseline that recorded a hash, so an upgrade
+  manufactures no finding of its own.
 - A catalog served only on the legacy path, with no ard.json beside
   it. The publisher is invisible to conformant ARD registries, which
   is the stranded state the migrate command exists to end. This

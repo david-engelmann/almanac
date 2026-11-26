@@ -60,8 +60,10 @@ pub(crate) fn list_params(cursor: Option<&str>) -> Value {
 /// Build the open snapshot from a handshake-shaped result. A
 /// discover result under the current revision and an initialize
 /// result under the earlier ones carry the same fields the
-/// snapshot reads, serverInfo and protocolVersion, so one
-/// construction serves both ladders.
+/// snapshot reads, serverInfo, protocolVersion and
+/// capabilities, so one construction serves both ladders. A
+/// result with no capabilities member records JSON null, a
+/// served absence distinct from an empty object.
 pub(crate) fn handshake_snapshot(
     transport: &str,
     result: &Value,
@@ -86,6 +88,7 @@ pub(crate) fn handshake_snapshot(
             .unwrap_or_default()
             .to_string(),
         stateless_shape,
+        capabilities: Some(result.get("capabilities").cloned().unwrap_or(Value::Null)),
         capabilities_enumerated: true,
         tools: vec![],
         resources: vec![],
@@ -177,6 +180,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         server_version: String::new(),
         protocol_version: String::new(),
         stateless_shape: false,
+        capabilities: None,
         capabilities_enumerated: false,
         tools: vec![],
         resources: vec![],
@@ -624,4 +628,40 @@ fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, statel
         .sort_by(|a, b| a.uri_template.cmp(&b.uri_template));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_handshake_snapshot_always_carries_capabilities_evidence() {
+        // The capabilities channel's live side compares
+        // only when the snapshot carries Some, so the
+        // seam's promise is the channel's soundness: a
+        // completed entry step always records evidence,
+        // the object as served when one was served, and
+        // JSON null for a served absence. A construction
+        // that left the field None would ungate the
+        // channel silently; this test is the pin.
+        let served = handshake_snapshot(
+            "stdio",
+            &json!({
+                "serverInfo": {"name": "demo", "version": "0.1.0"},
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}}
+            }),
+            false,
+        );
+        assert_eq!(served.capabilities, Some(json!({"tools": {}})));
+        let absent = handshake_snapshot(
+            "stdio",
+            &json!({
+                "serverInfo": {"name": "demo", "version": "0.1.0"},
+                "protocolVersion": "2025-06-18"
+            }),
+            false,
+        );
+        assert_eq!(absent.capabilities, Some(Value::Null));
+    }
 }

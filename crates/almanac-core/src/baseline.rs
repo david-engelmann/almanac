@@ -148,6 +148,16 @@ pub struct McpBaseline {
     /// regeneration, the approved no-record posture.
     #[serde(default)]
     pub template_contracts: BTreeMap<String, TemplateBaseline>,
+    /// Hash of the server's declared capabilities
+    /// object as served at the entry step, the whole
+    /// object, experimental keys included. Absent
+    /// when generation recorded none: baselines from
+    /// before the twenty-seventh slice, and baselines
+    /// recorded from declared evidence, carry none,
+    /// and the capabilities channel stays ungated
+    /// until a live generation records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities_sha256: Option<String>,
     /// True when the recorded tool, resource, prompt and
     /// template lists are the surface's own enumeration.
     /// A baseline recorded from a SEP-2127 Final shape
@@ -481,6 +491,7 @@ impl McpBaseline {
                     )
                 })
                 .collect(),
+            capabilities_sha256: snapshot.capabilities.as_ref().map(crate::hash::sha256_json),
             capabilities_enumerated: snapshot.capabilities_enumerated,
             card_display: None,
             auth: AuthBaseline::from(&snapshot.auth),
@@ -503,6 +514,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities: None,
             capabilities_enumerated: true,
             tools: vec![ToolSurface {
                 name: "ping".into(),
@@ -540,6 +552,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities: None,
             capabilities_enumerated: true,
             tools: vec![],
             resources: vec![],
@@ -641,6 +654,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities: None,
             capabilities_enumerated: true,
             tools: vec![],
             resources: vec!["docs://guide".into()],
@@ -690,6 +704,7 @@ mod tests {
             server_version: "0.1.0".into(),
             protocol_version: "2025-06-18".into(),
             stateless_shape: false,
+            capabilities: None,
             capabilities_enumerated: true,
             tools: vec![],
             resources: vec![],
@@ -763,6 +778,62 @@ mod tests {
         let mcp = baseline.mcp.expect("mcp record");
         assert!(mcp.resource_templates.is_empty());
         assert!(mcp.template_contracts.is_empty());
+        // The same fixture predates the twenty-seventh
+        // slice's capabilities hash as well.
+        assert!(mcp.capabilities_sha256.is_none());
+    }
+
+    #[test]
+    fn baseline_records_the_capabilities_hash() {
+        let mut snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities: Some(serde_json::json!({
+                "tools": {"listChanged": true},
+                "experimental": {"acme": {"v": 1}}
+            })),
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec![],
+            resource_surfaces: vec![],
+            resource_templates: vec![],
+            template_surfaces: vec![],
+            prompts: vec![],
+            prompt_surfaces: vec![],
+            auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
+            failure: None,
+        };
+        let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert_eq!(
+            baseline.capabilities_sha256.as_deref(),
+            Some(
+                crate::hash::sha256_json(&serde_json::json!({
+                    "tools": {"listChanged": true},
+                    "experimental": {"acme": {"v": 1}}
+                }))
+                .as_str()
+            )
+        );
+        // A served absence records the null hash, which
+        // differs from an empty object's: the two
+        // absences are distinct facts.
+        snapshot.capabilities = Some(serde_json::Value::Null);
+        let nulled = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert_eq!(
+            nulled.capabilities_sha256,
+            Some(crate::hash::sha256_json(&serde_json::Value::Null))
+        );
+        assert_ne!(
+            nulled.capabilities_sha256,
+            Some(crate::hash::sha256_json(&serde_json::json!({})))
+        );
+        snapshot.capabilities = None;
+        let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert!(bare.capabilities_sha256.is_none());
     }
 
     #[test]

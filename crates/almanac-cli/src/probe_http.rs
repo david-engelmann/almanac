@@ -605,6 +605,7 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
         server_version: String::new(),
         protocol_version: String::new(),
         stateless_shape: false,
+        capabilities: None,
         capabilities_enumerated: false,
         tools: vec![],
         resources: vec![],

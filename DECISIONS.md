@@ -4463,3 +4463,272 @@ the twin-type idiom the codebase keeps for its
 per-kind pairs, and within each channel the two
 call sites share the one method on the one type,
 so no two-sides divergence is possible.
+
+## Twenty-seventh slice: MCP server capabilities (design, 2026-11-25)
+
+APPROVED by Main 2026-11-25, as written, with its
+one question answered with the record's
+recommendation: the hash covers the whole
+capabilities object as served, experimental keys
+included. The baseline records what was served;
+that as-served principle is the posture the
+twenty-fifth and twenty-sixth slices already stand
+on, an experimental key a client builds against is
+contract whether or not a standard names it, and
+filtering to standardized keys would blind the
+tool to a class of real changes the slice exists
+to catch. The stated cost is accepted with its
+standing remedy: a churning experimental block
+fires the major until a publisher suppresses it
+with a reason and an expiry, which is the
+mechanism working as designed rather than a
+defect in the channel. Build on current main
+3dd88e57 through the usual reviews and staging.
+
+With the twenty-sixth slice the primitive sets and
+their contracts are all under drift discipline:
+tools, prompts, resources, templates. What the
+entry step itself declares is not. Both entry
+paths, server/discover under the current revision
+and initialize behind the ladder, return a
+capabilities object beside serverInfo: the
+server's declared contract envelope, which
+features exist at all (tools, resources, prompts,
+logging, completions), which refinements ride
+them (listChanged notifications, resource
+subscribe), and whatever experimental keys the
+server announces. The probe reads serverInfo from
+that result and discards the capabilities unread
+(probe.rs reads only the serverInfo member of the
+entry result; the HTTP walk likewise), the
+snapshot records nothing about them, and no
+baseline carries them. A server that stops
+offering resource subscriptions, or stops sending
+list-changed notifications, or grows a completions
+surface, changes what every client may rely on,
+and draws no finding anywhere today: the version
+string can stay identical through all of it, so
+the standing server-version channel does not
+cover it. This slice records the envelope.
+
+The record. The snapshot gains the capabilities
+object as served, read at the entry step from the
+same result that yields serverInfo, on both
+transports and both entry paths (discover and
+the initialize ladder each return it). The
+baseline gains one field, capabilities_sha256,
+the canonical hash of that object, recorded only
+when a capabilities object was actually read: the
+field is an Option, absent in the serialized
+record when nothing was recorded, and baselines
+written before this slice parse with it absent.
+The gate adds one channel, capabilities-changed
+at major, fired when a baseline that recorded a
+hash meets a live walk whose hash differs. The
+severity follows the standing precedents for
+declared-posture changes: an authentication
+change and a server version change are both
+major, and the capabilities envelope is the same
+class of fact, the server's own declaration of
+what it supports. The comparison runs in the live
+surface pass beside the version comparison, not
+inside the primitive-set function, because the
+envelope is an entry-step fact rather than a list
+fact, and it is not conditioned on
+capabilities_enumerated: a completed live walk
+holds the entry result whether or not any list
+was enumerated, and a card-recorded baseline
+carries no capabilities hash, so the channel
+stays ungated there by the absent record rather
+than by a flag.
+
+The no-record posture needs no new gate
+condition: an absent hash skips the channel, the
+same shape the trust and attestation records use
+for their unrecorded states, and regeneration
+starts the gating. A live walk that reads no
+capabilities object where the baseline recorded
+one hashes the absence distinctly (the empty
+object is a served fact; a missing member is
+another, and the record distinguishes them by
+hashing what was served or recording nothing only
+when the entry step itself was never reached, as
+in a failed probe, which draws its critical and
+no comparisons in any case). Card and protected
+snapshots carry no capabilities: the card
+declares identity and endpoints only under its
+Final shape, and the protected snapshot is
+identity-level evidence, so capabilities evidence
+is live-only, as template evidence is.
+
+One question is put to Main. The hash covers the
+whole capabilities object as served, experimental
+keys included, or only the standardized keys
+(tools, resources, prompts, logging, completions,
+and the extensions member)? The design recommends
+the whole object: the baseline philosophy records
+what was served, an experimental key a publisher
+relies on is part of the contract its clients
+build against, and a publisher whose experimental
+block churns by design has the standing remedy, a
+suppression with a reason and an expiry. Recording
+only the standardized keys would leave a real
+surface unjudged by a taxonomy decision the tool
+cannot revisit per server. The cost of the whole
+object is stated plainly: an experimental key that
+changes value every run fires the major every run
+until suppressed or the key settles, and that is
+the accepted price of judging the envelope as
+served. If Main rules the narrower record, the
+slice records the standardized keys only and the
+experimental member is named out of scope in this
+record.
+
+## Twenty-eighth slice: MCP resource contents (design, 2026-11-25)
+
+The resource channels now gate a resource's
+existence, its mimeType, and its editorial
+metadata. What a resource actually serves, its
+contents, is never read: a resource whose bytes
+change under an unchanged uri, name, and mimeType
+is invisible to the gate, though the contents are
+the resource in a way its metadata is not. A
+documentation resource quietly rewritten, a
+schema resource swapped, a configuration resource
+altered: all pass silently today. This slice
+reads the contents.
+
+The read. After the list walk, on both
+transports, the probe issues resources/read once
+per announced concrete resource (templates are
+never expanded, the standing posture) and records
+a contents hash per uri in the snapshot. The
+baseline's ResourceBaseline gains a third field,
+contents_sha256, an Option with the serde default
+and skip-when-absent idiom, recorded per entry:
+an entry whose generation read succeeded carries
+a hash; an entry recorded before this slice, or
+whose generation read failed, carries none and
+stays ungated individually, the additive posture
+at entry granularity rather than the pair shape
+the template channels needed, because resources
+were already recorded per entry. The gate adds
+resource-contents-changed at major when a
+recorded hash meets a live read whose hash
+differs, and resource-read-failed at major when a
+resource the baseline recorded contents for
+cannot be read at check at all: unreadable is not
+unchanged, and a silent pass on a resource the
+gate once read would be the failure class this
+product exists to close. At generation a failed
+read is not an error and fails nothing; it
+records no hash, the resource simply stays
+ungated until a generation reads it, because a
+resource may legitimately refuse a bare read
+(subscription-first surfaces, parameterized
+servers misdeclaring a concrete uri) and
+generation must not fail on a surface it can
+still catalog.
+
+The hash. A read returns a contents list, text
+items and base64 blob items. The recorded hash is
+over a canonical record of the items in served
+order: for a text item, the text as served; for a
+blob item, the decoded bytes, because the content
+is the fact and base64 is a transport encoding
+whose wrapping is not. The mimeType a read item
+carries is already judged by the mime channel
+through the list surface, and is not rejudged
+here. Contents are bounded by the transport's
+standing response cap; a resource larger than the
+cap fails its read and follows the read-failed
+postures above, at generation ungated and at
+check a major, which is stated here so the cap's
+interaction with this slice is a decision and not
+a surprise.
+
+The costs, stated plainly. A check run now reads
+every announced concrete resource once, so its
+cost grows linearly with the resource set, in
+requests and in bytes up to the cap per resource.
+Dynamic resources, contents carrying timestamps
+or generated values, fire the major on every run
+until the publisher suppresses the kind for that
+entry with a reason and an expiry, the standing
+remedy; the design accepts this because the
+alternative, sampling or normalizing contents, is
+the tool guessing which bytes matter, and
+guessing is the one move the drift model's
+evidence discipline forbids. Repo mode is
+untouched: contents exist only on a live surface,
+and every channel in this slice is a live-mode
+channel, like the primitive sets it extends.
+
+One question is put to Main. The severity of a
+contents change is major in this design, on the
+mime channel's precedent: a different payload at
+the same address is a different contract at the
+same address, and critical stays reserved for the
+disappearance and handshake classes (a dead
+announced URL, a tool no longer served). The
+alternative is critical, arguing the contents are
+the entry itself. The design recommends major:
+the resource still exists, still answers, and
+still carries its declared type; what changed is
+what it says, and the severity ladder's critical
+rung has so far meant the surface broke its
+announcement outright. If Main rules critical, the
+channel and its read-failed sibling both move up
+a rung and this record is amended before the
+build.
+
+### As built (2026-11-25)
+
+Built as designed on landed main 3dd88e57, the
+base re-verified before the reviews: the working
+record extends the landed DECISIONS exactly, and
+every file outside the slice is blob-identical
+to the landed tree. The whole capabilities object
+as served is the record, experimental keys
+included: handshake_snapshot, the one construction
+all four entry paths (stdio and HTTP, discover
+and the initialize ladder) pass through, reads
+the member beside serverInfo, a served absence
+recording JSON null so it hashes distinctly from
+an empty object. The baseline records
+capabilities_sha256 as an Option in the
+card_display serde idiom, absent when nothing was
+recorded; the gate adds capabilities-changed at
+major beside the version comparison in the live
+pass, comparing only when both sides recorded.
+
+The three reviews ran on the file-based route and
+were read firsthand from the written report.
+Verdicts: spec fidelity PASS with no finding at
+any grade (0 critical, 0 major, 0 minor), the
+third consecutive clean spec axis; standards PASS
+with no finding at any grade either (0 critical,
+0 major, 0 minor), the cleanest standards result
+this seat has recorded; red team PASS (0
+critical, 0 major, 1 minor). The checkpoint fix
+pass closed the red team's minor with the pin it
+named: the comparison's live side fails open on a
+snapshot carrying None, sound today only because
+every completed walk's snapshot is a
+handshake_snapshot product and always carries
+Some, an invariant that stood on convention. A
+unit test at the seam now pins it, asserting a
+handshake result with a capabilities member
+records that object and a result without one
+records JSON null, so a construction that left
+the field empty fails a test rather than ungating
+the channel silently. The red team's confirmed
+sound list stands as the channel's attack record:
+the null convention cannot be gamed into a pass
+in either direction, key order canonicalizes
+through the shared hash, protected and card modes
+are judged as designed with no cross-contamination
+between the unauthenticated and credentialed
+reads, and the churning-experimental cost the
+approval accepted passes through the standing
+suppression mechanism unchanged.
