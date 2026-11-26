@@ -441,7 +441,11 @@ fn handle_http(stream: &mut std::net::TcpStream, mode: &Mode, log: &Log, port: u
             // challenges everything else.
             if mode == "auth-token" && headers.contains("authorization: bearer test-token") {
                 // Fall through to the open serving path below.
-            } else if mode.starts_with("auth-") {
+            } else if mode.starts_with("auth-")
+                || (mode == "reads-protected"
+                    && body.contains("\"resources/read\"")
+                    && !headers.contains("authorization: bearer test-token"))
+            {
                 let header = format!(
                     "WWW-Authenticate: Bearer resource_metadata=\"{origin}/.well-known/oauth-protected-resource\"\r\n"
                 );
@@ -4156,6 +4160,57 @@ fn credentialed_probe_walks_a_protected_surface() {
     assert!(
         stderr.contains("the presented credential was refused"),
         "stderr was {stderr}"
+    );
+}
+
+#[test]
+fn credentialed_retry_covers_protected_reads() {
+    // The twenty-ninth slice. The fixture's reads-protected
+    // mode serves the lists openly and challenges only
+    // resources/read. A token-carrying generate's first
+    // walk is challenged at the read step, its credentialed
+    // retry reads the contents, and the baseline records
+    // them; a tokenless generate answers from declared
+    // evidence and records no contents.
+    let (url, mode) = start_http_fixture();
+    *mode.lock().expect("mode") = "reads-protected".to_string();
+    let site = temp_site("reads-protected");
+    let (code, _, stderr) = run_with_env(
+        &[
+            "generate",
+            "--site",
+            &site_arg(&site),
+            "--domain",
+            "example.com",
+            "--url",
+            &url,
+        ],
+        &[("ALMANAC_TOKEN", "test-token")],
+    );
+    assert_eq!(code, 0, "credentialed generate failed with {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        baseline_text.contains("contents_sha256"),
+        "the retry's reads must record contents, baseline was {baseline_text}"
+    );
+
+    let site = temp_site("reads-declared");
+    let (code, _, stderr) = run(&[
+        "generate",
+        "--site",
+        &site_arg(&site),
+        "--domain",
+        "example.com",
+        "--url",
+        &url,
+    ]);
+    assert_eq!(code, 0, "declared generate failed with {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        !baseline_text.contains("contents_sha256"),
+        "a declared generate records no contents, baseline was {baseline_text}"
     );
 }
 

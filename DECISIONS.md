@@ -4752,6 +4752,24 @@ suppression mechanism unchanged.
 
 ## Twenty-ninth slice: the credentialed retry covers the read step (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, as written, with its
+one question answered with the record's
+recommendation: challenge on the first read 401.
+The list walk's standing discipline is to
+challenge at the step that refuses, and deferring
+to the end would complete a full unauthenticated
+read pass before discovering the surface is
+guarded, recording partial state the retry then
+discards; the whole-walk credentialed retry
+already exists precisely to restart on a
+challenge, so surfacing the first read 401
+through the same metadata ladder and Challenged
+form is the consistent behavior. The declared
+snapshot answering as today when no credential is
+available stands as designed. Build on the head
+the twenty-eighth slice lands, through the usual
+reviews and staging.
+
 The twenty-eighth slice's red team recorded the
 shape this slice closes. The HTTP credential
 ladder retries the whole walk with the publisher's
@@ -4884,3 +4902,125 @@ wording. The red team's first minor, a read-step
 not a repair to this slice: it is the
 twenty-ninth slice's whole charge, designed
 above.
+
+## Thirtieth slice: the stdio response cap (design, 2026-11-26)
+
+The twenty-eighth slice's as-built records a
+divergence this slice closes. The contents design
+states that responses are bounded by the
+transport's standing cap and a resource larger
+than the cap fails its read. On HTTP that is
+exact, because the rpc read truncates at 16 MiB
+and an oversized body then fails to parse. On
+stdio there is no byte cap to inherit: the client
+reads newline-delimited responses through a
+buffered reader with no length limit, bounded per
+request only by its timeout, so an oversized
+stdio response, a contents payload or a list page
+alike, is read whole. The divergence is benign
+for drift, since both sides of the gate read the
+same bytes through the same path, but the record
+states a mechanism the stdio side does not
+implement, and an unbounded read is an unbounded
+memory claim against the checker's own process on
+a surface it does not control. A hostile or merely
+careless server can hold a line open and grow it;
+the timeout bounds the wait, not the bytes.
+
+The change is confined to the stdio client's
+response read. Each response line is read through
+a bounded take of the same 16 MiB the HTTP
+transport applies, and a line that reaches the
+bound without its newline is a failed request:
+the read returns an error in the ordinary form,
+so every consumer keeps its standing posture
+unchanged. A list page that overflows fails its
+step and the probe records the failure, as a
+malformed page does today; a contents read that
+overflows records nothing for its uri and is the
+read-failed shape at check against a recorded
+hash, as any failed read is. The cap counts the
+line's bytes as delivered, newline included or
+not; a response of exactly the cap followed by
+its newline reads clean, and the design's
+sentence becomes true on both transports without
+amendment. Nothing about the HTTP side moves,
+and the request side is untouched: the cap is a
+response discipline, and almanac's own requests
+are small by construction.
+
+The fixture's stdio server gains an oversized
+mode answering one list call with a line past the
+cap, with a test asserting the probe fails that
+step rather than reading it whole; a second test
+answers resources/read oversized and asserts the
+generate records no contents for the entry while
+the rest of the walk completes, the two postures
+the design names. The bound is a named constant
+beside the client's timeout, stated in the
+transport record next to the HTTP cap so the two
+transports' limits read as one discipline.
+
+One question is put to Main. The cap's value
+could instead be raised for stdio on the argument
+that a local process the publisher launched is
+more trusted than a remote endpoint; the design
+recommends one cap for both, because the drift
+semantics already assume the transports judge the
+same surface, and a resource readable over stdio
+but capped over HTTP would gate differently by
+transport, the asymmetry this slice exists to
+remove. If Main rules a distinct stdio cap, the
+constant and the record carry the second value
+and the tests pin both.
+
+### As built (2026-11-26)
+
+Built as designed on landed main 34e5fb4f, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the landed
+tree, and the working record differs from the
+landed DECISIONS by exactly the slice's approval
+paragraph inserted at its design head, verified
+by removing it and comparing whole files. The
+HTTP read step returns the declared snapshot
+built from a read's 401 through the same
+protected_snapshot ladder the list steps use, and
+both entry paths surface it as a walk challenge
+at the resources/read step, so the standing
+whole-walk credentialed retry covers the reads;
+the transport record's read step states the
+behavior. The three reviews ran on the file-based
+route and were read firsthand from the written
+report. Verdicts: spec fidelity PASS (0 critical,
+0 major, 0 minor, a clean axis); standards PASS
+(0 critical, 0 major, 2 minor); red team PASS (0
+critical, 0 major, 1 minor), its attacks held,
+including a non-first read's 401 discarding the
+partial contents record whole with the walked
+snapshot, and the new test being unable to pass
+without the retry actually happening. The
+checkpoint fix pass closed the standards first
+minor in the pattern's own terms: the read step
+now reports through a ReadWalk enum mirroring
+ListWalk, its Protected variant carrying the step
+out of the step itself, and both call sites
+forward the step they are handed. The standards
+second minor is recorded here with its premise
+corrected on firsthand evidence: the lane read
+the new test as walking the discover entry, but
+the fixture serves server/discover only in its
+open-2026 mode, so the test's reads-protected
+walks refuse discover and take the initialize
+ladder, which means the test pins the ladder
+conversion and the discover conversion is the
+unpinned one. It stands reviewed firsthand as the
+identical shape behind a stateless conversation,
+and the gap is recorded rather than closed with a
+combined-mode fixture restructure whose premise
+risk outweighs a one-conversion coverage gap. The
+red team's minor stands as a fixture posture: the
+reads-protected gate matches the read by body
+substring because the fixture's auth gate runs
+before its request parse, exact for the probe's
+traffic and confined to the new mode.

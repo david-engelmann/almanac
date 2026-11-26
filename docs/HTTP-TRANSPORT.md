@@ -116,6 +116,8 @@ One probe run against one MCP entry proceeds in this order.
 6. POST resources/read once per announced concrete resource,
    recording a contents hash per uri the read answers for. A
    failed read records nothing for its uri and fails nothing.
+   A 401 on a read challenges the walk at this step, like a
+   401 at any other step.
 7. If the server issued a session id, send the DELETE courtesy.
 8. Assemble the surface snapshot and hand it to the core, which
    owns every comparison and every hash.
