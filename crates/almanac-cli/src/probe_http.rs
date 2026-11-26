@@ -739,23 +739,33 @@ fn walk_lists(
     ListWalk::Done
 }
 
+/// How the read step ended, in the list walk's shape:
+/// done, or protected at the named step, carrying the
+/// declared snapshot built from the challenge.
+enum ReadWalk {
+    Done,
+    Protected(Box<SurfaceSnapshot>, &'static str),
+}
+
 /// Read each announced resource's contents once, after
 /// the list walk, recording its hash in the snapshot.
 /// A failed or unhashable read records nothing for
 /// that uri, the posture the stdio walk takes: one bad
-/// resource never fails the probe, and a challenge
-/// arriving mid-reads converts nothing, because the
-/// lists already completed and the walked evidence
-/// stands. Templates are never expanded into reads.
+/// resource never fails the probe. A 401 on a read is
+/// the one answer not swallowed: the step returns the
+/// declared snapshot built from that challenge, so the
+/// caller's credentialed retry covers the reads like
+/// every other step (the twenty-ninth slice).
+/// Templates are never expanded into reads.
 fn read_resource_contents_http(
     agent: &Agent,
     conversation: &Conversation,
     snapshot: &mut SurfaceSnapshot,
     stateless: bool,
     next_id: &mut i64,
-) {
+) -> ReadWalk {
     if snapshot.failure.is_some() {
-        return;
+        return ReadWalk::Done;
     }
     let mut uris = snapshot.resources.clone();
     uris.dedup();
@@ -770,6 +780,16 @@ fn read_resource_contents_http(
         let Ok(outcome) = rpc(agent, conversation, Some(id), "resources/read", params) else {
             continue;
         };
+        if outcome.status == 401 {
+            return ReadWalk::Protected(
+                Box::new(protected_snapshot(
+                    agent,
+                    conversation.url,
+                    outcome.www_authenticate.as_deref(),
+                )),
+                "resources/read",
+            );
+        }
         let Some(message) = outcome.message else {
             continue;
         };
@@ -782,6 +802,7 @@ fn read_resource_contents_http(
             snapshot.resource_contents.insert(uri, hash);
         }
     }
+    ReadWalk::Done
 }
 
 /// How one entry walk ended. A challenge is not a failure:
@@ -921,7 +942,14 @@ fn entry_walk(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutcome {
             snapshot: *protected,
         };
     }
-    read_resource_contents_http(agent, &conversation, &mut snapshot, true, &mut next_id);
+    if let ReadWalk::Protected(protected, step) =
+        read_resource_contents_http(agent, &conversation, &mut snapshot, true, &mut next_id)
+    {
+        return EntryOutcome::Challenged {
+            step,
+            snapshot: *protected,
+        };
+    }
     EntryOutcome::Snapshot(snapshot)
 }
 
@@ -1025,7 +1053,14 @@ fn initialize_ladder(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutc
             snapshot: *protected,
         };
     }
-    read_resource_contents_http(agent, &stateful, &mut snapshot, false, &mut next_id);
+    if let ReadWalk::Protected(protected, step) =
+        read_resource_contents_http(agent, &stateful, &mut snapshot, false, &mut next_id)
+    {
+        return EntryOutcome::Challenged {
+            step,
+            snapshot: *protected,
+        };
+    }
 
     if let Some(session) = session {
         let mut delete = agent
