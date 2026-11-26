@@ -45,6 +45,12 @@ pub struct SurfaceSnapshot {
     pub tools: Vec<ToolSurface>,
     /// Resource URIs, sorted by the probe.
     pub resources: Vec<String>,
+    /// One surface per resource, sorted by uri by the
+    /// probe: the editorial fields a client renders
+    /// and the mimeType the content is read through.
+    /// The twenty-fifth slice's addition; the uri list
+    /// above stays the membership record.
+    pub resource_surfaces: Vec<ResourceSurface>,
     /// Prompt names, sorted by the probe.
     pub prompts: Vec<String>,
     /// One surface per prompt, sorted by name by the
@@ -120,6 +126,33 @@ pub struct PromptSurface {
     pub name: String,
     pub description: String,
     pub arguments: serde_json::Value,
+}
+
+/// One resource as served: its uri, the editorial
+/// fields a client renders (name, title,
+/// description), and the mimeType the content at
+/// the uri is read through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceSurface {
+    pub uri: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub mime_type: String,
+}
+
+impl ResourceSurface {
+    /// The editorial fields as one canonical record,
+    /// the value the baseline's metadata hash reads.
+    /// One construction, shared by generation and
+    /// check, so the two sides cannot drift apart.
+    pub fn metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+        })
+    }
 }
 
 /// Where a probe stopped and how.
