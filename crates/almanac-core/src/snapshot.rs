@@ -225,13 +225,12 @@ pub fn contents_hash(result: &serde_json::Value) -> Option<String> {
     for item in items {
         if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
             record.push(serde_json::json!({"text": text}));
-        } else if let Some(blob) = item.get("blob").and_then(|v| v.as_str()) {
+        } else {
+            let blob = item.get("blob").and_then(|v| v.as_str())?;
             let bytes = crate::statement::decode_base64(blob)?;
             record.push(serde_json::json!({
                 "blob_sha256": crate::hash::sha256_hex(&bytes)
             }));
-        } else {
-            return None;
         }
     }
     Some(crate::hash::sha256_json(&serde_json::Value::Array(record)))
