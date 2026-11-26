@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use almanac_core::snapshot::{
     AuthSurface, CredentialOutcome, ProbeFailure, PromptSurface, ResourceSurface, SurfaceSnapshot,
-    TemplateSurface, ToolSurface,
+    TemplateSurface, ToolSurface, contents_hash,
 };
 use serde_json::{Value, json};
 
@@ -95,6 +95,7 @@ pub(crate) fn handshake_snapshot(
         resource_surfaces: vec![],
         resource_templates: vec![],
         template_surfaces: vec![],
+        resource_contents: Default::default(),
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -187,6 +188,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         resource_surfaces: vec![],
         resource_templates: vec![],
         template_surfaces: vec![],
+        resource_contents: Default::default(),
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -565,6 +567,7 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
                 snapshot.protocol_version = CURRENT_PROTOCOL_VERSION.into();
             }
             gather_lists(client, &mut snapshot, true);
+            read_resource_contents(client, &mut snapshot, true);
             return snapshot;
         }
         Err(detail) => return failed_snapshot(transport, "server/discover", detail),
@@ -595,6 +598,7 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
         return snapshot;
     }
     gather_lists(client, &mut snapshot, false);
+    read_resource_contents(client, &mut snapshot, false);
     snapshot
 }
 
@@ -628,6 +632,39 @@ fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, statel
         .sort_by(|a, b| a.uri_template.cmp(&b.uri_template));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+/// Read each announced resource's contents once, after
+/// the list walk, recording its hash in the snapshot. A
+/// failed or unhashable read records nothing for that
+/// uri: the baseline then holds no contents hash for
+/// the entry, and at check a recorded hash against no
+/// live hash is the read-failed finding. One bad
+/// resource never fails the probe; the contents are
+/// evidence, not a gate on the walk itself. Templates
+/// are never expanded into reads, the standing posture.
+fn read_resource_contents(
+    client: &mut StdioClient,
+    snapshot: &mut SurfaceSnapshot,
+    stateless: bool,
+) {
+    if snapshot.failure.is_some() {
+        return;
+    }
+    let mut uris = snapshot.resources.clone();
+    uris.dedup();
+    for uri in uris {
+        let params = if stateless {
+            json!({"uri": uri, "_meta": request_meta()})
+        } else {
+            json!({"uri": uri})
+        };
+        if let Ok(result) = client.request("resources/read", params, false) {
+            if let Some(hash) = contents_hash(&result) {
+                snapshot.resource_contents.insert(uri, hash);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

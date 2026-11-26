@@ -81,7 +81,7 @@ fn unwrap_dsse(value: &serde_json::Value) -> Option<serde_json::Value> {
 /// byte is dropped, after which the payload simply
 /// fails to parse and the document reduces to no
 /// claims.
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
     fn value_of(byte: u8) -> Option<u32> {
         match byte {
             b'A'..=b'Z' => Some(u32::from(byte - b'A')),

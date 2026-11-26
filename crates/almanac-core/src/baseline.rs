@@ -211,6 +211,15 @@ pub struct PromptBaseline {
 pub struct ResourceBaseline {
     pub metadata_sha256: String,
     pub mime_sha256: String,
+    /// Hash of the resource's contents as read at
+    /// generation. Absent when generation recorded
+    /// none: baselines from before the twenty-eighth
+    /// slice, and resources whose generation read
+    /// failed, carry none, and the contents channels
+    /// stay ungated for that entry until a generation
+    /// reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents_sha256: Option<String>,
 }
 
 /// One resource template's recorded hashes, the
@@ -473,6 +482,7 @@ impl McpBaseline {
                         ResourceBaseline {
                             metadata_sha256: crate::hash::sha256_json(&resource.metadata()),
                             mime_sha256: crate::hash::sha256_str(&resource.mime_type),
+                            contents_sha256: snapshot.resource_contents.get(&resource.uri).cloned(),
                         },
                     )
                 })
@@ -525,6 +535,7 @@ mod tests {
             resource_surfaces: vec![],
             resource_templates: vec![],
             template_surfaces: vec![],
+            resource_contents: Default::default(),
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -559,6 +570,7 @@ mod tests {
             resource_surfaces: vec![],
             resource_templates: vec![],
             template_surfaces: vec![],
+            resource_contents: Default::default(),
             prompts: vec!["review".into()],
             prompt_surfaces: vec![PromptSurface {
                 name: "review".into(),
@@ -667,6 +679,7 @@ mod tests {
             }],
             resource_templates: vec![],
             template_surfaces: vec![],
+            resource_contents: Default::default(),
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -697,6 +710,58 @@ mod tests {
     }
 
     #[test]
+    fn baseline_records_resource_contents_hashes() {
+        // The contents hash rides the resource contract:
+        // recorded when the snapshot's read map carries
+        // the uri, absent when it does not, so an
+        // unread resource stays ungated per entry.
+        let mut snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities: None,
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec!["docs://guide".into()],
+            resource_surfaces: vec![ResourceSurface {
+                uri: "docs://guide".into(),
+                name: "guide".into(),
+                title: "The Guide".into(),
+                description: "How it works.".into(),
+                mime_type: "text/markdown".into(),
+            }],
+            resource_templates: vec![],
+            template_surfaces: vec![],
+            resource_contents: BTreeMap::from([(
+                "docs://guide".to_string(),
+                "contents-hash".to_string(),
+            )]),
+            prompts: vec![],
+            prompt_surfaces: vec![],
+            auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
+            failure: None,
+        };
+        let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        let contract = baseline
+            .resource_contracts
+            .get("docs://guide")
+            .expect("resource contract recorded");
+        assert_eq!(contract.contents_sha256.as_deref(), Some("contents-hash"));
+        snapshot.resource_contents.clear();
+        let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert_eq!(
+            bare.resource_contracts
+                .get("docs://guide")
+                .expect("resource contract recorded")
+                .contents_sha256,
+            None
+        );
+    }
+
+    #[test]
     fn baseline_records_template_contract_hashes() {
         let mut snapshot = SurfaceSnapshot {
             transport: "stdio".into(),
@@ -717,6 +782,7 @@ mod tests {
                 description: "One page of the docs.".into(),
                 mime_type: "text/markdown".into(),
             }],
+            resource_contents: Default::default(),
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -801,6 +867,7 @@ mod tests {
             resource_surfaces: vec![],
             resource_templates: vec![],
             template_surfaces: vec![],
+            resource_contents: Default::default(),
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,

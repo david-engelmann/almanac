@@ -4586,6 +4586,23 @@ record.
 
 ## Twenty-eighth slice: MCP resource contents (design, 2026-11-25)
 
+APPROVED by Main 2026-11-25, as written, with its
+one question answered with the record's
+recommendation: a contents change is major. The
+mime precedent governs: a served fact changing
+under an unchanged identity is the major class
+everywhere in this tool's severity discipline, and
+critical stays reserved for disappearance and
+handshake classes, which a contents change is not.
+The rest of the design stands as written,
+including resource-read-failed at major, the
+per-entry Option keeping pre-slice and
+generation-unreadable entries ungated individually,
+and the hash over decoded bytes rather than
+transport encoding. Build on the head the
+twenty-seventh slice lands, through the usual
+reviews and staging.
+
 The resource channels now gate a resource's
 existence, its mimeType, and its editorial
 metadata. What a resource actually serves, its
@@ -4732,3 +4749,138 @@ between the unauthenticated and credentialed
 reads, and the churning-experimental cost the
 approval accepted passes through the standing
 suppression mechanism unchanged.
+
+## Twenty-ninth slice: the credentialed retry covers the read step (design, 2026-11-26)
+
+The twenty-eighth slice's red team recorded the
+shape this slice closes. The HTTP credential
+ladder retries the whole walk with the publisher's
+token when the entry or a list step answers 401,
+but the read step, added after the lists by the
+contents slice, swallows its 401s like any other
+failed read. A surface whose lists are open and
+whose reads are protected therefore completes an
+unauthenticated generation walk, records no
+contents, and never presents an available
+credential for the reads: the contents channels
+stay ungated at generation for exactly the
+surfaces whose contents are guarded, the ones a
+publisher most means to gate. The check side of
+the shape is sound by the contents design (a
+recorded resource unreadable at check fires
+resource-read-failed), so what is missing is only
+the generation-side retry, and the walk semantics
+already know how to do it.
+
+The change is confined to the HTTP walk's
+challenge plumbing. The read step stops being a
+fire-and-forget pass: when a read's answer is a
+401, the step builds the declared snapshot from
+that challenge through the same metadata ladder a
+list-step challenge uses, and surfaces it to the
+entry paths as a challenge at the resources/read
+step, in the EntryOutcome::Challenged form the
+ladder already carries. probe_http's standing
+flow then does what it does for every challenge:
+with a credential in hand it retries the whole
+walk once with the token presented, and the
+credentialed walk's reads ride its conversation
+and record their hashes; without one, the
+declared snapshot is the run's answer, labelled
+declared evidence only, exactly as a list-step
+challenge answers today. The first challenged
+read ends the read step, mirroring the list walk,
+where the first challenged step ends the walk: a
+surface that challenges one read is declaring its
+posture, and continuing to read its remaining
+resources unauthenticated would gather a partial
+contents record the retry then discards whole.
+Stdio is untouched: a stdio surface has no 401,
+and its reads already run inside the one process
+conversation the publisher launched.
+
+Nothing else moves. The contents channels, their
+severities, the per-entry gating, and the hash
+are the twenty-eighth slice's, unchanged. A
+credentialed retry that is refused returns the
+declared snapshot with the refusal named, the
+standing posture, and a generation from declared
+evidence records no contents, as it records no
+contracts. The e2e fixture gains the shape: a
+mode whose lists answer openly and whose reads
+answer 401 until the token arrives, with a test
+asserting a token-carrying generation records the
+contents the unauthenticated walk could not.
+
+One question is put to Main. The read step
+challenges on its first 401 in this design,
+mirroring the list walk. The alternative is to
+finish the unauthenticated reads and challenge
+only at the end if any read drew a 401, which
+keeps the open resources' hashes from the first
+walk; the design recommends against it, because
+the retry discards the first walk whole in every
+other challenge case, and a baseline half-built
+from two walks' evidence is a record neither walk
+made. If Main rules the alternative, the read
+step records which uris were challenged and the
+challenge surfaces after the loop instead.
+
+### As built (2026-11-26)
+
+Built as designed on landed main 7b2cc937, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the landed
+tree, and the working record differs from the
+landed DECISIONS by exactly the slice's approval
+paragraph inserted at its design head, verified
+by removing it and comparing whole files. After
+the list walk, both transports issue
+resources/read once per announced concrete
+resource and record a contents hash per uri,
+computed by the one contents_hash construction
+in the core: the items in served order, text as
+served, blob items by the hash of their decoded
+bytes through the statement module's decoder,
+widened only to pub(crate) for the reuse.
+ResourceBaseline gains contents_sha256 as an
+Option in the house idiom, recorded per entry
+from the snapshot's read map; the gate adds
+resource-contents-changed and resource-read-failed
+at major inside the resource contract loop.
+
+The three reviews ran on the file-based route and
+were read firsthand from the written report.
+Verdicts: spec fidelity PASS (0 critical, 0
+major, 1 minor); standards PASS (0 critical, 0
+major, 1 minor); red team PASS (0 critical, 0
+major, 2 minor), its attack surface exercised and
+held, including the partition between the
+contents and membership channels on a removal,
+contents_hash failing closed on every malformed
+shape with no partial record, and the fixture
+changes moving no existing premise. The
+checkpoint fix pass closed the standards minor
+(the transport record's walk steps now name the
+per-resource reads between the lists and the
+DELETE courtesy) and the red team's second minor
+(a duplicated uri was read twice per walk; both
+read steps now dedup the sorted membership list
+before reading, the last-wins posture unchanged).
+The spec minor is discharged by this record
+amendment: the design's response-cap sentence
+holds exactly on HTTP, whose rpc reads truncate
+at the standing cap; the stdio client reads
+newline-delimited responses without a byte cap,
+bounded per request by its timeout, so an
+oversized stdio resource is read whole and hashed
+rather than failing its read. The asymmetry is
+inherited from the list walk, benign in direction
+(both sides of the gate read the same bytes
+through the same path), and stands named here
+rather than silently implied by the design's
+wording. The red team's first minor, a read-step
+401 never triggering the credentialed retry, is
+not a repair to this slice: it is the
+twenty-ninth slice's whole charge, designed
+above.

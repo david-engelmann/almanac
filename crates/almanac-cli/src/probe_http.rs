@@ -23,14 +23,14 @@
 use std::time::Duration;
 
 use almanac_core::snapshot::{
-    AuthSurface, CredentialOutcome, MetadataRecord, ProbeFailure, SurfaceSnapshot,
+    AuthSurface, CredentialOutcome, MetadataRecord, ProbeFailure, SurfaceSnapshot, contents_hash,
 };
 use serde_json::{Value, json};
 use ureq::Agent;
 
 use crate::probe::{
     CURRENT_PROTOCOL_VERSION, LIST_KINDS, MAX_PAGES, OFFERED_PROTOCOL_VERSION, discover_params,
-    failed_snapshot, handshake_snapshot, is_method_not_found, list_params,
+    failed_snapshot, handshake_snapshot, is_method_not_found, list_params, request_meta,
 };
 use crate::sse;
 
@@ -612,6 +612,7 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
         resource_surfaces: vec![],
         resource_templates: vec![],
         template_surfaces: vec![],
+        resource_contents: Default::default(),
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Protected(Box::new(almanac_core::snapshot::ProtectedMetadata {
@@ -736,6 +737,51 @@ fn walk_lists(
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
     ListWalk::Done
+}
+
+/// Read each announced resource's contents once, after
+/// the list walk, recording its hash in the snapshot.
+/// A failed or unhashable read records nothing for
+/// that uri, the posture the stdio walk takes: one bad
+/// resource never fails the probe, and a challenge
+/// arriving mid-reads converts nothing, because the
+/// lists already completed and the walked evidence
+/// stands. Templates are never expanded into reads.
+fn read_resource_contents_http(
+    agent: &Agent,
+    conversation: &Conversation,
+    snapshot: &mut SurfaceSnapshot,
+    stateless: bool,
+    next_id: &mut i64,
+) {
+    if snapshot.failure.is_some() {
+        return;
+    }
+    let mut uris = snapshot.resources.clone();
+    uris.dedup();
+    for uri in uris {
+        let params = if stateless {
+            json!({"uri": uri, "_meta": request_meta()})
+        } else {
+            json!({"uri": uri})
+        };
+        let id = *next_id;
+        *next_id += 1;
+        let Ok(outcome) = rpc(agent, conversation, Some(id), "resources/read", params) else {
+            continue;
+        };
+        let Some(message) = outcome.message else {
+            continue;
+        };
+        if is_method_not_found(&message) || message.get("error").is_some() {
+            continue;
+        }
+        if let Some(result) = message.get("result") {
+            if let Some(hash) = contents_hash(result) {
+                snapshot.resource_contents.insert(uri, hash);
+            }
+        }
+    }
 }
 
 /// How one entry walk ended. A challenge is not a failure:
@@ -875,6 +921,7 @@ fn entry_walk(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutcome {
             snapshot: *protected,
         };
     }
+    read_resource_contents_http(agent, &conversation, &mut snapshot, true, &mut next_id);
     EntryOutcome::Snapshot(snapshot)
 }
 
@@ -978,6 +1025,7 @@ fn initialize_ladder(agent: &Agent, url: &str, token: Option<&str>) -> EntryOutc
             snapshot: *protected,
         };
     }
+    read_resource_contents_http(agent, &stateful, &mut snapshot, false, &mut next_id);
 
     if let Some(session) = session {
         let mut delete = agent
