@@ -5044,6 +5044,19 @@ traffic and confined to the new mode.
 
 ## Thirty-first slice: the discover path's read challenge, pinned (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, as written, with its
+one question answered with the record's
+recommendation: the explicit two-name predicate.
+A fixture mode is a premise other tests reason
+from; a starts_with family test would silently
+extend that premise to any future mode sharing
+the prefix, changing what the suite proves
+without a decision ever being taken. Explicit
+names keep the premise auditable, which is the
+same reason the modes are named at all. Build on
+the head the thirtieth slice lands, through the
+usual reviews and staging.
+
 The twenty-ninth slice's as-built records a
 coverage gap this slice closes. The read-step
 challenge conversion exists at both HTTP entry
@@ -5154,3 +5167,108 @@ oversized fixture stands as its own example
 rather than a mode of the shared fixture body,
 the family's variation-by-binary pattern the
 renamed and discover fixtures already follow.
+
+## Thirty-second slice: MCP tool output contracts (design, 2026-11-26)
+
+The tool contract the baseline records is half
+the contract a tool serves. A tools/list item may
+carry an outputSchema beside its inputSchema, the
+structured result shape a caller is told to rely
+on, and the baseline's per-tool record holds the
+description and the input schema's hash only: a
+server that narrows, widens, or drops its
+declared output shape between releases moves no
+finding today, though a consumer coded against
+the declared shape breaks exactly as it would on
+an input change. The twenty-fourth through
+twenty-eighth slices closed this shape of gap for
+prompts and resources one field family at a time;
+the tool's own second schema is the remaining
+unrecorded contract field on the surface the
+probe already walks.
+
+The design follows the input schema's own
+precedent end to end. ToolBaseline gains an
+output hash beside the input hash, per entry and
+optional in the same way: a tool that serves no
+outputSchema records none, and absence is never
+compared against presence, the no-record-no-
+gating rule the pair slices established, so a
+server adding or dropping the field wholesale
+fires nothing until a recorded value changes.
+The hash covers the outputSchema value as served
+under the same canonicalization the input hash
+uses, including the local reference expansion
+the nineteenth slice built, since an output
+schema is the same kind of document and a
+reference-only edit that changes the expanded
+shape is the same change. A change in the
+recorded hash between baseline and live is a
+finding of its own kind at the input change's
+severity, tool-output-schema-changed at major,
+stated beside it in the drift order; the
+description and input findings are untouched.
+Generation records the field on both transports
+from the same list items the input hash already
+reads, and the fixtures' tools gain an
+outputSchema on one entry so the suite can pin
+recording and the change, with the declared
+snapshot paths recording none as before.
+
+One question is put to Main. An output schema
+that appears where the baseline recorded none,
+or disappears where one was recorded, could be
+judged a change in its own right rather than
+gated silent under no-record-no-gating; the
+design recommends the gate, because the field is
+optional in the protocol and a server toggling
+its presence across versions without changing
+any served shape is the churn class the gate
+exists to absorb, the same reasoning the
+capabilities slice applied to an unrecorded
+surface. If Main rules appearance and
+disappearance fire, the comparison fires the
+same kind on a presence change and this record's
+successor names the exception.
+
+### As built (2026-11-26)
+
+Built as designed on landed main a7c661da, the
+base re-verified before the reviews: the slice's
+delta is exactly two files, this record and the
+test file, every other file is blob-identical to
+the landed tree, and the working record differs
+from the landed DECISIONS by exactly the slice's
+approval paragraph inserted at its design head,
+verified by removing it and comparing whole
+files. The fixture's POST handler computes the
+explicit two-name predicate once at its head and
+the four former equality sites take it; the auth
+gate's reads-protected disjunct extends to the
+combined mode; the mirrored test walks the
+stateless entry in both halves. The three
+reviews ran on the file-based route and were
+read firsthand from the written report. Verdicts:
+spec fidelity PASS (0 critical, 0 major, 0
+minor, a clean axis), standards PASS (0 critical,
+0 major, 0 minor, the charged clippy-shape scan
+finding no shapes), red team PASS (0 critical, 0
+major, 1 minor). The red team's minor is closed
+in the fix pass: the tokenless half asserted only
+its exit and the absence of contents, a pin joint
+with the token half rather than local to its own
+test, and it now also asserts the baseline
+records the protected posture, the declared
+evidence the challenge's ladder produced, so the
+half fails on its own evidence if the gate ever
+serves the reads open or the run answers from
+anywhere but the challenge. Premise preservation
+held under the red team's mode-by-mode argument:
+for every pre-existing mode the predicate's value
+equals the old equality at all four sites and
+the gate's new term is false, so the bytes each
+mode serves are unchanged, and a silent fallback
+to the ladder inside the new test would draw the
+fixture's method-not-found on initialize and fail
+both halves, which is what makes the discover pin
+a pin.
