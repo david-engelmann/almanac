@@ -4905,6 +4905,23 @@ above.
 
 ## Thirtieth slice: the stdio response cap (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, as written, with its
+one question answered with the record's
+recommendation: one cap for both transports. The
+kit's premise is that a surface's gated state
+must not depend on which transport observed it; a
+transport-dependent cap would reintroduce exactly
+the divergence class slices 28 and 29 just
+closed, a resource readable over stdio but capped
+over HTTP gating differently by transport. The
+local-trust argument is a deployment concern, not
+a property of the snapshot's semantics, and it
+does not carry. The bounded take at the same 16
+MiB, an over-cap line failing its request in the
+ordinary form, stands as designed. Build on the
+head the twenty-ninth slice lands, through the
+usual reviews and staging.
+
 The twenty-eighth slice's as-built records a
 divergence this slice closes. The contents design
 states that responses are bounded by the
@@ -5024,3 +5041,116 @@ reads-protected gate matches the read by body
 substring because the fixture's auth gate runs
 before its request parse, exact for the probe's
 traffic and confined to the new mode.
+
+## Thirty-first slice: the discover path's read challenge, pinned (design, 2026-11-26)
+
+The twenty-ninth slice's as-built records a
+coverage gap this slice closes. The read-step
+challenge conversion exists at both HTTP entry
+paths, but the end-to-end test the contents retry
+shipped with drives only the initialize ladder,
+because the HTTP fixture serves server/discover
+only in its open-2026 mode and the test's
+reads-protected mode is not it. The discover
+conversion stands reviewed firsthand as the
+identical shape behind a stateless conversation;
+identical shape is not a pin, and this
+programme's rule is that a posture a test cannot
+fail for is a posture not yet earned.
+
+The change is fixture and test work, with no
+product code touched. The fixture learns to treat
+its current-revision behavior as a family: the
+four sites that test the mode against open-2026
+by equality (the _meta guard, the session guard,
+and the discover and initialize arms) take a
+single predicate computed once at the handler's
+head, true for open-2026 and for a new combined
+mode, open-2026-reads-protected. The
+reads-protected disjunct in the auth gate extends
+to the combined mode on the same terms, a
+tokenless resources/read challenged, everything
+else served. A new end-to-end test then mirrors
+the ladder test under the combined mode: a
+token-carrying generate is challenged at the read
+step on the stateless walk, retries credentialed,
+and records the contents; a tokenless generate
+answers from declared evidence and records none.
+The stateless walk's reads carry the _meta block
+the revision requires, which the fixture's guard
+already demands for resources/read, so the
+combined mode exercises the guard and the
+challenge together. The existing modes' behavior
+is unchanged by construction, the predicate being
+false for each of them, and the suite's standing
+tests are the regression pin for that claim.
+
+One question is put to Main. The predicate could
+instead be a starts_with test on the mode string,
+which would let future combined modes join the
+family by naming alone; the design recommends the
+explicit two-name predicate, because a fixture
+mode is a premise other tests reason from, and a
+name that silently widens a family can move a
+premise no diff in the test itself shows. If Main
+rules the prefix form, the handler computes it
+that way and this record's successor names the
+convention.
+
+### As built (2026-11-26)
+
+Built as designed on landed main e2e6e812, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the landed
+tree, and the working record differs from the
+landed DECISIONS by exactly the slice's approval
+paragraph inserted at its design head, verified
+by removing it and comparing whole files. The
+stdio reader thread assembles each response line
+in chunks against the one RESPONSE_CAP_BYTES
+constant both transports now share, and a line
+past the cap reaches the request loop as an
+overflow mark that fails the request in the
+ordinary form. The three reviews ran on the
+file-based route and were read firsthand from
+the written report. Verdicts: spec fidelity FAIL
+at the checkpoint (0 critical, 1 major, 2 minor),
+standards PASS (0 critical, 0 major, 2 minor),
+red team PASS (0 critical, 0 major, 4 minor).
+The spec major was the build's own boundary
+arithmetic: the trip test counted the terminating
+newline as payload, so a payload of exactly the
+cap followed by its newline overflowed, against
+the design's sentence that it reads clean and
+against the HTTP side, whose take reads an
+exactly-cap body cleanly. The fix pass counts
+payload bytes only, the terminator being framing,
+and an exactly-cap payload now reads clean
+terminated or at end of stream alike. The
+standards second minor closed with it: the cap
+is one named constant in the stdio module,
+exported to the HTTP module, whose two response
+reads now take it instead of repeating the
+literal. The red team's fourth minor closed in
+the test: the read test first generates against
+the same fixture uninflated and asserts contents
+are recorded, so the inflated phase's absence is
+the cap's doing and not a read never issued; the
+two phases also stand as two tests now, the
+record's letter. The remaining minors stand
+recorded: the overflow mark is delivered when its
+line completes rather than at the bound's
+crossing, so a line that never terminates draws
+the request's timeout error instead of the cap
+error, the honest diagnosis for a stream that
+never answers; the mark is unattributed, as every
+late line in this client is judged by arrival
+rather than by id until it parses, an inherited
+shape; the channel between the reader thread and
+the client remains unbounded in line count, as it
+was before this slice, the cap bounding bytes per
+line rather than lines in flight; and the
+oversized fixture stands as its own example
+rather than a mode of the shared fixture body,
+the family's variation-by-binary pattern the
+renamed and discover fixtures already follow.
