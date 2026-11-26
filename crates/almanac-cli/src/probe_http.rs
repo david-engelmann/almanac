@@ -608,6 +608,7 @@ fn protected_snapshot(agent: &Agent, url: &str, www_authenticate: Option<&str>) 
         capabilities_enumerated: false,
         tools: vec![],
         resources: vec![],
+        resource_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Protected(Box::new(almanac_core::snapshot::ProtectedMetadata {
@@ -724,6 +725,7 @@ fn walk_lists(
         }
     }
     snapshot.resources.sort();
+    snapshot.resource_surfaces.sort_by(|a, b| a.uri.cmp(&b.uri));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
     ListWalk::Done

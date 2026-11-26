@@ -1650,6 +1650,31 @@ fn check_live_primitive_sets(
             }
         }
     }
+    let live_resources: BTreeMap<&str, &crate::snapshot::ResourceSurface> = snapshot
+        .resource_surfaces
+        .iter()
+        .map(|resource| (resource.uri.as_str(), resource))
+        .collect();
+    for (uri, recorded) in &mcp.resource_contracts {
+        if let Some(resource) = live_resources.get(uri.as_str()) {
+            if crate::hash::sha256_str(&resource.mime_type) != recorded.mime_sha256 {
+                findings.push(finding(
+                    Severity::Major,
+                    "resource-mime-changed",
+                    Some(&mcp.entry_id),
+                    format!("resource {uri} mime type changed since generation"),
+                ));
+            }
+            if crate::hash::sha256_json(&resource.metadata()) != recorded.metadata_sha256 {
+                findings.push(finding(
+                    Severity::Minor,
+                    "resource-metadata-changed",
+                    Some(&mcp.entry_id),
+                    format!("resource {uri} metadata changed since generation"),
+                ));
+            }
+        }
+    }
 }
 
 /// The authentication comparisons, measured against the metadata
@@ -1868,6 +1893,7 @@ mod tests {
             capabilities_enumerated: true,
             tools,
             resources: vec![],
+            resource_surfaces: vec![],
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -2579,6 +2605,97 @@ mod tests {
                 {"name": "depth", "required": false}
             ]),
         });
+        let dup_base = baseline_for(&dup);
+        assert!(check(&inputs(&cat, &dup_base, Some(&dup))).is_empty());
+    }
+
+    #[test]
+    fn resource_metadata_changes_report_on_their_severities() {
+        // A resource's mimeType is read through by every
+        // client holding the uri, so a change there is
+        // the one major; an edit to the editorial fields
+        // is the one minor; agreement is silent, and a
+        // baseline recorded before the slice leaves both
+        // channels ungated.
+        let surface = |name: &str, description: &str, mime_type: &str| {
+            let mut snap = snapshot(vec![ping()]);
+            snap.resources = vec!["docs://guide".into()];
+            snap.resource_surfaces = vec![crate::snapshot::ResourceSurface {
+                uri: "docs://guide".into(),
+                name: name.into(),
+                title: "The Guide".into(),
+                description: description.into(),
+                mime_type: mime_type.into(),
+            }];
+            snap
+        };
+        let base = baseline_for(&surface("guide", "How it works.", "text/markdown"));
+        let cat = catalog();
+        assert!(
+            check(&inputs(
+                &cat,
+                &base,
+                Some(&surface("guide", "How it works.", "text/markdown"))
+            ))
+            .is_empty()
+        );
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface(
+                "guide",
+                "How it works.",
+                "application/octet-stream",
+            )),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-mime-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface("guide", "How it works now.", "text/markdown")),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-metadata-changed");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        let findings = check(&inputs(
+            &cat,
+            &base,
+            Some(&surface("handbook", "How it works.", "text/markdown")),
+        ));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "resource-metadata-changed");
+        assert_eq!(findings[0].severity, Severity::Minor);
+        let mut old_base = base.clone();
+        old_base
+            .mcp
+            .as_mut()
+            .expect("mcp baseline")
+            .resource_contracts
+            .clear();
+        assert!(
+            check(&inputs(
+                &cat,
+                &old_base,
+                Some(&surface("other", "Other.", "text/plain"))
+            ))
+            .is_empty()
+        );
+        // A surface serving one uri twice records the
+        // last item's contract on both sides of the
+        // gate, so the unchanged duplicated surface
+        // stays silent.
+        let mut dup = surface("guide", "How it works.", "text/markdown");
+        dup.resources = vec!["docs://guide".into(), "docs://guide".into()];
+        dup.resource_surfaces
+            .push(crate::snapshot::ResourceSurface {
+                uri: "docs://guide".into(),
+                name: "guide".into(),
+                title: "The Guide".into(),
+                description: "How it works.".into(),
+                mime_type: "text/plain".into(),
+            });
         let dup_base = baseline_for(&dup);
         assert!(check(&inputs(&cat, &dup_base, Some(&dup))).is_empty());
     }

@@ -16,7 +16,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use almanac_core::snapshot::{
-    AuthSurface, CredentialOutcome, ProbeFailure, PromptSurface, SurfaceSnapshot, ToolSurface,
+    AuthSurface, CredentialOutcome, ProbeFailure, PromptSurface, ResourceSurface, SurfaceSnapshot,
+    ToolSurface,
 };
 use serde_json::{Value, json};
 
@@ -88,6 +89,7 @@ pub(crate) fn handshake_snapshot(
         capabilities_enumerated: true,
         tools: vec![],
         resources: vec![],
+        resource_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -140,7 +142,10 @@ impl ListKind {
     pub(crate) fn apply(&self, snapshot: &mut SurfaceSnapshot, page: &Value) {
         match self {
             ListKind::Tools => snapshot.tools.extend(tool_surfaces(page)),
-            ListKind::Resources => snapshot.resources.extend(resource_uris(page)),
+            ListKind::Resources => {
+                snapshot.resources.extend(resource_uris(page));
+                snapshot.resource_surfaces.extend(resource_surfaces(page));
+            }
             ListKind::Prompts => {
                 snapshot.prompts.extend(prompt_names(page));
                 snapshot.prompt_surfaces.extend(prompt_surfaces(page));
@@ -163,6 +168,7 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         capabilities_enumerated: false,
         tools: vec![],
         resources: vec![],
+        resource_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -217,6 +223,39 @@ pub fn resource_uris(result: &Value) -> Vec<String> {
         .unwrap_or_default();
     uris.sort();
     uris
+}
+
+/// Reduce a resources/list result page to resource
+/// surfaces: each resource's uri, editorial fields,
+/// and mimeType as served, in page order. A resource
+/// without a uri records nothing here either, as
+/// with the uri list.
+pub fn resource_surfaces(result: &Value) -> Vec<ResourceSurface> {
+    result
+        .get("resources")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let uri = item.get("uri")?.as_str()?;
+                    let text = |key: &str| {
+                        item.get(key)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    Some(ResourceSurface {
+                        uri: uri.to_string(),
+                        name: text("name"),
+                        title: text("title"),
+                        description: text("description"),
+                        mime_type: text("mimeType"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Reduce a prompts/list result page to sorted names.
@@ -510,6 +549,7 @@ fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, statel
         }
     }
     snapshot.resources.sort();
+    snapshot.resource_surfaces.sort_by(|a, b| a.uri.cmp(&b.uri));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
 }

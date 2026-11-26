@@ -126,6 +126,14 @@ pub struct McpBaseline {
     /// until regeneration.
     #[serde(default)]
     pub prompt_contracts: BTreeMap<String, PromptBaseline>,
+    /// Resource uri to its recorded hashes, the metadata
+    /// channels beside the uri list's membership.
+    /// Baselines written before the twenty-fifth slice
+    /// carry none, the serde default's empty map, and
+    /// their resources are judged on membership alone
+    /// until regeneration.
+    #[serde(default)]
+    pub resource_contracts: BTreeMap<String, ResourceBaseline>,
     /// True when the recorded tool, resource and prompt
     /// lists are the surface's own enumeration. A baseline
     /// recorded from a SEP-2127 Final shape server card
@@ -165,6 +173,19 @@ pub struct ToolBaseline {
 pub struct PromptBaseline {
     pub description_sha256: String,
     pub arguments_sha256: String,
+}
+
+/// One resource's recorded hashes: the editorial
+/// fields as one canonical record, and the mimeType
+/// the content is read through. The metadata field
+/// departs from the tool and prompt shape by design
+/// (twenty-fifth slice): a client renders name,
+/// title, and description together, and an edit to
+/// any of them is the same minor fact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceBaseline {
+    pub metadata_sha256: String,
+    pub mime_sha256: String,
 }
 
 /// The auth posture at generation time, in baseline form. It
@@ -410,6 +431,19 @@ impl McpBaseline {
                     )
                 })
                 .collect(),
+            resource_contracts: snapshot
+                .resource_surfaces
+                .iter()
+                .map(|resource| {
+                    (
+                        resource.uri.clone(),
+                        ResourceBaseline {
+                            metadata_sha256: crate::hash::sha256_json(&resource.metadata()),
+                            mime_sha256: crate::hash::sha256_str(&resource.mime_type),
+                        },
+                    )
+                })
+                .collect(),
             capabilities_enumerated: snapshot.capabilities_enumerated,
             card_display: None,
             auth: AuthBaseline::from(&snapshot.auth),
@@ -420,7 +454,7 @@ impl McpBaseline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{CredentialOutcome, PromptSurface, ToolSurface};
+    use crate::snapshot::{CredentialOutcome, PromptSurface, ResourceSurface, ToolSurface};
 
     #[test]
     fn baseline_records_tool_hashes() {
@@ -437,6 +471,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
             }],
             resources: vec![],
+            resource_surfaces: vec![],
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -467,6 +502,7 @@ mod tests {
             capabilities_enumerated: true,
             tools: vec![],
             resources: vec![],
+            resource_surfaces: vec![],
             prompts: vec!["review".into()],
             prompt_surfaces: vec![PromptSurface {
                 name: "review".into(),
@@ -552,6 +588,82 @@ mod tests {
             baseline.a2a[0].extensions,
             vec!["https://example.com/ext/pay".to_string()]
         );
+    }
+
+    #[test]
+    fn baseline_records_resource_contract_hashes() {
+        let mut snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec!["docs://guide".into()],
+            resource_surfaces: vec![ResourceSurface {
+                uri: "docs://guide".into(),
+                name: "guide".into(),
+                title: "The Guide".into(),
+                description: "How it works.".into(),
+                mime_type: "text/markdown".into(),
+            }],
+            prompts: vec![],
+            prompt_surfaces: vec![],
+            auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
+            failure: None,
+        };
+        let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        let contract = baseline
+            .resource_contracts
+            .get("docs://guide")
+            .expect("resource contract recorded");
+        assert_eq!(
+            contract.metadata_sha256,
+            crate::hash::sha256_json(&serde_json::json!({
+                "name": "guide",
+                "title": "The Guide",
+                "description": "How it works."
+            }))
+        );
+        assert_eq!(
+            contract.mime_sha256,
+            crate::hash::sha256_str("text/markdown")
+        );
+        assert_eq!(baseline.resources, vec!["docs://guide".to_string()]);
+        snapshot.resource_surfaces.clear();
+        let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert!(bare.resource_contracts.is_empty());
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_resource_contracts_slice_still_parses() {
+        // The twenty-fifth slice added resource_contracts
+        // to the MCP record with a serde default. A
+        // committed baseline from before the slice has
+        // no such key, and it must still load with the
+        // map empty and the uri list intact.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": {
+                "entry_id": "urn:air:example.com:mcp:demo",
+                "server_name": "demo",
+                "server_version": "0.1.0",
+                "protocol_version": "2025-06-18",
+                "tools": {},
+                "resources": ["docs://guide"],
+                "prompts": [],
+                "auth": "Open"
+            },
+            "skills": [],
+            "artifacts": [],
+            "provenance": []
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        let mcp = baseline.mcp.expect("mcp record");
+        assert_eq!(mcp.resources, vec!["docs://guide".to_string()]);
+        assert!(mcp.resource_contracts.is_empty());
     }
 
     #[test]

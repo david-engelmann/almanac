@@ -4115,3 +4115,171 @@ resources have always compared. None of these
 can hide a real contract change; the first two
 can over-report presentation movement as contract
 movement, the same trade the tool channels make.
+
+## Twenty-fifth slice: MCP resource metadata (design, 2026-11-25)
+
+Approved by Main 2026-11-25 as written, with the
+design's one question answered with the record's
+recommendation: the metadata hash covers the
+three editorial fields as one canonical record in
+metadata_sha256. A rename in a client picker is
+the same minor fact as a description edit, and
+hashing the description alone would leave it
+ungated, the exact gap class the twenty-fourth
+and twenty-fifth slices exist to close; the one
+departure from the tool and prompt field shape is
+named in the record and stands. Build on the main
+standing once the twenty-fourth slice lands
+(04395a3b).
+
+The twenty-fourth slice's design named this one:
+resources are the last MCP primitive set the
+surface model records as bare identifiers. The
+probe's resource walk keeps each resource's uri
+and nothing else, so the baseline holds a list of
+uris and the gate compares membership only. But a
+resources/list item carries more than its uri: a
+name and optional title and description a client
+renders in its picker, and a mimeType that tells
+the client what the content at that uri is. A
+publisher who changes a resource's mimeType from
+text/markdown to application/octet-stream has
+changed what every client holding that uri can do
+with it, and today the gate says nothing; a name
+or description edit is likewise invisible, though
+it is editorial, not contractual.
+
+The design mirrors the twenty-fourth slice's
+shape, with the severities set by what the fields
+do rather than by symmetry. The probe records
+each resource as a surface in the snapshot: uri,
+name, title, description, and mimeType as served,
+sorted by uri on both transports beside the uri
+list, which stays the membership record exactly
+as the prompt name list did. The baseline records
+a ResourceBaseline per uri in a parallel
+resource_contracts map, defaulted empty on the
+additive precedent: a mime hash over the mimeType
+string (absent records as empty, the standing
+normalization for an absent member), and a
+metadata hash over the editorial fields. The
+comparison keeps membership on the standing
+major, resource-set-changed, and adds two
+channels: a mimeType change is a major,
+resource-mime-changed, naming the uri, because a
+client reads content through the type the server
+declares and a different type is a different
+contract at the same address; an editorial change
+is a minor, resource-metadata-changed. Duplicate
+uris take the discipline the twenty-fourth
+slice's fix pass established: both sides collect
+into name-keyed maps with the same last-wins
+reading, so an unchanged duplicated surface
+cannot fire against itself.
+
+One question rides with this design: what the
+metadata hash covers. The record recommends
+hashing the three editorial fields as one small
+canonical record (name, title, description, each
+absent as empty), because a client renders all
+three and an edit to any of them is the same
+minor fact; the field is then named
+metadata_sha256 rather than description_sha256,
+the one place this slice's record shape departs
+from the tool and prompt shape. The narrower
+alternative hashes the description alone and
+leaves name and title unrecorded, which keeps the
+field-for-field mirror and accepts that a
+resource renamed in every client picker draws no
+finding. Main's call.
+
+Scope edges, stated. Resource templates
+(resources/templates/list) are a separate surface
+the probe does not walk at all today; their
+membership is unrecorded, a larger gap than this
+slice's, and they stay out, named here as a later
+candidate rather than folded in. A pre-slice
+baseline parses untouched, gates membership as it
+always has, and leaves the metadata channels
+ungated until the publisher regenerates, the
+accepted one-time consequence of the additive
+shape, third time running. Card-derived and
+protected snapshots carry no resource surfaces:
+a Final server card enumerates no primitives, so
+contract evidence for resources is live-only,
+the same declared-evidence posture the tool and
+prompt channels hold.
+
+### As built (2026-11-25)
+
+Built as designed on the main the twenty-fourth
+slice landed (04395a3b), with the base re-verified
+before the reviews: the working record extends
+the landed DECISIONS exactly, and every file
+outside the slice is blob-identical to the landed
+tree. The probe records each resource as a
+ResourceSurface in the snapshot (uri, name, title,
+description, and mimeType as served), sorted by
+uri on both transports through the one
+ListKind::apply beside the uri list; the baseline
+records a ResourceBaseline per uri (metadata hash
+and mime hash) in a parallel resource_contracts
+map, serde-defaulted empty; the comparison keeps
+membership on the standing resource-set-changed
+major and adds resource-mime-changed at major and
+resource-metadata-changed at minor, each naming
+the uri. The metadata hash reads one canonical
+record built by ResourceSurface::metadata(),
+shared by generation and check so the two sides
+cannot diverge on a constructed value; the
+baseline test pins the record's field set with an
+inline record of its own, so a change to the
+shared construction fails a test rather than
+passing against itself.
+
+The three reviews ran on the file-based route and
+were read firsthand from the written report.
+Verdicts: spec fidelity PASS with no finding at
+any grade (0 critical, 0 major, 0 minor);
+standards PASS (0 critical, 0 major, 2 minor);
+red team PASS (0 critical, 0 major, 2 minor), its
+attack surface exercised and held, including the
+gating parity with the tool and prompt channels,
+the unreachable scary shape (a live walk's uri
+list and surface list are built from the same
+items under the same test, so a name cannot exist
+without its surface), and the absent-mime
+normalization, which equates only absence with an
+explicitly served empty string and fires on a
+real removal. The checkpoint fix pass closed both
+standards minors: the drift test's rename phase
+now asserts the metadata channel's severity
+beside its kind, matching its sibling phases, and
+the resource contract loop now sits after both
+membership comparisons beside the prompt contract
+loop, the placement the twenty-fourth slice set
+as precedent, instead of directly after its own
+set comparison (findings are sorted before
+reporting, so the move changes no output).
+
+Recorded from the red team's minors, standing as
+postures rather than repairs: a mimeType change
+of letter case alone fires the major, because the
+hash reads the string as served, which the
+design's own wording orders (media types are
+case-insensitive, so this can over-report a
+presentation change as a contract change, the
+same trade the tool schema channel makes); and
+duplicate uris resolve last-wins in served order
+on both sides, so a server that reverses its
+duplicates between generation and check presents
+a different last item than the baseline recorded,
+the standing caveat the twenty-fourth slice's
+fix pass accepted for prompts. Neither posture
+can hide a real change. Also recorded from the
+red team's observation: resource items can carry
+size and annotations members, which the design
+does not enumerate and the record does not hold;
+annotation churn, a lastModified timestamp above
+all, is not something a drift gate should fire
+on in any case.
