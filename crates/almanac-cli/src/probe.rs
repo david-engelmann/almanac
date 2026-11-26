@@ -659,10 +659,10 @@ fn read_resource_contents(
         } else {
             json!({"uri": uri})
         };
-        if let Ok(result) = client.request("resources/read", params, false) {
-            if let Some(hash) = contents_hash(&result) {
-                snapshot.resource_contents.insert(uri, hash);
-            }
+        if let Ok(result) = client.request("resources/read", params, false)
+            && let Some(hash) = contents_hash(&result)
+        {
+            snapshot.resource_contents.insert(uri, hash);
         }
     }
 }

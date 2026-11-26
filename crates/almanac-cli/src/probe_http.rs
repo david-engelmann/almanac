@@ -776,10 +776,10 @@ fn read_resource_contents_http(
         if is_method_not_found(&message) || message.get("error").is_some() {
             continue;
         }
-        if let Some(result) = message.get("result") {
-            if let Some(hash) = contents_hash(result) {
-                snapshot.resource_contents.insert(uri, hash);
-            }
+        if let Some(result) = message.get("result")
+            && let Some(hash) = contents_hash(result)
+        {
+            snapshot.resource_contents.insert(uri, hash);
         }
     }
 }
