@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use almanac_core::snapshot::{
     AuthSurface, CredentialOutcome, ProbeFailure, PromptSurface, ResourceSurface, SurfaceSnapshot,
-    ToolSurface,
+    TemplateSurface, ToolSurface,
 };
 use serde_json::{Value, json};
 
@@ -90,6 +90,8 @@ pub(crate) fn handshake_snapshot(
         tools: vec![],
         resources: vec![],
         resource_surfaces: vec![],
+        resource_templates: vec![],
+        template_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -120,14 +122,15 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// cursor would otherwise hold the gate open forever.
 pub(crate) const MAX_PAGES: usize = 100;
 
-/// The three list calls every MCP surface answers, and how a
+/// The four list calls every MCP surface answers, and how a
 /// page of each lands in the snapshot. Both transports walk the
-/// same three lists, so the walk is written once, here.
+/// same four lists, so the walk is written once, here.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ListKind {
     Tools,
     Resources,
     Prompts,
+    Templates,
 }
 
 impl ListKind {
@@ -136,6 +139,7 @@ impl ListKind {
             ListKind::Tools => "tools/list",
             ListKind::Resources => "resources/list",
             ListKind::Prompts => "prompts/list",
+            ListKind::Templates => "resources/templates/list",
         }
     }
 
@@ -150,12 +154,20 @@ impl ListKind {
                 snapshot.prompts.extend(prompt_names(page));
                 snapshot.prompt_surfaces.extend(prompt_surfaces(page));
             }
+            ListKind::Templates => {
+                snapshot.resource_templates.extend(template_uris(page));
+                snapshot.template_surfaces.extend(template_surfaces(page));
+            }
         }
     }
 }
 
-pub(crate) const LIST_KINDS: [ListKind; 3] =
-    [ListKind::Tools, ListKind::Resources, ListKind::Prompts];
+pub(crate) const LIST_KINDS: [ListKind; 4] = [
+    ListKind::Tools,
+    ListKind::Resources,
+    ListKind::Prompts,
+    ListKind::Templates,
+];
 
 /// A snapshot for a probe that stopped at a step.
 pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSnapshot {
@@ -169,6 +181,8 @@ pub fn failed_snapshot(transport: &str, step: &str, detail: String) -> SurfaceSn
         tools: vec![],
         resources: vec![],
         resource_surfaces: vec![],
+        resource_templates: vec![],
+        template_surfaces: vec![],
         prompts: vec![],
         prompt_surfaces: vec![],
         auth: AuthSurface::Open,
@@ -247,6 +261,60 @@ pub fn resource_surfaces(result: &Value) -> Vec<ResourceSurface> {
                     };
                     Some(ResourceSurface {
                         uri: uri.to_string(),
+                        name: text("name"),
+                        title: text("title"),
+                        description: text("description"),
+                        mime_type: text("mimeType"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reduce a resources/templates/list result page to
+/// sorted uriTemplates.
+pub fn template_uris(result: &Value) -> Vec<String> {
+    let mut uris: Vec<String> = result
+        .get("resourceTemplates")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("uriTemplate")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    uris.sort();
+    uris
+}
+
+/// Reduce a resources/templates/list result page to
+/// template surfaces: each template's uriTemplate,
+/// editorial fields, and mimeType as served, in page
+/// order. A template without a uriTemplate records
+/// nothing here either, as with the template list.
+pub fn template_surfaces(result: &Value) -> Vec<TemplateSurface> {
+    result
+        .get("resourceTemplates")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let uri_template = item.get("uriTemplate")?.as_str()?;
+                    let text = |key: &str| {
+                        item.get(key)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    Some(TemplateSurface {
+                        uri_template: uri_template.to_string(),
                         name: text("name"),
                         title: text("title"),
                         description: text("description"),
@@ -526,7 +594,7 @@ fn walk(client: &mut StdioClient, transport: &str) -> SurfaceSnapshot {
     snapshot
 }
 
-/// Gather the three lists into the snapshot, recording the
+/// Gather the four lists into the snapshot, recording the
 /// step that failed when one does. Both entry ladders end
 /// here. Under the current revision the list requests carry
 /// the _meta block like every other request; behind the
@@ -550,6 +618,10 @@ fn gather_lists(client: &mut StdioClient, snapshot: &mut SurfaceSnapshot, statel
     }
     snapshot.resources.sort();
     snapshot.resource_surfaces.sort_by(|a, b| a.uri.cmp(&b.uri));
+    snapshot.resource_templates.sort();
+    snapshot
+        .template_surfaces
+        .sort_by(|a, b| a.uri_template.cmp(&b.uri_template));
     snapshot.prompts.sort();
     snapshot.prompt_surfaces.sort_by(|a, b| a.name.cmp(&b.name));
 }

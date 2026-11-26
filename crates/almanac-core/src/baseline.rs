@@ -134,9 +134,24 @@ pub struct McpBaseline {
     /// until regeneration.
     #[serde(default)]
     pub resource_contracts: BTreeMap<String, ResourceBaseline>,
-    /// True when the recorded tool, resource and prompt
-    /// lists are the surface's own enumeration. A baseline
-    /// recorded from a SEP-2127 Final shape server card
+    /// Resource template uriTemplates, the membership
+    /// record for the template channels. Baselines
+    /// written before the twenty-sixth slice carry
+    /// none, the serde default's empty list.
+    #[serde(default)]
+    pub resource_templates: Vec<String>,
+    /// Template uriTemplate to its recorded hashes.
+    /// Baselines written before the twenty-sixth slice
+    /// carry none. A baseline carrying neither this
+    /// nor the template list leaves every template
+    /// channel, membership included, ungated until
+    /// regeneration, the approved no-record posture.
+    #[serde(default)]
+    pub template_contracts: BTreeMap<String, TemplateBaseline>,
+    /// True when the recorded tool, resource, prompt and
+    /// template lists are the surface's own enumeration.
+    /// A baseline recorded from a SEP-2127 Final shape
+    /// server card
     /// enumerates nothing, because the card lists no
     /// primitives, and comparisons that would read the
     /// empty record as a removal must not run against it.
@@ -184,6 +199,14 @@ pub struct PromptBaseline {
 /// any of them is the same minor fact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceBaseline {
+    pub metadata_sha256: String,
+    pub mime_sha256: String,
+}
+
+/// One resource template's recorded hashes, the
+/// ResourceBaseline shape keyed by uriTemplate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplateBaseline {
     pub metadata_sha256: String,
     pub mime_sha256: String,
 }
@@ -444,6 +467,20 @@ impl McpBaseline {
                     )
                 })
                 .collect(),
+            resource_templates: snapshot.resource_templates.clone(),
+            template_contracts: snapshot
+                .template_surfaces
+                .iter()
+                .map(|template| {
+                    (
+                        template.uri_template.clone(),
+                        TemplateBaseline {
+                            metadata_sha256: crate::hash::sha256_json(&template.metadata()),
+                            mime_sha256: crate::hash::sha256_str(&template.mime_type),
+                        },
+                    )
+                })
+                .collect(),
             capabilities_enumerated: snapshot.capabilities_enumerated,
             card_display: None,
             auth: AuthBaseline::from(&snapshot.auth),
@@ -454,7 +491,9 @@ impl McpBaseline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{CredentialOutcome, PromptSurface, ResourceSurface, ToolSurface};
+    use crate::snapshot::{
+        CredentialOutcome, PromptSurface, ResourceSurface, TemplateSurface, ToolSurface,
+    };
 
     #[test]
     fn baseline_records_tool_hashes() {
@@ -472,6 +511,8 @@ mod tests {
             }],
             resources: vec![],
             resource_surfaces: vec![],
+            resource_templates: vec![],
+            template_surfaces: vec![],
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -503,6 +544,8 @@ mod tests {
             tools: vec![],
             resources: vec![],
             resource_surfaces: vec![],
+            resource_templates: vec![],
+            template_surfaces: vec![],
             prompts: vec!["review".into()],
             prompt_surfaces: vec![PromptSurface {
                 name: "review".into(),
@@ -608,6 +651,8 @@ mod tests {
                 description: "How it works.".into(),
                 mime_type: "text/markdown".into(),
             }],
+            resource_templates: vec![],
+            template_surfaces: vec![],
             prompts: vec![],
             prompt_surfaces: vec![],
             auth: AuthSurface::Open,
@@ -635,6 +680,89 @@ mod tests {
         snapshot.resource_surfaces.clear();
         let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
         assert!(bare.resource_contracts.is_empty());
+    }
+
+    #[test]
+    fn baseline_records_template_contract_hashes() {
+        let mut snapshot = SurfaceSnapshot {
+            transport: "stdio".into(),
+            server_name: "demo".into(),
+            server_version: "0.1.0".into(),
+            protocol_version: "2025-06-18".into(),
+            stateless_shape: false,
+            capabilities_enumerated: true,
+            tools: vec![],
+            resources: vec![],
+            resource_surfaces: vec![],
+            resource_templates: vec!["docs://{page}".into()],
+            template_surfaces: vec![TemplateSurface {
+                uri_template: "docs://{page}".into(),
+                name: "page".into(),
+                title: "A Page".into(),
+                description: "One page of the docs.".into(),
+                mime_type: "text/markdown".into(),
+            }],
+            prompts: vec![],
+            prompt_surfaces: vec![],
+            auth: AuthSurface::Open,
+            credential: CredentialOutcome::NotPresented,
+            failure: None,
+        };
+        let baseline = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        let contract = baseline
+            .template_contracts
+            .get("docs://{page}")
+            .expect("template contract recorded");
+        assert_eq!(
+            contract.metadata_sha256,
+            crate::hash::sha256_json(&serde_json::json!({
+                "name": "page",
+                "title": "A Page",
+                "description": "One page of the docs."
+            }))
+        );
+        assert_eq!(
+            contract.mime_sha256,
+            crate::hash::sha256_str("text/markdown")
+        );
+        assert_eq!(
+            baseline.resource_templates,
+            vec!["docs://{page}".to_string()]
+        );
+        snapshot.template_surfaces.clear();
+        snapshot.resource_templates.clear();
+        let bare = McpBaseline::from_snapshot("urn:air:example.com:mcp:demo", &snapshot);
+        assert!(bare.template_contracts.is_empty());
+        assert!(bare.resource_templates.is_empty());
+    }
+
+    #[test]
+    fn a_baseline_written_before_the_templates_slice_still_parses() {
+        // The twenty-sixth slice added resource_templates
+        // and template_contracts to the MCP record, both
+        // with serde defaults. A committed baseline from
+        // before the slice has neither key, and it must
+        // still load with both empty.
+        let text = r#"{
+            "spec_version": "ard/0.91",
+            "mcp": {
+                "entry_id": "urn:air:example.com:mcp:demo",
+                "server_name": "demo",
+                "server_version": "0.1.0",
+                "protocol_version": "2025-06-18",
+                "tools": {},
+                "resources": [],
+                "prompts": [],
+                "auth": "Open"
+            },
+            "skills": [],
+            "artifacts": [],
+            "provenance": []
+        }"#;
+        let baseline: Baseline = serde_json::from_str(text).expect("old baseline parses");
+        let mcp = baseline.mcp.expect("mcp record");
+        assert!(mcp.resource_templates.is_empty());
+        assert!(mcp.template_contracts.is_empty());
     }
 
     #[test]

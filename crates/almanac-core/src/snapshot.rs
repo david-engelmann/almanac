@@ -31,9 +31,10 @@ pub struct SurfaceSnapshot {
     /// a later addition, named in docs/HTTP-TRANSPORT.md so its
     /// absence is a decision and not a surprise.
     pub stateless_shape: bool,
-    /// True when this snapshot's tool, resource and prompt
-    /// lists are the surface's own enumeration. A completed
-    /// live walk enumerates; a probe that stopped early, or
+    /// True when this snapshot's tool, resource, prompt
+    /// and template lists are the surface's own
+    /// enumeration. A completed live walk enumerates; a
+    /// probe that stopped early, or
     /// one answered with an authorization challenge, does
     /// not. A snapshot built from a server card enumerates
     /// only when the card carries a tools field, because a
@@ -51,6 +52,15 @@ pub struct SurfaceSnapshot {
     /// The twenty-fifth slice's addition; the uri list
     /// above stays the membership record.
     pub resource_surfaces: Vec<ResourceSurface>,
+    /// Resource template uriTemplates, sorted by the
+    /// probe. The twenty-sixth slice's addition.
+    pub resource_templates: Vec<String>,
+    /// One surface per resource template, sorted by
+    /// uriTemplate by the probe: the editorial fields
+    /// and the mimeType reads through the template
+    /// produce. The template list above stays the
+    /// membership record.
+    pub template_surfaces: Vec<TemplateSurface>,
     /// Prompt names, sorted by the probe.
     pub prompts: Vec<String>,
     /// One surface per prompt, sorted by name by the
@@ -146,6 +156,32 @@ impl ResourceSurface {
     /// the value the baseline's metadata hash reads.
     /// One construction, shared by generation and
     /// check, so the two sides cannot drift apart.
+    pub fn metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+        })
+    }
+}
+
+/// One resource template as served: its uriTemplate,
+/// the editorial fields a client renders (name,
+/// title, description), and the mimeType reads
+/// through the template produce.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplateSurface {
+    pub uri_template: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub mime_type: String,
+}
+
+impl TemplateSurface {
+    /// The editorial fields as one canonical record,
+    /// the value the baseline's metadata hash reads,
+    /// in the ResourceSurface shape.
     pub fn metadata(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
