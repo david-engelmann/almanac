@@ -1563,15 +1563,15 @@ fn check_live_surface(
     // recorded as JSON null, so a server that stops
     // declaring capabilities fires here rather than
     // passing silently.
-    if let (Some(recorded), Some(live)) = (&mcp.capabilities_sha256, &snapshot.capabilities) {
-        if crate::hash::sha256_json(live) != *recorded {
-            findings.push(finding(
-                Severity::Major,
-                "capabilities-changed",
-                Some(&mcp.entry_id),
-                "the MCP server's declared capabilities changed since generation".into(),
-            ));
-        }
+    if let (Some(recorded), Some(live)) = (&mcp.capabilities_sha256, &snapshot.capabilities)
+        && crate::hash::sha256_json(live) != *recorded
+    {
+        findings.push(finding(
+            Severity::Major,
+            "capabilities-changed",
+            Some(&mcp.entry_id),
+            "the MCP server's declared capabilities changed since generation".into(),
+        ));
     }
 }
 
