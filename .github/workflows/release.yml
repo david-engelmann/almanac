@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the tag names the crate version
+        shell: bash
+        run: |
+          version="$(grep -m1 '^version = ' crates/almanac-cli/Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.ref_name }}" != "v${version}" ]; then
+            echo "tag ${{ github.ref_name }} does not name the crate version ${version}" >&2
+            exit 1
+          fi
+      - name: Install Rust
+        run: rustup toolchain install stable --component clippy --component rustfmt --profile minimal && rustup default stable
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --target ${{ matrix.target }} --profile minimal && rustup default stable
+      - name: Build
+        run: cargo build --release --locked -p almanac-cli --target ${{ matrix.target }}
+      - name: Package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="almanac-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/almanac" "dist/${name}/almanac"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+      - name: Package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "almanac-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/almanac.exe" "dist/$name/almanac.exe"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          for package in *.tar.gz *.zip; do
+            [ -e "${package}" ] && sha256sum "${package}"
+          done > checksums.txt
+          test -s checksums.txt
+          cat checksums.txt
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
