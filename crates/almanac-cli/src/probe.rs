@@ -240,6 +240,7 @@ pub fn tool_surfaces(result: &Value) -> Vec<ToolSurface> {
                         .get("inputSchema")
                         .cloned()
                         .unwrap_or_else(|| json!({})),
+                    output_schema: item.get("outputSchema").cloned(),
                 })
                 .collect()
         })

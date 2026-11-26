@@ -190,6 +190,12 @@ fn enumerated_by_default() -> bool {
 pub struct ToolBaseline {
     pub description_sha256: String,
     pub schema_sha256: String,
+    /// The output schema's hash, where the tool served
+    /// one at generation. Absent is ungated: appearance
+    /// and disappearance of the optional field are
+    /// churn, not drift (the thirty-second slice).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_sha256: Option<String>,
 }
 
 /// One prompt's recorded hashes, the ToolBaseline
@@ -448,6 +454,10 @@ impl McpBaseline {
                     ToolBaseline {
                         description_sha256: crate::hash::sha256_str(&tool.description),
                         schema_sha256: crate::hash::sha256_json(&tool.input_schema),
+                        output_schema_sha256: tool
+                            .output_schema
+                            .as_ref()
+                            .map(crate::hash::sha256_json),
                     },
                 )
             })
@@ -530,6 +540,7 @@ mod tests {
                 name: "ping".into(),
                 description: "Ping the server.".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
             }],
             resources: vec![],
             resource_surfaces: vec![],

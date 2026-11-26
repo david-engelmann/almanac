@@ -5170,6 +5170,23 @@ renamed and discover fixtures already follow.
 
 ## Thirty-second slice: MCP tool output contracts (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, as written, with its
+one question answered with the record's
+recommendation: appearance and disappearance of
+the outputSchema field stay gated silent. The
+capabilities slice settled this reasoning for
+protocol-optional fields, and consistency across
+slices is the kit's coherence: what gates is a
+change in the recorded shape while the field
+stands present on both sides, hashed under the
+same canonicalization as the input side, the
+nineteenth slice's local reference expansion
+included. A server merely adding or dropping an
+optional declaration between releases is churn,
+not drift. Build on the head the thirty-first
+slice lands, through the usual reviews and
+staging.
+
 The tool contract the baseline records is half
 the contract a tool serves. A tools/list item may
 carry an outputSchema beside its inputSchema, the
@@ -5272,3 +5289,116 @@ to the ladder inside the new test would draw the
 fixture's method-not-found on initialize and fail
 both halves, which is what makes the discover pin
 a pin.
+
+## Thirty-third slice: A2A skill contracts (design, 2026-11-26)
+
+The A2A surface has the same half-contract gap
+the thirty-second slice closed for MCP tools. An
+agent card declares its skills, the unit a caller
+chooses by, each with an identifier, a name, a
+description, and tags; the baseline's A2A record
+holds the capabilities object and the extensions
+and nothing of the skills, so a skill removed, a
+skill added, or a skill whose description is
+rewritten between releases moves no finding,
+though each is exactly the change a consumer of
+the card plans around. The twenty-second and
+twenty-third slices hardened the extension
+family on this surface and left the skills
+standing unrecorded beside them.
+
+The design gives the skills the treatment the
+MCP surface gives its own units, in the A2A
+record's own idiom. The snapshot's A2A view gains
+the skills as served, each reduced to its
+identifier with its name, description, and tags;
+the baseline records the identifier set and, per
+skill, one hash over a canonical record of the
+name, description, and tags in served order, the
+resource-contract shape the twenty-fifth slice
+settled for a unit's editorial fields. A skill
+present at generation and absent live, or the
+reverse, is a set change at major under its own
+kind, a2a-skill-set-changed, the resource-set
+precedent; a recorded skill whose contract hash
+moves is a2a-skill-changed at major, since the
+record mixes identity and description and the
+surface offers no cleaner split, the template
+pair's single-hash reasoning. Generation records
+the skills on every path that builds the A2A
+view today, duplicates resolve as the MCP side
+resolves them, last wins in served order, and a
+card serving no skills records an empty set that
+gates as any other, the pair slices' recorded-
+empty rule rather than the optional-field gate,
+because a card's skills array is its declared
+unit list and not an optional decoration on one
+unit.
+
+One question is put to Main. The per-skill hash
+could instead split, description at minor and
+the rest at major, mirroring the tool treatment
+field for field; the design recommends the
+single hash at major, because an A2A skill's
+name and tags are how callers select it, closer
+to a resource's mimeType than to a tool's prose,
+and a selection field's change at minor would
+understate what a caller relying on it loses. If
+Main rules the split, the record carries two
+hashes and the findings split with them.
+
+### As built (2026-11-26)
+
+Built as designed on landed main 527f8564, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the landed
+tree, and the working record differs from the
+landed DECISIONS by exactly the slice's approval
+paragraph inserted at its design head, verified
+by removing it and comparing whole files.
+ToolSurface carries the served outputSchema
+where one stands, read at both construction
+seams, and ToolBaseline records its hash per
+tool under the standing Option idiom; the
+comparison fires tool-output-schema-changed at
+major beside the input finding, only when both
+sides recorded a value. The three reviews ran
+on the file-based route and were read firsthand
+from the written report. Verdicts: spec fidelity
+PASS (0 critical, 0 major, 1 minor), standards
+PASS (0 critical, 0 major, 0 minor, the charged
+clippy-shape scan finding no shapes, the new
+comparison itself a let-chain), red team PASS
+(0 critical, 0 major, 1 minor). Two record
+matters stand corrected or named here, both
+raised by the reviews and verified firsthand.
+The design's sentence about the nineteenth
+slice's local reference expansion does not
+apply to this surface: that expansion lives in
+the OpenAPI reduction, resolving pointers
+against a containing document, an MCP tool
+schema has no containing document in the
+snapshot model, and the input side hashes its
+schema exactly as served, so the output side
+hashes as served under sha256_json, the
+operative reading the spec axis confirmed. And
+the design's remark that the declared snapshot
+paths record none no longer holds for the
+suite's legacy card fixture, which builds its
+tools through the same fixture function the
+live modes use and so records the output hash
+from the card path as well; that is the
+design's own instruction, generation recording
+at every seam, and the card path's comparison
+is the standing input-side treatment, not a
+new one. The red team's minor is closed in the
+fix pass with a core unit test pinning the
+gated directions directly: a recorded output
+schema changed fires the major, and appearance
+against an unrecorded baseline and
+disappearance against a recorded one both stay
+silent. A baseline written before this slice
+carries no output field at all and reads it as
+absent under the serde default, so pre-slice
+publishers see no new findings until they
+regenerate.

@@ -1604,6 +1604,17 @@ fn check_live_primitive_sets(
                         format!("tool {name} input schema changed since generation"),
                     ));
                 }
+                if let (Some(recorded_output), Some(live_output)) =
+                    (&recorded.output_schema_sha256, &tool.output_schema)
+                    && crate::hash::sha256_json(live_output) != *recorded_output
+                {
+                    findings.push(finding(
+                        Severity::Major,
+                        "tool-output-schema-changed",
+                        Some(&mcp.entry_id),
+                        format!("tool {name} output schema changed since generation"),
+                    ));
+                }
                 if crate::hash::sha256_str(&tool.description) != recorded.description_sha256 {
                     findings.push(finding(
                         Severity::Minor,
@@ -1996,6 +2007,7 @@ mod tests {
             name: "ping".into(),
             description: "Ping.".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
         }
     }
 
@@ -2920,6 +2932,35 @@ mod tests {
         assert_eq!(findings[0].kind, "capabilities-changed");
         let unrecorded = baseline_for(&snapshot(vec![ping()]));
         assert!(check(&inputs(&cat, &unrecorded, Some(&with_caps(caps)))).is_empty());
+    }
+
+    #[test]
+    fn tool_output_schema_changes_report_and_presence_stays_ungated() {
+        // The thirty-second slice: a recorded output
+        // schema that changes fires its own major, and
+        // appearance or disappearance of the optional
+        // field fires nothing in either direction.
+        let with_output = |shape: serde_json::Value| {
+            let mut tool = ping();
+            tool.output_schema = Some(shape);
+            snapshot(vec![tool])
+        };
+        let shape =
+            serde_json::json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
+        let base = baseline_for(&with_output(shape.clone()));
+        let cat = catalog();
+        assert!(check(&inputs(&cat, &base, Some(&with_output(shape.clone())))).is_empty());
+        let changed =
+            serde_json::json!({"type": "object", "properties": {"ok": {"type": "string"}}});
+        let findings = check(&inputs(&cat, &base, Some(&with_output(changed))));
+        assert_eq!(findings.len(), 1, "findings were {findings:?}");
+        assert_eq!(findings[0].kind, "tool-output-schema-changed");
+        assert_eq!(findings[0].severity, Severity::Major);
+        // Disappearance against a recorded value.
+        assert!(check(&inputs(&cat, &base, Some(&snapshot(vec![ping()])))).is_empty());
+        // Appearance against an unrecorded baseline.
+        let unrecorded = baseline_for(&snapshot(vec![ping()]));
+        assert!(check(&inputs(&cat, &unrecorded, Some(&with_output(shape)))).is_empty());
     }
 
     #[test]

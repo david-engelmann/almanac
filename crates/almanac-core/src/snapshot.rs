@@ -144,6 +144,11 @@ pub struct ToolSurface {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// The tool's declared output schema, where it
+    /// serves one; the field is optional in the
+    /// protocol, so absence is a value of its own
+    /// (the thirty-second slice).
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// One prompt as served: its name, its description,

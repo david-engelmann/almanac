@@ -226,10 +226,15 @@ fn fixture_tools(mode: &str) -> serde_json::Value {
     } else {
         schema(serde_json::json!({}))
     };
+    let render_output = if mode == "open-output-schema" {
+        serde_json::json!({"type": "object", "properties": {"svg": {"type": "string"}, "warnings": {"type": "array"}}})
+    } else {
+        serde_json::json!({"type": "object", "properties": {"svg": {"type": "string"}}})
+    };
     let mut tools = vec![
         serde_json::json!({"name": "validate_scene", "description": "Validate a scene spec.", "inputSchema": validate_schema}),
         serde_json::json!({"name": "inspect_traces", "description": "Inspect trace data.", "inputSchema": schema(serde_json::json!({}))}),
-        serde_json::json!({"name": render, "description": "Render a scene.", "inputSchema": schema(serde_json::json!({}))}),
+        serde_json::json!({"name": render, "description": "Render a scene.", "inputSchema": schema(serde_json::json!({})), "outputSchema": render_output}),
         serde_json::json!({"name": "session_run", "description": "Run a session.", "inputSchema": schema(serde_json::json!({}))}),
         serde_json::json!({"name": "session_frames", "description": "List session frames.", "inputSchema": schema(serde_json::json!({}))}),
         serde_json::json!({"name": "scene_panel_detail", "description": "Detail one panel.", "inputSchema": schema(serde_json::json!({}))}),
@@ -4241,6 +4246,37 @@ fn stdio_read_past_the_cap_records_no_contents() {
     assert!(
         !baseline_text.contains("contents_sha256"),
         "an oversized read records no contents, baseline was {baseline_text}"
+    );
+}
+
+#[test]
+fn check_detects_a_tool_output_schema_change() {
+    // The thirty-second slice: the output schema is half
+    // the tool contract, and its change is a major of its
+    // own kind. The fixture's render tool serves one in
+    // both postures; only its shape moves.
+    let (url, mode) = start_http_fixture();
+    let site = temp_site("output-schema");
+    let (code, _, stderr) = generate_http(&site, &url);
+    assert_eq!(code, 0, "generate failed with {stderr}");
+    let baseline_text =
+        std::fs::read_to_string(site.join("baseline.json")).expect("baseline written");
+    assert!(
+        baseline_text.contains("output_schema_sha256"),
+        "generation must record the output hash, baseline was {baseline_text}"
+    );
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 0, "clean check must pass, report was {stdout}");
+    *mode.lock().expect("mode") = "open-output-schema".to_string();
+    let (code, stdout, _) = check_http(&site, &url);
+    assert_eq!(code, 1, "an output schema change must fail the check");
+    assert!(
+        stdout.contains("tool-output-schema-changed"),
+        "report was {stdout}"
+    );
+    assert!(
+        stdout.contains("render_scene"),
+        "the finding must name the tool, report was {stdout}"
     );
 }
 

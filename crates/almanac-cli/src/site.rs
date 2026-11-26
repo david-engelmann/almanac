@@ -485,6 +485,7 @@ fn card_fields(card: &serde_json::Value) -> CardFields {
                             .get("inputSchema")
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!({})),
+                        output_schema: item.get("outputSchema").cloned(),
                     })
                     .collect()
             })
