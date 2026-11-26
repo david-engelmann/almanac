@@ -4468,6 +4468,142 @@ fn the_composite_action_carries_the_check_contract() {
 }
 
 #[test]
+fn the_release_workflow_carries_its_contract() {
+    // The thirty-fourth slice: the release workflow is
+    // a shipped artifact whose contract is its text.
+    // It must parse, trigger on version tags, gate
+    // before it builds, build the three named
+    // targets, and attach checksums to the release.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root");
+    let text = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow present");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("the release workflow parses");
+    let jobs = doc.get("jobs").expect("jobs declared");
+    for name in ["gate", "build", "release"] {
+        assert!(jobs.get(name).is_some(), "job {name} declared");
+    }
+    assert!(
+        text.contains("tags: [\"v*\"]"),
+        "the workflow triggers on version tags"
+    );
+    // A job's needs, in either the scalar or the list
+    // spelling the format allows.
+    let needs_of = |job: &serde_yaml::Value| -> Vec<String> {
+        match job.get("needs") {
+            Some(serde_yaml::Value::String(one)) => vec![one.clone()],
+            Some(serde_yaml::Value::Sequence(many)) => many
+                .iter()
+                .filter_map(|n| n.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    assert_eq!(
+        needs_of(jobs.get("build").expect("build job")),
+        ["gate"],
+        "the build waits for the gate"
+    );
+    assert_eq!(
+        needs_of(jobs.get("release").expect("release job")),
+        ["build"],
+        "the release waits for the builds"
+    );
+    // The gate's run commands, read from the parsed
+    // steps: the standing gate's three, and the tag
+    // checked against the crate version before them.
+    let run_commands = |job: &serde_yaml::Value| -> Vec<String> {
+        job.get("steps")
+            .and_then(|s| s.as_sequence())
+            .map(|steps| {
+                steps
+                    .iter()
+                    .filter_map(|step| step.get("run").and_then(|r| r.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let gate_runs = run_commands(jobs.get("gate").expect("gate job"));
+    assert!(
+        gate_runs.iter().any(|r| r.contains("github.ref_name")),
+        "the gate checks the tag against the crate version"
+    );
+    for command in [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test --workspace",
+    ] {
+        assert!(
+            gate_runs.iter().any(|r| r == command),
+            "the gate runs {command}"
+        );
+    }
+    // The matrix is exactly the three named targets.
+    let include = jobs
+        .get("build")
+        .and_then(|b| b.get("strategy"))
+        .and_then(|s| s.get("matrix"))
+        .and_then(|m| m.get("include"))
+        .and_then(|i| i.as_sequence())
+        .expect("matrix include declared");
+    assert_eq!(include.len(), 3, "the matrix is three targets");
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+    ] {
+        assert!(
+            include
+                .iter()
+                .any(|entry| { entry.get("target").and_then(|t| t.as_str()) == Some(target) }),
+            "target {target} in the matrix"
+        );
+    }
+    assert!(
+        text.contains("cargo build --release --locked"),
+        "the builds are release builds from the locked graph"
+    );
+    assert!(
+        text.contains("almanac-${{ github.ref_name }}-${{ matrix.target }}"),
+        "packages are named with the tag and the target"
+    );
+    assert!(
+        text.contains("sha256sum") && text.contains("checksums.txt"),
+        "the release carries checksums"
+    );
+    // The write permission stands on the release job
+    // alone, and the release attaches its files.
+    let release = jobs.get("release").expect("release job");
+    assert_eq!(
+        release
+            .get("permissions")
+            .and_then(|p| p.get("contents"))
+            .and_then(|c| c.as_str()),
+        Some("write"),
+        "the release job can write the release"
+    );
+    assert!(
+        doc.get("permissions").is_none(),
+        "no workflow-wide permission grant"
+    );
+    let release_steps = release
+        .get("steps")
+        .and_then(|s| s.as_sequence())
+        .expect("release steps");
+    assert!(
+        release_steps.iter().any(|step| {
+            step.get("uses")
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| u.contains("action-gh-release"))
+                && step.get("with").and_then(|w| w.get("files")).is_some()
+        }),
+        "the release step attaches the packages"
+    );
+}
+
+#[test]
 fn validate_verifies_a_trust_manifest_signature_with_supplied_keys() {
     // The core suite's ES256 fixture, end to end through
     // the binary: the same JWK, the same signed manifest.

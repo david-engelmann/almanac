@@ -5447,6 +5447,22 @@ regenerate.
 
 ## Thirty-fourth slice: the release workflow (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26, with the record's
+recommendation taken: the three-target matrix
+for the first release, linux x86_64, windows
+x86_64, and macOS arm64. Those are the platforms
+the CLI's users actually run; a wider five adds
+build surface and failure modes before any
+release exists to learn from, and the matrix can
+widen on evidence after the first tag. The
+gate-first ordering stands, no release built
+from an ungated head, and the record's stated
+limit stands as written, shape and ordering
+proven rather than a published release, with
+the first tag owner-side. Build on the head the
+thirty-third slice lands, through the usual
+reviews and staging.
+
 The thirty-third slice built the first of DESIGN
 section 8's three distribution channels in the
 only form currently provable, the composite
@@ -5538,4 +5554,105 @@ inputs. The slice's limit stands as designed:
 the Action's shape and flag mapping are proven
 against the binary's real argument surface, and
 live adoption awaits the crate's publication,
+an owner-side act.
+
+## Thirty-fifth slice: the README adoption section (design, 2026-11-26)
+
+The thirty-third and thirty-fourth slices built
+the distribution artifacts, and nothing in the
+repository tells a publisher they exist. The
+README documents the four commands in depth and
+stops there, verified by reading it whole: no
+installation route, no CI wiring, no mention of
+the Action, so a publisher who finds the
+repository learns what the gate does and not how
+to adopt it. The Action without a written
+adoption path is an artifact awaiting discovery,
+and discovery is the onboarding this product's
+own thesis says generation exists to serve.
+
+The slice adds one section to the README, Use in
+CI, written to the public copy bar the house
+keeps (no em dashes, no colons, no semicolons in
+the prose). It shows the Action wired into a
+workflow in a short YAML block, the four inputs
+named with their defaults, and the check
+command's exit meanings stated plainly, so a
+publisher can copy the block and have the gate
+running. It also names the direct route for
+repositories that do not use the Action, the
+CLI installed and check run as a step, in two
+lines. The copy states only what exists: the
+Action stands in this repository and is
+referenced by its path and a version pin, and
+the section makes no claim about published
+crates or release assets, which remain
+owner-side acts the earlier slices named; when
+publication lands, the section gains its
+installation line by amendment rather than
+anticipating it now. A suite test pins the
+section's load-bearing text: the Action's
+reference with its pin, the four input names,
+and the check command, so a later edit cannot
+quietly unwire the documentation from the
+artifact it describes.
+
+One question is put to Main. The YAML block could
+show the version input floating on the newest
+tag for brevity; the design recommends the
+pinned form everywhere the Action is shown, the
+same ruling the thirty-third slice took for the
+Action itself, since documentation that teaches
+floating teaches the drift the product catches.
+If Main rules otherwise for the README's brevity,
+the block floats and this record's successor
+names the exception.
+
+### As built (2026-11-26)
+
+Built as designed on landed main 6f24dc79, the
+base re-verified before the reviews: every file
+outside the slice is blob-identical to the
+landed tree, and the working record differs
+from the landed DECISIONS by exactly the
+slice's approval paragraph inserted at its
+design head, verified by removing it and
+comparing whole files. The release workflow
+triggers on version tags, gates before it
+builds on the standing gate's own steps, builds
+the three approved targets, and creates the
+release with the packages and checksums
+attached. The three reviews ran on the
+file-based route and were read firsthand from
+the written report. Verdicts: spec fidelity PASS
+(0 critical, 0 major, 0 minor, a clean axis,
+the gate job verified step for step against
+CI's own), standards PASS (0 critical, 0 major,
+2 minor), red team PASS (0 critical, 0 major, 4
+minor). The fix pass closes every minor but
+one posture. The gate now verifies the tag
+against the crate's manifest version before
+anything builds, so a stray v-prefixed tag fails
+closed instead of publishing a mislabeled
+release. The write permission moved from the
+workflow level to the release job alone. The
+checksums step walks the packages present
+rather than globbing both archive kinds, and
+fails if it produced an empty file. The
+contract test was rebuilt structurally: the
+gate's run commands are read from the parsed
+steps and compared exactly, the needs assertions
+accept either spelling the format allows, the
+matrix is pinned at exactly three targets, the
+release step's attachment is pinned, the package
+naming is pinned, and the tag check and the
+permission's placement are pinned with them.
+What stands recorded is the trigger's remaining
+width: any v-prefixed tag that names the crate
+version fires the workflow, which is the
+intended shape, the version check now being
+what separates a release tag from a stray one.
+The slice's limit stands as designed: the
+workflow's shape and ordering are proven, no
+release is published, and the first tag remains
 an owner-side act.
