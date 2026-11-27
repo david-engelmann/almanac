@@ -4565,6 +4565,65 @@ fn the_release_workflow_carries_its_contract() {
         text.contains("cargo build --release --locked"),
         "the builds are release builds from the locked graph"
     );
+    // The smoke run: every leg executes its own
+    // just-built binary with --help after the build
+    // and before any packaging, in the unix and the
+    // windows forms.
+    let build_runs = run_commands(jobs.get("build").expect("build job"));
+    let position = |needle: &str| {
+        build_runs
+            .iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("the build job runs {needle}"))
+    };
+    let built = position("cargo build --release");
+    let smoked_unix = position("release/almanac --help");
+    let smoked_windows = position("release/almanac.exe --help");
+    assert!(
+        built < smoked_unix && smoked_unix < position("tar -czf"),
+        "the unix smoke run stands between the build and the packaging"
+    );
+    assert!(
+        built < smoked_windows && smoked_windows < position("Compress-Archive"),
+        "the windows smoke run stands between the build and the packaging"
+    );
+    // The smoke steps themselves: each is conditioned
+    // on its half of the runner split, names its
+    // shell, and addresses the matrix target's tree.
+    let build_steps = jobs
+        .get("build")
+        .and_then(|b| b.get("steps"))
+        .and_then(|s| s.as_sequence())
+        .expect("build steps");
+    let smoke_steps: Vec<&serde_yaml::Value> = build_steps
+        .iter()
+        .filter(|step| step.get("name").and_then(|n| n.as_str()) == Some("Smoke run"))
+        .collect();
+    assert_eq!(
+        smoke_steps.len(),
+        2,
+        "two smoke steps stand in the build job"
+    );
+    for (condition, shell) in [
+        ("runner.os != 'Windows'", "bash"),
+        ("runner.os == 'Windows'", "pwsh"),
+    ] {
+        let step = smoke_steps
+            .iter()
+            .find(|step| step.get("if").and_then(|c| c.as_str()) == Some(condition))
+            .unwrap_or_else(|| panic!("a smoke step carries the condition {condition}"));
+        assert_eq!(
+            step.get("shell").and_then(|s| s.as_str()),
+            Some(shell),
+            "the {condition} smoke step names its shell"
+        );
+        assert!(
+            step.get("run")
+                .and_then(|r| r.as_str())
+                .is_some_and(|r| r.contains("${{ matrix.target }}")),
+            "the {condition} smoke step runs the matrix target's binary"
+        );
+    }
     assert!(
         text.contains("almanac-${{ github.ref_name }}-${{ matrix.target }}"),
         "packages are named with the tag and the target"

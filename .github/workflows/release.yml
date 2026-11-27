@@ -45,6 +45,14 @@ jobs:
         run: rustup toolchain install stable --target ${{ matrix.target }} --profile minimal && rustup default stable
       - name: Build
         run: cargo build --release --locked -p almanac-cli --target ${{ matrix.target }}
+      - name: Smoke run
+        if: runner.os != 'Windows'
+        shell: bash
+        run: target/${{ matrix.target }}/release/almanac --help
+      - name: Smoke run
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: target/${{ matrix.target }}/release/almanac.exe --help
       - name: Package
         if: runner.os != 'Windows'
         shell: bash
