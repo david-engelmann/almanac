@@ -5889,6 +5889,20 @@ staging.
 
 ## Thirty-seventh slice: the release smoke run (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26 with the --help
+smoke, the record's recommendation taken. The
+release job's distinct risk is an artifact that
+does not execute at all; the gate job already
+runs the full suite against the source on every
+release, so a fixture check in the release job
+would re-prove behavior on the same code while
+still never executing the packaged artifact
+itself. Running the just-built binary on each
+native leg establishes the one fact the pipeline
+has never established, that what ships starts.
+Build on the head the thirty-sixth slice lands,
+through the usual reviews and staging.
+
 The thirty-fourth slice's workflow builds the
 CLI on three runners, packages each binary, and
 releases the packages, and nothing in the
@@ -5984,3 +5998,121 @@ the verdict now turns on who is attesting in
 the one place position used to decide it
 silently, and the sibling posture under
 Amendment D remains expressly unreopened.
+
+## Thirty-eighth slice: the keyless signature silence (design, 2026-11-26)
+
+The thirty-sixth slice closed the plural slot's
+identity exemption in its reporting form, and its
+correction left the sibling posture standing
+expressly unreopened: in a run holding no keys,
+an envelope's signature draws no judgment and no
+note, for third-party and publisher envelopes
+alike. That scoping was deliberate when the
+fifteenth slice set it, keyed-only verdicts in
+check, and this design does not presume to
+reopen it unasked. It brings the question to
+Main with the code's facts stated as the
+thirty-sixth slice's correction established
+them, so the ruling is made on the mechanism as
+it stands.
+
+The facts are these. The envelope pass runs for
+validate and check from one code path. Validate's
+keyed entry point always presents a key set,
+empty or not, and an empty set draws the
+signature layer's own unverified minor per
+envelope, so no validate run is silent about
+unattempted signatures. Check presents no keys
+unless the publisher supplies them, and in that
+form the verification returns at the keyless
+exit having judged shape, subject, identity
+where it binds, and the attestation pins where
+observations exist, and says nothing about the
+signature layer it skipped. The thirty-sixth
+slice named one case inside that silence, the
+plural envelope claiming the publisher's own
+identity. What remains silent is the general
+case: a check report over a catalog carrying
+signed envelopes, in a run that attempted no
+signature, reads identically to a report from a
+run whose signatures all verified, except for
+the absence of signature findings. A reader
+cannot tell from the report which run they are
+looking at.
+
+The design proposes the smallest naming that
+closes that ambiguity, in the standing idiom: in
+a keyless run, an envelope carrying a signature
+draws one minor, kind
+trust-manifest-signature-unattempted, stating
+that the envelope carries a signature this run
+held no keys to verify. One per envelope, at the
+keyless exit, beside the thirty-sixth slice's
+judgment, under the same conditions that exit
+already guards. Nothing about keyed runs
+changes, nothing about the verdicts changes,
+and the finding is a minor, so no default gate
+moves; what changes is that the report states
+which run it was.
+
+The question is put to Main in full awareness of
+the counterweight, which the record states as
+plainly as the proposal: the fifteenth slice
+scoped check's verdicts keyed-only on purpose,
+because check is the per-PR gate and a minor on
+every signed envelope in every unkeyed run is a
+standing noise floor a publisher must suppress
+or learn to ignore, and a finding everyone
+ignores teaches ignoring findings. The design's
+recommendation is to adopt it anyway, on the
+ground the thirty-sixth slice established: this
+product's reports have chosen the named fact
+over the silent pass at every turn, and a
+suppression with a reason and an expiry is the
+drift model's own answer to a finding a given
+publisher does not want. If Main rules the
+scoping stands, this section records the
+question as asked and answered, and the silence
+becomes a decided posture rather than an
+inherited one. Either ruling closes it.
+
+### As built (2026-11-26)
+
+Built as ruled on landed main ac18fd7f, the base
+re-verified before the reviews: every file
+outside the slice is blob-identical to the
+landed tree, and the working record differs from
+the landed DECISIONS by exactly the slice's
+approval paragraph inserted at its design head,
+verified by removing it and comparing whole
+files. The build job now executes each leg's
+just-built binary with --help between the build
+and the packaging, in the unix and windows forms
+the package steps themselves use. The three
+reviews ran on the file-based route and were
+read firsthand from the written report.
+Verdicts: spec fidelity PASS (0 critical, 0
+major, 0 minor, the --help arm verified in the
+CLI's argument handling to print the usage and
+return success), standards PASS (0 critical, 0
+major, 1 minor), red team PASS (0 critical, 0
+major, 2 minor). The red team established the
+step's soundness in full: the binary path is the
+exact path the packaging copies from, the bash
+legs fail on a non-zero exit under the runner's
+shell defaults, the powershell leg fails through
+the runner's error preference and exit-code
+wrapper, --help cannot fail on a healthy binary,
+and the two conditions partition the three legs
+exactly, the macOS leg taking the unix form. The
+fix pass closes every minor: the smoke scalars
+stand unquoted in the build step's own plain
+style, the windows ordering pin anchors on its
+own packaging form rather than the unix one, and
+the contract test now pins the smoke steps
+structurally, both conditions, both shells, and
+the matrix target segment of the path each runs.
+The slice's limit stands as designed: the
+workflow has still never run, and what is proven
+is that when a tag fires it, no leg packages a
+binary it has not first executed.
