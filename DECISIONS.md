@@ -6267,3 +6267,90 @@ whether the envelope claimed the publisher's
 identity or merely carried a signature, and a
 publisher who runs unkeyed by policy suppresses
 each kind once.
+
+## Fortieth slice: the first release, watched (design, 2026-11-26)
+
+APPROVED by Main 2026-11-26 as drafted, the
+charge carrying forward exactly as the design
+states: when the first tag is cut, the seat
+executes the five-step protocol without waiting
+for a further charge and records the as-built
+with the run's identifiers named. The ordering
+note stands as the honest shape of it: a tag
+preceding publication leaves the Action
+resolving while its install step waits on the
+owner-side act, a state to report, not a failure
+to charge.
+
+Drafted under Main's charge of 2026-11-26, the
+thirty-ninth entry accepted and its
+recommendation adopted as the seat's standing
+direction. This slice builds nothing until the
+first version tag is cut. It exists so that when
+the tag lands, the verification is already
+designed and reviewed rather than improvised
+around a live release, and its subject is the
+one run of the release workflow that matters
+most: the first, which converts three slices of
+shape-proof, the workflow, the smoke run, and
+the README's pinned reference, into observed
+fact or into the first real failure the
+distribution work has met.
+
+The slice is a verification protocol, executed
+by this seat against the release the tag
+creates, and recorded as an as-built in this
+record with the run's identifiers named. Its
+steps, in order, each with what it proves and
+what its failure routes to:
+
+First, the run itself, read through the same
+Actions surface this seat uses for PR gates: the
+gate job passes whole on the tagged head, which
+proves the tag names a gated tree and the
+tag-versus-version check held; a failure there
+means the tag was cut on an ungated or
+mismatched head, and the remedy is a corrected
+tag, never a workflow edit made under pressure.
+Second, the build job's three legs, each passing
+with its smoke step green, which proves the
+artifacts that ship are artifacts that executed
+on their own runners; a smoke failure on one leg
+is the thirty-seventh slice earning its place,
+and routes to a fix-forward workflow slice
+before any second tag. Third, the release's
+assets as published: exactly the three packages
+the matrix names, almanac-<tag>-<target> in the
+tar and zip forms the packaging writes, plus
+checksums.txt, whose entries recompute against
+the downloaded packages byte for byte; a missing
+or mismatched asset is a release defect, and the
+record states it rather than repairing the
+release by hand. Fourth, one downloaded artifact
+executed outside the workflow entirely: the
+linux package unpacked in a clean directory, its
+binary run with --help, which proves the shipped
+bytes run somewhere that is not a runner. Fifth,
+the references the release makes true: the
+README's pinned Action reference at the tag now
+resolves to a real ref, and the Action's install
+step names a crate version that the publication,
+when it lands, must match; the design records
+the ordering honestly, that the tag can precede
+the crates.io publication, and that in that
+ordering the Action resolves while its install
+step waits on the owner-side act, a state the
+verification reports as such rather than as a
+failure of the release.
+
+What the slice is not: it does not cut the tag,
+publish the crate, or edit the workflow; those
+remain owner-side acts and ordinary slices
+respectively. Its deliverable is the as-built
+record of the first run, step by step with the
+evidence named, plus any fix-forward slice the
+evidence charges. Until the tag exists this
+section stands as the design under review; when
+the tag is cut, the seat executes it without
+waiting for a further charge, the charge being
+this design's approval.
