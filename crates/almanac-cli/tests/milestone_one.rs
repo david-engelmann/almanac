@@ -4855,11 +4855,20 @@ fn check_judges_trust_manifests_and_remembers_a_removal() {
     std::fs::write(&ard_path, &bytes).expect("ard.json written");
     std::fs::write(&legacy_path, &bytes).expect("legacy written");
 
-    // No keys: the envelope is sound and no signature
-    // claim is made in either direction.
+    // No keys: the envelope is sound, no signature
+    // verdict is made in either direction, and the
+    // report names the attempt the run did not make.
     let (code, stdout, stderr) = check_stdio(&site, &fixture);
     assert_eq!(code, 0, "check failed: {stdout} {stderr}");
-    assert!(!stdout.contains("trust-manifest"), "report was {stdout}");
+    assert!(
+        stdout.contains("trust-manifest-signature-unattempted"),
+        "report was {stdout}"
+    );
+    assert!(
+        !stdout.contains("trust-manifest-signature-invalid")
+            && !stdout.contains("trust-manifest-signature-unverified"),
+        "report was {stdout}"
+    );
 
     // Keys named: the signature layer engages and the
     // junk signature is invalid.

@@ -149,9 +149,11 @@ pub struct CheckInputs<'a> {
     /// manifest expiry claims that read in seconds.
     pub now_unix: i64,
     /// The trust verification keys the run holds, when
-    /// it holds any. None makes no signature claim in
-    /// the trust pass, the scoping the check integration
-    /// design records; Some, even empty, engages the
+    /// it holds any. None makes no signature verdict in
+    /// the trust pass and names the signatures it did
+    /// not attempt, the scoping the check integration
+    /// design records as the thirty-eighth slice
+    /// amended it; Some, even empty, engages the
     /// signature layer and reports what it cannot judge.
     pub trust_keys: Option<&'a [crate::trust::TrustKey]>,
     /// The run's attestation observations, when it

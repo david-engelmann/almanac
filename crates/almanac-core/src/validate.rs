@@ -233,8 +233,10 @@ pub fn validate_catalog_with_keys(
 /// singular manifest's expiry included, since check
 /// runs no plain validation pass to have judged it.
 /// `keys` is the run's key set when it holds one;
-/// without one the signature layer makes no claim,
-/// the scoping the check integration design records.
+/// without one the signature layer makes no verdict
+/// and names the signatures it did not attempt, the
+/// scoping the check integration design records as
+/// the thirty-eighth slice amended it.
 /// `pins` is the run's attestation observations when
 /// it engaged the pin layer; without them the pin
 /// layer likewise makes no claim.
@@ -395,11 +397,14 @@ fn identity_binds(identity: &str, domain: &str) -> bool {
 /// (judge_attestations), then the signature: invalid
 /// is critical, and a signature this run cannot
 /// attempt is a minor naming why, never a silent pass.
-/// A keyless run makes one further judgment at that
+/// A keyless run makes two further judgments at that
 /// exit: a plural envelope claiming the publisher's
 /// own identity draws a minor naming that its
 /// authorship went unverified in the run, the
-/// thirty-sixth slice's reporting closure.
+/// thirty-sixth slice's reporting closure, and every
+/// signed envelope draws a minor naming that its
+/// signature went unattempted, the thirty-eighth
+/// slice's.
 #[allow(clippy::too_many_arguments)]
 fn verify_envelope(
     manifest: &serde_json::Value,
@@ -531,8 +536,9 @@ fn verify_envelope(
     };
     // The verdict runs only in a run that holds keys.
     // A run without them judges the envelope's shape
-    // and bindings and makes no signature claim at all,
-    // the check gate's scoping in the design record.
+    // and bindings, makes no signature verdict, and
+    // names below what it did not attempt, the check
+    // gate's scoping in the design record.
     let Some(keys) = keys else {
         // One judgment the keyless run still makes: a
         // plural envelope whose identity binds to the
@@ -559,6 +565,20 @@ fn verify_envelope(
                 ),
             ));
         }
+        // And the general case the thirty-eighth
+        // slice names: this envelope carries a
+        // signature (the shape layer above has
+        // established it), and a keyless run attempts
+        // none of them, so the report says the layer
+        // went unexamined rather than reading as if
+        // every signature had verified.
+        findings.push(finding(
+            Severity::Minor,
+            "trust-manifest-signature-unattempted",
+            Some(id),
+            "the trust manifest carries a signature, and this run holds no keys to verify it"
+                .into(),
+        ));
         return;
     };
     let mut unsigned = manifest.clone();
@@ -1118,15 +1138,24 @@ mod tests {
     fn check_envelope_findings_judge_bindings_without_keys_and_verdicts_with() {
         // The check gate's scoping: without keys the
         // envelope layers judge shape, bindings and
-        // expiry and make no signature claim; with keys
-        // the verdict joins, and the fixture's signature
-        // is valid, so a keyed run is clean.
+        // expiry and make no signature verdict, naming
+        // the attempt the run did not make (the
+        // thirty-eighth slice); with keys the verdict
+        // joins, and the fixture's signature is valid,
+        // so a keyed run is clean.
         let catalog = catalog_with(signed_entry());
         let unkeyed = envelope_findings(&catalog, "2026-11-25", NOW, None, None);
         assert!(
+            unkeyed.iter().all(|f| {
+                f.kind != "trust-manifest-signature-invalid"
+                    && f.kind != "trust-manifest-signature-unverified"
+            }),
+            "{unkeyed:?}"
+        );
+        assert!(
             unkeyed
                 .iter()
-                .all(|f| !f.kind.starts_with("trust-manifest-signature")),
+                .any(|f| f.kind == "trust-manifest-signature-unattempted"),
             "{unkeyed:?}"
         );
         let keyed = envelope_findings(&catalog, "2026-11-25", NOW, Some(&fixture_keys()), None);
@@ -1271,6 +1300,59 @@ mod tests {
             None,
         );
         assert!(findings.is_empty(), "findings were {findings:?}");
+    }
+
+    #[test]
+    fn a_keyless_run_names_the_signature_it_did_not_attempt() {
+        // The thirty-eighth slice: an envelope carrying
+        // a signature, in a run holding no keys, draws
+        // the signature-unattempted minor, in either
+        // slot; a keyed run draws none.
+        let findings =
+            envelope_findings(&catalog_with(signed_entry()), "2026-11-21", NOW, None, None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-signature-unattempted"
+                    && f.severity == Severity::Minor),
+            "findings were {findings:?}"
+        );
+
+        let mut foreign = entry();
+        foreign.trust_manifests = vec![serde_json::json!({
+            "identity": "did:web:auditor.example.org",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "signature": FIXTURE_SIGNATURE,
+        })];
+        let findings = envelope_findings(&catalog_with(foreign), "2026-11-21", NOW, None, None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-signature-unattempted"),
+            "findings were {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unverified"),
+            "findings were {findings:?}"
+        );
+
+        // A keyed run attempts the signature and draws
+        // neither keyless minor; the fixture verifies,
+        // so the run is clean.
+        let keyed = envelope_findings(
+            &catalog_with(signed_entry()),
+            "2026-11-21",
+            NOW,
+            Some(&fixture_keys()),
+            None,
+        );
+        assert!(keyed.is_empty(), "findings were {keyed:?}");
     }
 
     #[test]
