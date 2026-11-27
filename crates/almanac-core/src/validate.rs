@@ -395,6 +395,11 @@ fn identity_binds(identity: &str, domain: &str) -> bool {
 /// (judge_attestations), then the signature: invalid
 /// is critical, and a signature this run cannot
 /// attempt is a minor naming why, never a silent pass.
+/// A keyless run makes one further judgment at that
+/// exit: a plural envelope claiming the publisher's
+/// own identity draws a minor naming that its
+/// authorship went unverified in the run, the
+/// thirty-sixth slice's reporting closure.
 #[allow(clippy::too_many_arguments)]
 fn verify_envelope(
     manifest: &serde_json::Value,
@@ -529,6 +534,31 @@ fn verify_envelope(
     // and bindings and makes no signature claim at all,
     // the check gate's scoping in the design record.
     let Some(keys) = keys else {
+        // One judgment the keyless run still makes: a
+        // plural envelope whose identity binds to the
+        // publisher presents itself as the publisher's
+        // own attestation, and with no keys its
+        // authorship rests on nothing this run
+        // examined. The run names that as a minor
+        // rather than passing it in silence, the
+        // thirty-sixth slice's reporting closure; a
+        // foreign identity is a third-party claim,
+        // which is what it appears to be, and the
+        // singular envelope's identity binding is
+        // judged in every run above.
+        if third_party
+            && let Some(identity) = identity
+            && identity_binds(identity, publisher)
+        {
+            findings.push(finding(
+                Severity::Minor,
+                "trust-manifest-identity-unverified",
+                Some(id),
+                format!(
+                    "an attestation in the plural slot claims the publisher identity {identity}, and this run holds no keys to verify its authorship"
+                ),
+            ));
+        }
         return;
     };
     let mut unsigned = manifest.clone();
@@ -1161,6 +1191,86 @@ mod tests {
                 .any(|f| f.kind == "trust-manifest-identity-unbound"),
             "findings were {findings:?}"
         );
+    }
+
+    #[test]
+    fn a_publisher_claim_in_the_plural_slot_is_named_when_unkeyed() {
+        // The thirty-sixth slice's reporting closure:
+        // a plural envelope whose identity binds to the
+        // publisher, in a run holding no keys, draws the
+        // identity-unverified minor; keyed, foreign, and
+        // singular cases draw none.
+        let mut claimed = entry();
+        claimed.trust_manifests = vec![serde_json::json!({
+            "identity": "did:web:example.com",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "signature": FIXTURE_SIGNATURE,
+        })];
+        let findings = envelope_findings(&catalog_with(claimed), "2026-11-21", NOW, None, None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unverified"
+                    && f.severity == Severity::Minor),
+            "findings were {findings:?}"
+        );
+
+        // The same envelope as the singular manifest is
+        // the publisher's own slot; its identity binding
+        // is judged in every run and the closure does
+        // not speak for it.
+        let findings =
+            envelope_findings(&catalog_with(signed_entry()), "2026-11-21", NOW, None, None);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unverified"),
+            "findings were {findings:?}"
+        );
+
+        // A foreign identity in the plural slot is a
+        // third-party attestation and draws nothing.
+        let mut foreign = entry();
+        foreign.trust_manifests = vec![serde_json::json!({
+            "identity": "did:web:auditor.example.org",
+            "subject": {
+                "identifier": "urn:air:example.com:mcp:demo",
+                "type": "application/mcp-server-card+json",
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            },
+            "signature": FIXTURE_SIGNATURE,
+        })];
+        let findings = envelope_findings(&catalog_with(foreign), "2026-11-21", NOW, None, None);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "trust-manifest-identity-unverified"),
+            "findings were {findings:?}"
+        );
+
+        // In a keyed run the signature layer speaks for
+        // the envelope's authorship, and the closure is
+        // silent: the exact signed manifest standing in
+        // the plural slot verifies under its key.
+        let mut keyed = entry();
+        keyed.trust_manifests = vec![
+            signed_entry()
+                .trust_manifest
+                .expect("the signed fixture carries its manifest"),
+        ];
+        let findings = validate_catalog_with_keys(
+            &catalog_with(keyed),
+            None,
+            "2026-11-21",
+            NOW,
+            &fixture_keys(),
+            None,
+        );
+        assert!(findings.is_empty(), "findings were {findings:?}");
     }
 
     #[test]

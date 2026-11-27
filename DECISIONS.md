@@ -5673,6 +5673,19 @@ an owner-side act.
 
 ## Thirty-sixth slice: the plural slot's identity exemption (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26 as designed: close
+the exemption by identity rather than position.
+A binding that relocation defeats is a binding
+in name only, and the check's verdict should
+turn on who is attesting, not on which array the
+envelope stands in. Genuine third-party
+envelopes keep today's judgment, and the
+sibling posture under Amendment D stays
+expressly unreopened, which keeps the change at
+its stated bound. Build on the head the
+thirty-fifth slice lands, through the usual
+reviews and staging.
+
 The fifteenth slice's record keeps a posture in
 the open, stated there in full: the trust
 draft's model treats an envelope standing in the
@@ -5800,3 +5813,174 @@ documents artifacts that exist, claims no
 publication that has not happened, and gains
 its installation line by amendment when
 publication lands.
+
+### Correction before build (2026-11-26)
+
+This seat opened the verification code firsthand
+before building, as the thirty-third slice's
+lesson requires, and the design's premise does
+not survive the reading in two particulars,
+with a third that decides the build. First, the
+exemption is one gate, not two: the subject
+binding the sixteenth and eighteenth slices
+built runs over plural envelopes today, and the
+only judgment position gates is the identity
+binding, skipped for a plural envelope at the
+verification pass's third-party flag. The
+design's phrase "statement subject and identity
+alike" overstates the gap by the subject's whole
+layer. Second, the design's signing-key limb has
+no substrate: the run's key type carries an
+optional key identifier and a point, no identity,
+so no key can match a publisher identity as the
+design supposes. Third, and deciding: the
+identity binding's only finding fires when an
+identity does not bind to the publisher domain,
+while the design's trigger is an identity that
+matches the publisher, which is the set on which
+that check passes. The two sets are disjoint,
+so the closure as designed changes no verdict on
+any input, and its tests could only assert
+absences identical before and after, which the
+house's test discipline forbids in spirit. The
+seat does not build a vacuous closure under an
+approval given for a real one. The correction,
+the evidence, and the teeth-bearing variants are
+reported to Main; the design stands withdrawn
+pending Main's ruling on what, if anything,
+replaces it, and the fifteenth record's posture
+stands meanwhile, now examined at the code and
+bounded to the one gate it actually is.
+
+### Replacement design as ruled (2026-11-26)
+
+Main withdrew the approval of the closure as
+designed, with its premise, and ruled variant
+(2), the reporting closure, as a new design on
+the corrected premise. A plural envelope whose
+declared identity binds to the entry's publisher
+domain is presented as the publisher's own
+attestation, whatever array it stands in. Where
+the run holds keys, the signature layer speaks
+for its authorship, valid, invalid, or
+unverified, and nothing further is owed. Where
+the run holds no keys at all, that authorship
+rests on nothing the run examined, and today the
+run passes it in silence, the one silent pass
+the corrected examination found. The closure
+names it in the codebase's own idiom, the idiom
+of the signature layer itself, where a judgment
+a run cannot make is a minor naming why and
+never a silent pass: such an envelope draws a
+minor finding, kind
+trust-manifest-identity-unverified, stating that
+the envelope claims the publisher identity and
+the run holds no keys to verify its authorship.
+The scope is the exemption's exact footprint: a
+foreign-identity envelope in the plural array
+draws nothing, being a third-party attestation
+whose claim is what it appears to be; the
+singular envelope draws nothing, its identity
+binding being judged in every run; and a keyed
+run draws nothing, its signature layer having
+spoken. Build on the head the thirty-fifth
+slice lands, through the usual reviews and
+staging.
+
+## Thirty-seventh slice: the release smoke run (design, 2026-11-26)
+
+The thirty-fourth slice's workflow builds the
+CLI on three runners, packages each binary, and
+releases the packages, and nothing in the
+pipeline ever executes what it built. A binary
+that cannot start, built from a graph whose
+tests all passed on the gate's own runner,
+would be packaged and released without a single
+run, and the first execution would be a
+publisher's. The gate proves the source; the
+release owes proof of the artifact.
+
+The slice adds one step to the workflow's build
+job, between the build and the packaging: the
+job runs the binary it just built with --help,
+which prints the usage text and exits 0, and
+the leg fails if the binary does not execute.
+Every leg can run it, because each matrix target
+is native to its runner, linux x86_64 on the
+Ubuntu runner, windows x86_64 on the Windows
+runner, and macOS arm64 on the macOS runner, so
+no leg packages an unexecuted binary and no
+cross-execution machinery is introduced. The
+windows leg invokes the .exe form. The contract
+test grows with the workflow, as it did at its
+own slice: the smoke step's presence is pinned
+on the build job, after the build step and
+before the packaging steps, in both its unix and
+windows forms. The record states the slice's
+limit as its predecessors did: the workflow has
+still never run, no tag existing to fire it, so
+what is proven is the step's shape and ordering
+against the binary's real --help behavior,
+verified in the CLI's argument handling, where
+--help prints the usage and returns success.
+
+One question is put to Main. The smoke run could
+go further and run a full check against a
+fixture site in the release job; the design
+recommends the --help form, because the gate
+already runs the whole suite against the source,
+and the release's distinct risk is an artifact
+that does not execute at all, which --help
+settles at the cost of one step. If Main rules
+the deeper smoke, the step grows a fixture run
+and this record's successor names it.
+
+### As built (2026-11-26)
+
+Built as ruled on landed main bec6d8e0, the base
+re-verified before the reviews: every file
+outside the slice is blob-identical to the
+landed tree, and the working record differs
+from the landed DECISIONS by exactly the
+slice's approval paragraph at the withdrawn
+design's head plus the correction and
+replacement sections the ruling produced. The
+closure stands at the envelope verification's
+keyless exit, scoped to the exemption's exact
+footprint. The three reviews ran on the
+file-based route and were read firsthand from
+the written report. Verdicts: spec fidelity PASS
+(0 critical, 0 major, 2 minor), standards PASS
+(0 critical, 0 major, 2 minor), red team PASS
+(0 critical, 0 major, 1 minor), and no existing
+test's expected findings change under the new
+kind, verified by the red team's sweep of both
+suites. The fix pass closes the two repairable
+minors: the envelope function's own doc comment
+now enumerates the closure among its layers, and
+the unit test's keyed case asserts the run is
+empty outright, pinning the fixture's
+verification rather than only the new kind's
+absence. The remaining minors stand recorded as
+the closure's honest bounds. The minor fires on
+the signed path, an unsigned envelope claiming
+the publisher identity having already drawn the
+shape major for its missing signature, so no
+silence results, but the design's sentence
+stands unqualified in the record and the bound
+is named here rather than edited there. The
+firing boundary is the pass receiving no keys,
+the check form; validate's keyed entry point
+names the same gap through the signature layer's
+own unverified kind when its set is empty. And
+two distinct plural envelopes claiming one
+binding identity under one entry produce two
+findings with identical text, the detail naming
+the identity and not an envelope fingerprint
+this layer does not compute; they sort
+adjacently and both stand, as duplicate claims
+should. The slice's outcome stands as ruled:
+the verdict now turns on who is attesting in
+the one place position used to decide it
+silently, and the sibling posture under
+Amendment D remains expressly unreopened.
