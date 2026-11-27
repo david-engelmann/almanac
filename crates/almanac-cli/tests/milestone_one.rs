@@ -4629,9 +4629,14 @@ fn the_readme_carries_the_adoption_contract() {
         section.contains("david-engelmann/almanac@v0.1.0"),
         "the Action is referenced in its pinned form"
     );
+    // The prose pins read on whitespace-normalized
+    // text, so a rewrap cannot split a pinned phrase
+    // across a line break and fail the contract for
+    // a formatting reason.
+    let prose = section.replace('\n', " ");
     for input in ["site", "fail-at", "target", "version"] {
         assert!(
-            section.contains(&format!("The {input} input")),
+            prose.contains(&format!("The {input} input")),
             "the {input} input is named in the section"
         );
     }
@@ -4643,10 +4648,8 @@ fn the_readme_carries_the_adoption_contract() {
         section.contains("cargo install --path crates/almanac-cli --locked"),
         "the direct route builds the CLI from this source"
     );
-    // The stated defaults and the exit meanings, read
-    // on whitespace-normalized prose so the pins do
-    // not depend on the wrap.
-    let prose = section.replace('\n', " ");
+    // The stated defaults and the exit meanings, on
+    // the same normalized prose.
     for stated in [
         "defaults to the repository root",
         "defaults to major",
