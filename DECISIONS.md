@@ -6001,6 +6001,23 @@ Amendment D remains expressly unreopened.
 
 ## Thirty-eighth slice: the keyless signature silence (design, 2026-11-26)
 
+APPROVED by Main 2026-11-26 as designed: adopt
+the signature-unattempted minor. It is the
+thirty-sixth slice's ground applied to the
+sibling silence; a report that reads identically
+whether the signature layer verified or was
+never attempted misleads by omission, which is
+the defect class this product exists to catch in
+other people's artifacts. The counterweight is
+answered in the drift model's own terms: a
+publisher who runs unkeyed by policy suppresses
+the kind once, rather than being misled on every
+run. Naming the skip changes no verdict; it
+changes only whether the reader knows a layer
+went unexamined. Build on the head the
+thirty-seventh slice lands, through the usual
+reviews and staging.
+
 The thirty-sixth slice closed the plural slot's
 identity exemption in its reporting form, and its
 correction left the sibling posture standing
@@ -6116,3 +6133,137 @@ The slice's limit stands as designed: the
 workflow has still never run, and what is proven
 is that when a tag fires it, no leg packages a
 binary it has not first executed.
+
+## Thirty-ninth slice: what remains (design, 2026-11-26)
+
+Thirty-eight slices in, the record should say
+plainly what kind of work is left, because the
+shape of the remaining programme has changed and
+pretending otherwise would mislead the next
+design. The buildable surface this seat can
+verify from the code is now thin. DESIGN section
+8's three distribution channels stand built, the
+Action, the release workflow with its gate,
+smoke run, and checksums, and the README's
+adoption section over them. The drift model has
+been extended class by class until the
+thirty-sixth and thirty-eighth slices were
+closing silences inside the trust layer rather
+than adding coverage, and the last two designs
+this seat originated both began as questions
+about recorded postures, one of which withdrew
+on a false premise before its replacement
+landed. That is the signature of a surface
+approaching its designed extent, not of one
+with obvious slices queued.
+
+What genuinely remains divides into three kinds,
+and this section names them so Main can direct
+the seat at the highest kind rather than the
+nearest. First, the owner-side acts no slice can
+build: publication to crates.io, which needs
+David's token through secure entry, and the
+first version tag, which fires the release
+workflow for the first time and converts three
+slices of shape-proof into a run. Until those
+land, the distribution work is proven the way a
+bridge is proven before the first crossing, by
+inspection of every member, and the first tag's
+run deserves a slice of its own in the form of a
+watched, verified first release. Second, the
+parked reference work: the dusk.fm reference
+catalog stands parked for David, and with it the
+kit's first end-to-end exercise against its
+first customer's real surface, whose endpoint,
+tools, and protocol version are deliberately not
+on record and will be learned at first probe.
+Third, the decided postures that could reopen
+only on new evidence: Amendment D's signing and
+key management deferral, the trust draft's own
+evolution, the A2A 1.1 watch item, and the
+recorded residuals in the as-builts, each named
+where it stands.
+
+The recommendation this design carries is that
+the seat's next charge be Main's choice among
+those kinds, stated as plainly as the choice
+itself: hold the seat at readiness for the first
+tag and the publication, with the first-release
+verification slice designed and waiting; direct
+the seat at a fresh surface Main names, as the
+fleet's other seats have taken new charges at
+programme boundaries; or rule that the
+perfection programme's remaining increment is
+the periodic kind, the quarterly agent
+environment audit the house keeps for its
+flagship repos, applied to this one. What the
+seat recommends against is manufacturing further
+drift classes to keep the counter moving: the
+model's completeness is now a property to
+protect, and a class added without a publisher's
+real break behind it dilutes the findings every
+other publisher reads. The counter this seat
+reports is thirty-eight slices landed or
+staged, each closing something the record named;
+the thirty-ninth is the record naming what is
+left, so the fortieth, whatever Main rules it to
+be, starts from an honest map.
+
+### As built (2026-11-26)
+
+Built as ruled on landed main dc795f17, the base
+re-verified before the reviews: every file
+outside the slice is blob-identical to the
+landed tree, and the working record differs from
+the landed DECISIONS by exactly the slice's
+approval paragraph inserted at its design head,
+verified by removing it and comparing whole
+files. The keyless exit of the envelope
+verification now pushes the
+signature-unattempted minor after the
+thirty-sixth slice's judgment, at the one point
+the code guarantees its premise: the pass reaches
+that exit only after the shape layer has
+established the envelope carries a string
+signature, the missing and non-string cases
+having returned on their shape majors above. A
+unit test pins the firing cases, the singular
+signed fixture, a foreign plural envelope drawing
+this minor and not the identity one, and a keyed
+run over the verifying fixture drawing neither.
+The three reviews ran on the file-based route
+and were read firsthand from the written report.
+Verdicts: spec fidelity PASS (0 critical, 0
+major, 0 minor), standards PASS (0 critical, 0
+major, 2 minor), red team FAIL (0 critical, 1
+major, 1 minor), the fail being the sweep's
+finding and the reason the sweep was briefed
+first. The major: two existing tests, one in
+each suite, asserted the keyless silence this
+slice was approved to end, the core scoping test
+asserting no kind under the signature prefix in
+an unkeyed run, and the fifteenth slice's
+end-to-end asserting a keyless check report
+carries no trust finding at all. Both are
+restated to the new scoping in the fix pass, no
+signature verdict in a keyless run, with the
+unattempted minor named, and the rest of the
+sweep cleared every other keyless assertion in
+both suites by name. The fix pass also restated
+the three neighbouring doc comments that still
+carried the old scoping's wording, and gave the
+new test the keyed case its header promises. The
+red team's minor is inherited and recorded:
+distinct signed envelopes on one entry produce
+findings identical in kind, entry, and detail,
+the same posture the thirty-sixth slice's
+as-built recorded for its sibling kind; the
+detail names what the run knows, and an envelope
+fingerprint is a layer this pass does not
+compute. With this slice the trust layer's
+keyless reporting is closed in both its cases:
+a run that attempted no signature now says so,
+whether the envelope claimed the publisher's
+identity or merely carried a signature, and a
+publisher who runs unkeyed by policy suppresses
+each kind once.
