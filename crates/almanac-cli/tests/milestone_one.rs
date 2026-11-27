@@ -4604,6 +4604,64 @@ fn the_release_workflow_carries_its_contract() {
 }
 
 #[test]
+fn the_readme_carries_the_adoption_contract() {
+    // The thirty-fifth slice: the README's Use in CI
+    // section documents the Action, and its
+    // load-bearing text is pinned so a later edit
+    // cannot quietly unwire the documentation from
+    // the artifact it describes. The Action is shown
+    // in its pinned form, its four inputs are named,
+    // and the check command appears in the direct
+    // route.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root");
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README present");
+    let section = readme
+        .split("## Use in CI")
+        .nth(1)
+        .expect("the Use in CI section stands in the README")
+        .split("\n## ")
+        .next()
+        .expect("the section is bounded by the next heading");
+    assert!(
+        section.contains("david-engelmann/almanac@v0.1.0"),
+        "the Action is referenced in its pinned form"
+    );
+    // The prose pins read on whitespace-normalized
+    // text, so a rewrap cannot split a pinned phrase
+    // across a line break and fail the contract for
+    // a formatting reason.
+    let prose = section.replace('\n', " ");
+    for input in ["site", "fail-at", "target", "version"] {
+        assert!(
+            prose.contains(&format!("The {input} input")),
+            "the {input} input is named in the section"
+        );
+    }
+    assert!(
+        section.contains("almanac check --site . --fail-at major"),
+        "the direct route runs the check command"
+    );
+    assert!(
+        section.contains("cargo install --path crates/almanac-cli --locked"),
+        "the direct route builds the CLI from this source"
+    );
+    // The stated defaults and the exit meanings, on
+    // the same normalized prose.
+    for stated in [
+        "defaults to the repository root",
+        "defaults to major",
+        "defaults to 0.1.0",
+        "could not run",
+        "resolves its endpoint from the catalog itself",
+    ] {
+        assert!(prose.contains(stated), "the section states {stated}");
+    }
+}
+
+#[test]
 fn validate_verifies_a_trust_manifest_signature_with_supplied_keys() {
     // The core suite's ES256 fixture, end to end through
     // the binary: the same JWK, the same signed manifest.
